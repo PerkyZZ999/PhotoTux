@@ -6,7 +6,7 @@ use file_io::{export_surface_as_png, load_single_surface_document, save_single_s
 use history_engine::{HistoryStack, PixelChange, StrokeHistoryEntry};
 use render_wgpu::{ViewportSize, ViewportState};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -24,7 +24,7 @@ const SAVE_FILE_NAME: &str = "session.ptx";
 const EXPORT_FILE_NAME: &str = "visible.png";
 const DEFAULT_FOREGROUND_COLOR: [u8; 4] = [79, 140, 255, 255];
 const DEFAULT_BACKGROUND_COLOR: [u8; 4] = [0x10, 0x12, 0x16, 0xFF];
-const INTERACTIVE_PREVIEW_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const INTERACTIVE_PREVIEW_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Errors raised while running the app session.
 #[derive(Debug, Error)]
@@ -61,8 +61,7 @@ struct PreviewCache {
     scale_factor: f32,
     zoom: f32,
     pan: Vector,
-    pixels: Vec<u8>,
-    image: slint::Image,
+    pixel_buffer: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,7 +99,7 @@ enum CanvasInteraction {
 #[derive(Debug, Default)]
 struct LiveStroke {
     collector: StrokeCollector,
-    changes_by_pixel: BTreeMap<(u32, u32), PixelChange>,
+    changes_by_pixel: HashMap<(u32, u32), PixelChange>,
     dab_count: usize,
 }
 
@@ -473,7 +472,6 @@ impl AppSession {
                 max_x,
                 max_y,
             );
-            cache.image = preview_cache_to_image(&cache.pixels, cache.width, cache.height);
         }
     }
 
@@ -486,11 +484,34 @@ impl AppSession {
             *preview_cache = Some(build_preview_cache(&self.surface, &self.viewport));
         }
 
-        preview_cache
-            .as_ref()
-            .expect("preview cache should exist")
-            .image
-            .clone()
+        slint::Image::from_rgba8(
+            preview_cache
+                .as_ref()
+                .expect("preview cache should exist")
+                .pixel_buffer
+                .clone(),
+        )
+    }
+
+    fn interactive_drag_shell_state(
+        &self,
+        current_state: &UiShellState,
+        status_message: String,
+        cursor_x: u32,
+        cursor_y: u32,
+        preview_published: bool,
+    ) -> UiShellState {
+        if preview_published {
+            return self.shell_state(status_message);
+        }
+
+        UiShellState {
+            document_dirty: self.document_dirty,
+            status_message,
+            cursor_position_label: format!("Cursor {}, {}", cursor_x, cursor_y),
+            canvas_preview: current_state.canvas_preview.clone(),
+            ..current_state.clone()
+        }
     }
 
     fn shell_state(&self, status_message: String) -> UiShellState {
@@ -1031,31 +1052,53 @@ impl AppSession {
         }
     }
 
-    fn canvas_dragged(
+
+
+    fn canvas_dragged_batch(
         &mut self,
-        normalized_x: f32,
-        normalized_y: f32,
+        points: &[(f32, f32)],
         current_state: &UiShellState,
     ) -> UiShellState {
+        if points.is_empty() {
+            return current_state.clone();
+        }
         let drag_started_at = Instant::now();
-        let (x, y, point) = self.canvas_point(normalized_x, normalized_y);
-        let active_stroke_tool = self.active_stroke_tool();
-        let current_screen = self.preview_screen_point(normalized_x, normalized_y);
+
+        let mapped_points: Vec<_> = points
+            .iter()
+            .map(|&(nx, ny)| {
+                let (cx, cy, pt) = self.canvas_point(nx, ny);
+                let current_screen = self.preview_screen_point(nx, ny);
+                (nx, ny, cx, cy, pt, current_screen)
+            })
+            .collect();
+
+        let (_, _, last_cx, last_cy, _, _) = *mapped_points.last().unwrap();
+
         let mut preview_changes: Option<Vec<PixelChange>> = None;
         let mut stroke_apply_metrics: Option<(f64, usize, usize)> = None;
+        let active_stroke_tool = self.active_stroke_tool();
 
-        let state = match self.canvas_interaction.as_mut() {
+        let status_message = match self.canvas_interaction.as_mut() {
             Some(CanvasInteraction::Stroke(live_stroke)) => {
                 let previous_sample = live_stroke.collector.samples().last().copied();
-                let current_sample = StrokeSample::new(point);
-                live_stroke.collector.push_sample(current_sample);
+                let mut stroke_samples = Vec::with_capacity(mapped_points.len() + 1);
+                if let Some(prev) = previous_sample {
+                    stroke_samples.push(prev);
+                }
 
-                if let Some(previous_sample) = previous_sample {
+                for &(_, _, _, _, pt, _) in &mapped_points {
+                    let sample = StrokeSample::new(pt);
+                    stroke_samples.push(sample);
+                    live_stroke.collector.push_sample(sample);
+                }
+
+                if stroke_samples.len() > 1 {
                     let stroke_tool = active_stroke_tool
                         .expect("paint tools must expose stroke tools");
                     let apply_started_at = Instant::now();
                     let application =
-                        stroke_tool.apply_stroke(&mut self.surface, &[previous_sample, current_sample]);
+                        stroke_tool.apply_stroke(&mut self.surface, &stroke_samples);
                     stroke_apply_metrics = Some((
                         elapsed_milliseconds(apply_started_at),
                         application.dab_count,
@@ -1070,35 +1113,37 @@ impl AppSession {
                     self.document_dirty = true;
                 }
 
-                self.shell_state(format!(
+                format!(
                     "dragging {} at {}, {}",
                     self.active_tool_label().to_lowercase(),
-                    x,
-                    y,
-                ))
+                    last_cx,
+                    last_cy,
+                )
             }
             Some(CanvasInteraction::Move { start }) => {
+                let (_, _, _, _, pt, _) = *mapped_points.last().unwrap();
                 let move_tool = MoveTool;
-                let (delta_x, delta_y) = move_tool.drag_delta(*start, point);
-                self.shell_state(format!("move delta {} px, {} px", delta_x, delta_y))
+                let (delta_x, delta_y) = move_tool.drag_delta(*start, pt);
+                return self.shell_state(format!("move delta {} px, {} px", delta_x, delta_y));
             }
             Some(CanvasInteraction::Marquee { start }) => {
-                self.document.select_rect(start.x as u32, start.y as u32, x, y);
-                self.shell_state(format!("marquee selection to {}, {}", x, y))
+                self.document.select_rect(start.x as u32, start.y as u32, last_cx, last_cy);
+                return self.shell_state(format!("marquee selection to {}, {}", last_cx, last_cy));
             }
             Some(CanvasInteraction::Crop { start }) => {
-                self.document.select_rect(start.x as u32, start.y as u32, x, y);
-                self.shell_state(format!("crop region to {}, {}", x, y))
+                self.document.select_rect(start.x as u32, start.y as u32, last_cx, last_cy);
+                return self.shell_state(format!("crop region to {}, {}", last_cx, last_cy));
             }
             Some(CanvasInteraction::Hand { last_screen }) => {
+                let (_, _, _, _, _, current_screen) = *mapped_points.last().unwrap();
                 self.viewport.pan_by_screen_delta(Vector::new(
                     current_screen.x - last_screen.x,
                     current_screen.y - last_screen.y,
                 ));
                 *last_screen = current_screen;
-                self.shell_state(format!("panning view at {}, {}", x, y))
+                return self.shell_state(format!("panning view at {}, {}", last_cx, last_cy));
             }
-            None => self.shell_state(current_state.status_message.clone()),
+            None => return self.shell_state(current_state.status_message.clone()),
         };
 
         let mut preview_update_ms = None;
@@ -1126,14 +1171,20 @@ impl AppSession {
                     ("preview_published", preview_published.to_string()),
                     ("dabs", dab_count.to_string()),
                     ("changed_pixels", changed_pixels.to_string()),
-                    ("cursor", format!("{x},{y}")),
+                    ("cursor", format!("{last_cx},{last_cy}")),
+                    ("batch_size", mapped_points.len().to_string()),
                 ],
             );
         }
 
-        state
+        self.interactive_drag_shell_state(
+            current_state,
+            status_message,
+            last_cx,
+            last_cy,
+            preview_published,
+        )
     }
-
     fn canvas_released(
         &mut self,
         normalized_x: f32,
@@ -1333,7 +1384,15 @@ impl UiShellDelegate for AppSession {
         normalized_y: f32,
         current_state: &UiShellState,
     ) -> UiShellState {
-        self.canvas_dragged(normalized_x, normalized_y, current_state)
+        self.canvas_dragged_batch(&[(normalized_x, normalized_y)], current_state)
+    }
+
+    fn on_canvas_dragged_batch(
+        &mut self,
+        points: &[(f32, f32)],
+        current_state: &UiShellState,
+    ) -> UiShellState {
+        self.canvas_dragged_batch(points, current_state)
     }
 
     fn on_canvas_released(
@@ -1356,7 +1415,7 @@ impl UiShellDelegate for AppSession {
 }
 
 fn merge_pixel_changes(
-    changes_by_pixel: &mut BTreeMap<(u32, u32), PixelChange>,
+    changes_by_pixel: &mut HashMap<(u32, u32), PixelChange>,
     changes: &[PixelChange],
 ) {
     for change in changes {
@@ -1388,12 +1447,20 @@ fn build_preview_cache(surface: &RasterSurface, viewport: &ViewportState) -> Pre
         scale_factor: viewport.size.scale_factor,
         zoom: viewport.zoom,
         pan: viewport.pan,
-        pixels: vec![0; (width * height * 4) as usize],
-        image: slint::Image::default(),
+        pixel_buffer: slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height),
     };
 
-    repaint_preview_region(&mut cache.pixels, width, height, surface, viewport, 0, 0, width - 1, height - 1);
-    cache.image = preview_cache_to_image(&cache.pixels, width, height);
+    repaint_preview_region(
+        cache.pixel_buffer.make_mut_bytes(),
+        width,
+        height,
+        surface,
+        viewport,
+        0,
+        0,
+        width - 1,
+        height - 1,
+    );
     cache
 }
 
@@ -1403,12 +1470,6 @@ fn preview_cache_matches(cache: &PreviewCache, viewport: &ViewportState) -> bool
         && cache.scale_factor == viewport.size.scale_factor
         && cache.zoom == viewport.zoom
         && cache.pan == viewport.pan
-}
-
-fn preview_cache_to_image(pixels: &[u8], width: u32, height: u32) -> slint::Image {
-    let mut pixel_buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height);
-    pixel_buffer.make_mut_bytes().copy_from_slice(pixels);
-    slint::Image::from_rgba8(pixel_buffer)
 }
 
 fn preview_document_bounds(changes: &[PixelChange]) -> Option<(u32, u32, u32, u32)> {
@@ -1449,7 +1510,7 @@ fn repaint_preview_document_region(
     let end_y = bottom.clamp(0, cache.height.saturating_sub(1) as i32) as u32;
 
     repaint_preview_region(
-        &mut cache.pixels,
+        cache.pixel_buffer.make_mut_bytes(),
         cache.width,
         cache.height,
         surface,
@@ -1472,22 +1533,32 @@ fn repaint_preview_region(
     end_x: u32,
     end_y: u32,
 ) {
-    let scale_factor = viewport.size.scale_factor.max(1.0);
+    let inv_zoom = 1.0 / viewport.zoom;
+    let pan_x = viewport.pan.dx;
+    let pan_y = viewport.pan.dy;
+    let surface_width = surface.width() as usize;
+    let surface_height = surface.height() as i32;
+    let flat_surface = surface.to_flat_rgba();
 
     for preview_y in start_y..=end_y {
+        let logical_y = preview_y as f32;
+        let document_y = ((logical_y - pan_y) * inv_zoom).floor() as i32;
         for preview_x in start_x..=end_x {
             let checker_pixel = checkerboard_pixel(preview_x, preview_y);
-            let document_point = viewport.screen_to_document(Point::new(
-                preview_x as f32 * scale_factor,
-                preview_y as f32 * scale_factor,
-            ));
-            let composed_pixel = if document_point.x >= 0.0
-                && document_point.y >= 0.0
-                && document_point.x < surface.width() as f32
-                && document_point.y < surface.height() as f32
+            let logical_x = preview_x as f32;
+            let document_x = ((logical_x - pan_x) * inv_zoom).floor() as i32;
+            let composed_pixel = if document_x >= 0
+                && document_y >= 0
+                && document_x < surface.width() as i32
+                && document_y < surface_height
             {
-                let document_pixel =
-                    surface.pixel(document_point.x.floor() as u32, document_point.y.floor() as u32);
+                let index = ((document_y as usize * surface_width) + document_x as usize) * 4;
+                let document_pixel = [
+                    flat_surface[index],
+                    flat_surface[index + 1],
+                    flat_surface[index + 2],
+                    flat_surface[index + 3],
+                ];
                 blend_over_checkerboard(document_pixel, checker_pixel)
             } else {
                 checker_pixel

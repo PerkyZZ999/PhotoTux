@@ -7,15 +7,12 @@ pub mod theme;
 use crate::theme::{DARK_PRO, SlintTheme, ThemeMappingError};
 use i_slint_backend_winit::WinitWindowAccessor;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer, SharedString};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::info;
 
 slint::include_modules!();
-
-const INTERACTIVE_STATE_APPLY_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Result type used by the UI shell.
 pub type Result<T> = std::result::Result<T, UiShellError>;
@@ -193,6 +190,19 @@ pub trait UiShellDelegate {
         current_state.clone()
     }
 
+    /// Handle a batch of pointer drag events inside the canvas interaction region.
+    fn on_canvas_dragged_batch(
+        &mut self,
+        points: &[(f32, f32)],
+        current_state: &UiShellState,
+    ) -> UiShellState {
+        let mut state = current_state.clone();
+        for (x, y) in points {
+            state = self.on_canvas_dragged(*x, *y, &state);
+        }
+        state
+    }
+
     /// Handle a pointer release inside the canvas interaction region.
     fn on_canvas_released(
         &mut self,
@@ -359,54 +369,42 @@ where
     }
 
     {
-        let drag_shell_state = Rc::clone(&shell_state);
-        let drag_shared_delegate = Rc::clone(&shared_delegate);
-        let drag_weak_window = window.as_weak();
-        let last_drag_apply_at = Rc::new(Cell::new(None::<Instant>));
-        let drag_apply_gate = Rc::clone(&last_drag_apply_at);
+        let shell_state = Rc::clone(&shell_state);
+        let shared_delegate = Rc::clone(&shared_delegate);
+        let weak_window = window.as_weak();
         window.on_canvas_dragged(move |normalized_x, normalized_y| {
             let next_state = {
-                let current_state = drag_shell_state.borrow();
-                drag_shared_delegate.borrow_mut().on_canvas_dragged(
+                let current_state = shell_state.borrow();
+                shared_delegate.borrow_mut().on_canvas_dragged(
                     normalized_x,
                     normalized_y,
                     &current_state,
                 )
             };
-            *drag_shell_state.borrow_mut() = next_state.clone();
+            *shell_state.borrow_mut() = next_state.clone();
 
-            let should_apply = drag_apply_gate
-                .get()
-                .is_none_or(|instant| instant.elapsed() >= INTERACTIVE_STATE_APPLY_INTERVAL);
-
-            if should_apply {
-                drag_apply_gate.set(Some(Instant::now()));
-            }
-
-            if should_apply {
-                if let Some(window) = drag_weak_window.upgrade() {
-                    apply_shell_state(&window, &next_state);
-                }
+            if let Some(window) = weak_window.upgrade() {
+                apply_shell_state(&window, &next_state);
             }
         });
+    }
 
-        let release_shell_state = Rc::clone(&shell_state);
-        let release_shared_delegate = Rc::clone(&shared_delegate);
-        let release_weak_window = window.as_weak();
-        let release_drag_apply_gate = Rc::clone(&last_drag_apply_at);
+    {
+        let shell_state = Rc::clone(&shell_state);
+        let shared_delegate = Rc::clone(&shared_delegate);
+        let weak_window = window.as_weak();
         window.on_canvas_released(move |normalized_x, normalized_y| {
-            release_drag_apply_gate.set(None);
             let next_state = {
-                let current_state = release_shell_state.borrow();
-                release_shared_delegate.borrow_mut().on_canvas_released(
+                let current_state = shell_state.borrow();
+                shared_delegate.borrow_mut().on_canvas_released(
                     normalized_x,
                     normalized_y,
                     &current_state,
                 )
             };
-            *release_shell_state.borrow_mut() = next_state.clone();
+            *shell_state.borrow_mut() = next_state.clone();
 
-            if let Some(window) = release_weak_window.upgrade() {
+            if let Some(window) = weak_window.upgrade() {
                 apply_shell_state(&window, &next_state);
             }
         });

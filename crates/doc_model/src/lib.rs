@@ -472,6 +472,36 @@ impl RasterSurface {
         self.tiles.get(&coord)
     }
 
+    /// Export the current surface into a tightly-packed flat RGBA8 buffer.
+    #[must_use]
+    pub fn to_flat_rgba(&self) -> Vec<u8> {
+        let mut flat_rgba = vec![0; (self.width as usize) * (self.height as usize) * BYTES_PER_PIXEL];
+
+        for (&tile_coord, tile) in &self.tiles {
+            let tile_origin_x = tile_coord.x * TILE_SIZE;
+            let tile_origin_y = tile_coord.y * TILE_SIZE;
+            if tile_origin_x >= self.width || tile_origin_y >= self.height {
+                continue;
+            }
+
+            let copy_width = TILE_SIZE.min(self.width - tile_origin_x) as usize;
+            let copy_height = TILE_SIZE.min(self.height - tile_origin_y) as usize;
+            let tile_bytes = tile.as_bytes();
+
+            for local_y in 0..copy_height {
+                let src_start = local_y * TILE_SIZE as usize * BYTES_PER_PIXEL;
+                let src_end = src_start + copy_width * BYTES_PER_PIXEL;
+                let dst_start = (((tile_origin_y as usize + local_y) * self.width as usize)
+                    + tile_origin_x as usize)
+                    * BYTES_PER_PIXEL;
+                let dst_end = dst_start + copy_width * BYTES_PER_PIXEL;
+                flat_rgba[dst_start..dst_end].copy_from_slice(&tile_bytes[src_start..src_end]);
+            }
+        }
+
+        flat_rgba
+    }
+
     /// Return the number of dirty tiles awaiting upload.
     #[must_use]
     pub fn dirty_tile_count(&self) -> usize {

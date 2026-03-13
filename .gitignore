@@ -1,6 +1,6 @@
 /target
 /tests
-.github
-.vscode
-assets
-docs
+/.github
+/.vscode
+/assets
+/docs

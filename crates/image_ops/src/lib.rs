@@ -329,13 +329,11 @@ fn sample_source_coordinate(source_len: u32, target_len: u32, target_index: u32)
 }
 
 fn snapshot_surface(surface: &RasterSurface) -> Vec<[u8; 4]> {
-    let mut snapshot = Vec::with_capacity((surface.width() * surface.height()) as usize);
-    for y in 0..surface.height() {
-        for x in 0..surface.width() {
-            snapshot.push(surface.pixel(x, y));
-        }
-    }
-    snapshot
+    surface
+        .to_flat_rgba()
+        .chunks_exact(4)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]])
+        .collect()
 }
 
 fn apply_surface_snapshot(
