@@ -1,0 +1,15 @@
+[package]
+name = "render_wgpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+doc_model = { path = "../doc_model" }
+pollster.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

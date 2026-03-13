@@ -1,0 +1,10 @@
+[package]
+name = "doc_model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "image_ops"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+doc_model = { path = "../doc_model" }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "tool_system"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+doc_model = { path = "../doc_model" }
+history_engine = { path = "../history_engine" }
+image_ops = { path = "../image_ops" }
+
+[lints]
+workspace = true

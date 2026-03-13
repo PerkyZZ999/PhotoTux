@@ -1,0 +1,2376 @@
+component FocusTouchArea {
+    in property <bool> enabled: true;
+    out property <bool> has-focus <=> focus-scope.has-focus;
+    out property <bool> pressed <=> touch-area.pressed;
+    out property <bool> has-hover <=> touch-area.has-hover;
+    out property <bool> enter-pressed;
+
+    callback clicked <=> touch-area.clicked;
+
+    forward-focus: focus-scope;
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if !root.enabled {
+                return reject;
+            }
+
+            if (event.text == " " || event.text == "\n") && !root.enter-pressed {
+                root.enter-pressed = true;
+                touch-area.clicked();
+                return accept;
+            }
+
+            reject;
+        }
+
+        key-released(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.enter-pressed = false;
+                return accept;
+            }
+
+            reject;
+        }
+    }
+
+    touch-area := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+    }
+}
+
+component ToolOptionStepper inherits Rectangle {
+    in property <color> bg-panel;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <color> border-default;
+    in property <color> border-strong;
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <string> label;
+    in property <string> value;
+    callback decrement();
+    callback increment();
+
+    min-width: 116px;
+    min-height: 26px;
+    background: bg-panel;
+    border-color: border-default;
+    border-width: 1px;
+    border-radius: 3px;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: 20px;
+            background: minus-touch.pressed ? root.button-bg-active : minus-touch.has-hover ? root.button-bg-hover : #00000000;
+            border-color: root.border-strong;
+            border-width: 1px;
+
+            Text {
+                text: "-";
+                color: root.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            minus-touch := TouchArea {
+                clicked => {
+                    root.decrement();
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            padding-left: 8px;
+            padding-right: 8px;
+
+            Text {
+                text: root.label;
+                color: root.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: root.value;
+                color: root.text-primary;
+                font-size: 10px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {}
+
+        Rectangle {
+            width: 20px;
+            background: plus-touch.pressed ? root.button-bg-active : plus-touch.has-hover ? root.button-bg-hover : #00000000;
+            border-color: root.border-strong;
+            border-width: 1px;
+
+            Text {
+                text: "+";
+                color: root.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            plus-touch := TouchArea {
+                clicked => {
+                    root.increment();
+                }
+            }
+        }
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <color> bg-default;
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> border-default;
+    in property <color> accent-primary;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <image> icon;
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked();
+
+    min-width: 30px;
+    min-height: 30px;
+    border-width: 1px;
+    border-radius: 6px;
+    border-color: active ? accent-primary : border-default;
+    background: touch.pressed || touch.enter-pressed ? button-bg-active : touch.has-hover ? button-bg-hover : active ? button-bg-active : bg-default;
+
+    accessible-role: button;
+    accessible-action-default => { touch.clicked(); }
+
+    animate background {
+        duration: 90ms;
+    }
+
+    if touch.has-focus: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.accent-primary;
+        background: #00000000;
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: label == "" ? 0px : 6px;
+
+        Image {
+            source: root.icon;
+            width: 15px;
+            height: 15px;
+            colorize: root.active ? root.text-primary : root.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+
+        if root.label != "" : Text {
+            text: root.label;
+            color: root.active ? root.text-primary : root.text-secondary;
+            font-size: 11px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component MenuTextButton inherits Rectangle {
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> text-primary;
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    min-width: 48px;
+    min-height: 24px;
+    border-radius: 4px;
+    background: touch.pressed || touch.enter-pressed ? button-bg-active : touch.has-hover ? button-bg-hover : active ? button-bg-active : #00000000;
+
+    accessible-role: button;
+    accessible-action-default => { touch.clicked(); }
+
+    animate background {
+        duration: 90ms;
+    }
+
+    if touch.has-focus: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: root.text-primary;
+        background: #00000000;
+    }
+
+    Text {
+        text: root.text;
+        color: root.text-primary;
+        font-size: 12px;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component MenuDropdownItem inherits Rectangle {
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <string> text;
+    in property <string> shortcut: "";
+    callback clicked();
+
+    min-height: 24px;
+    border-radius: 4px;
+    background: touch.pressed || touch.enter-pressed ? root.button-bg-active : touch.has-hover ? root.button-bg-hover : #00000000;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        Text {
+            text: root.text;
+            color: root.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {}
+
+        if root.shortcut != "" : Text {
+            text: root.shortcut;
+            color: root.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component ToolRailButton inherits Rectangle {
+    in property <color> bg-default;
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> border-subtle;
+    in property <color> accent-primary;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    min-width: 30px;
+    min-height: 30px;
+    border-width: 1px;
+    border-radius: 4px;
+    border-color: active ? accent-primary : border-subtle;
+    background: touch.pressed || touch.enter-pressed ? button-bg-active : touch.has-hover ? button-bg-hover : active ? button-bg-active : bg-default;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { touch.clicked(); }
+
+    animate background {
+        duration: 90ms;
+    }
+
+    if touch.has-focus: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: root.accent-primary;
+        background: #00000000;
+    }
+
+    Image {
+        source: root.icon;
+        width: 16px;
+        height: 16px;
+        colorize: root.active ? root.text-primary : root.text-secondary;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component ToolRailDivider inherits Rectangle {
+    in property <color> border-subtle;
+
+    min-height: 8px;
+    background: #00000000;
+
+    Rectangle {
+        x: 6px;
+        y: 3px;
+        width: parent.width - 12px;
+        height: 1px;
+        background: root.border-subtle;
+    }
+}
+
+component PanelTab inherits Rectangle {
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> border-default;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    min-height: 22px;
+    min-width: 40px;
+    border-width: active ? 1px : 0px;
+    border-radius: 3px;
+    border-color: root.border-default;
+    background: touch.pressed || touch.enter-pressed ? root.button-bg-active : touch.has-hover ? root.button-bg-hover : active ? root.button-bg-active : #00000000;
+
+    Text {
+        text: root.text;
+        color: root.active ? root.text-primary : root.text-secondary;
+        font-size: 10px;
+        font-weight: root.active ? 600 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component CompactOptionChip inherits Rectangle {
+    in property <color> bg-panel;
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <color> border-default;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <image> icon;
+    in property <string> label;
+    in property <string> value;
+    in property <bool> value-active: false;
+    callback clicked();
+
+    min-width: 88px;
+    min-height: 24px;
+    background: touch.pressed || touch.enter-pressed ? root.button-bg-active : touch.has-hover ? root.button-bg-hover : root.bg-panel;
+    border-color: root.border-default;
+    border-width: 1px;
+    border-radius: 3px;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        Image {
+            source: root.icon;
+            width: 12px;
+            height: 12px;
+            colorize: root.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+
+        if root.label != "" : Text {
+            text: root.label;
+            color: root.text-secondary;
+            font-size: 10px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+
+        if root.value != "" : Text {
+            text: root.value;
+            color: root.value-active ? root.text-primary : root.text-secondary;
+            font-size: 10px;
+            font-weight: root.value-active ? 600 : 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := FocusTouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component PhotoTuxWindow inherits Window {
+    in property <color> bg-app;
+    in property <color> bg-chrome;
+    in property <color> bg-panel;
+    in property <color> bg-panel-header;
+    in property <color> bg-canvas-surround;
+    in property <color> bg-menu;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <color> text-muted;
+    in property <color> accent-primary;
+    in property <color> border-subtle;
+    in property <color> border-default;
+    in property <color> border-strong;
+    in property <color> button-bg-hover;
+    in property <color> button-bg-active;
+    in property <length> toolbar-width;
+    in property <length> right-dock-width;
+    in property <length> titlebar-height;
+    in property <length> menu-bar-height;
+    in property <length> tool-options-height;
+    in property <length> panel-header-height;
+    in property <length> panel-padding;
+    in property <length> tab-height;
+    in property <length> status-bar-height;
+    in property <string> document-title;
+    in property <bool> document-dirty;
+    in property <string> active-tool-label;
+    in property <string> status-message;
+    in property <string> active-tool-key;
+    in property <string> tool-preset-label;
+    in property <string> tool-option-primary-label;
+    in property <string> tool-option-secondary-label;
+    in property <string> tool-option-tertiary-label;
+    in property <string> tool-option-quaternary-label;
+    in property <string> tool-size-label;
+    in property <string> tool-hardness-label;
+    in property <string> tool-opacity-label;
+    in property <string> tool-flow-label;
+    in property <string> zoom-label;
+    in property <string> canvas-size-label;
+    in property <int> canvas-width-px;
+    in property <int> canvas-height-px;
+    in property <string> cursor-position-label;
+    in property <string> selection-bounds-label;
+    in property <string> foreground-color-label;
+    in property <string> background-color-label;
+    in property <string> active-layer-name;
+    in property <string> layer-blend-mode-label;
+    in property <string> layer-opacity-label;
+    in property <string> layer-visibility-label;
+    in property <string> layer-count-label;
+    in property <string> history-entry-primary;
+    in property <string> history-entry-secondary;
+    in property <string> history-entry-tertiary;
+    in property <string> history-entry-quaternary;
+    in property <string> history-entry-quinary;
+    in property <image> canvas-preview;
+    in-out property <int> dock-shortcut-index: 0;
+    in-out property <int> top-panel-index: 0;
+    in-out property <int> middle-panel-index: 1;
+    in-out property <int> bottom-panel-index: 0;
+    in-out property <int> active-menu-index: -1;
+    callback command-triggered(string);
+    callback tool-triggered(string);
+    callback tool-option-adjusted(string, int);
+    callback tool-options-reset();
+    callback titlebar-dragged();
+    callback canvas-pressed(float, float);
+    callback canvas-dragged(float, float);
+    callback canvas-released(float, float);
+    callback canvas-hovered(float, float);
+
+    title: root.document-title + (root.document-dirty ? " * - PhotoTux" : " - PhotoTux");
+    no-frame: true;
+    resize-border-width: 6px;
+    preferred-width: 1600px;
+    preferred-height: 900px;
+    min-width: 1280px;
+    min-height: 800px;
+    background: bg-app;
+    default-font-size: 12px;
+    forward-focus: shell-focus;
+
+    init => {
+        shell-focus.focus();
+    }
+
+    shell-focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        focus-on-tab-navigation: false;
+
+        key-pressed(event) => {
+            if event.modifiers.control && !event.modifiers.shift && (event.text == "s" || event.text == "S") {
+                root.command-triggered("File::Save");
+                return accept;
+            }
+            if event.modifiers.control && event.modifiers.shift && (event.text == "p" || event.text == "P") {
+                root.command-triggered("Search");
+                return accept;
+            }
+            if event.modifiers.control && !event.modifiers.shift && (event.text == "z" || event.text == "Z") {
+                root.command-triggered("Edit::Undo");
+                return accept;
+            }
+            if event.modifiers.control && event.modifiers.shift && (event.text == "z" || event.text == "Z") {
+                root.command-triggered("Edit::Redo");
+                return accept;
+            }
+            if event.modifiers.control && event.modifiers.shift && (event.text == "e" || event.text == "E") {
+                root.command-triggered("File::ExportPng");
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "+" || event.text == "=") {
+                root.command-triggered("View::ZoomIn");
+                return accept;
+            }
+            if event.modifiers.control && event.text == "-" {
+                root.command-triggered("View::ZoomOut");
+                return accept;
+            }
+            if event.modifiers.control && event.text == "0" {
+                root.command-triggered("View::Reset");
+                return accept;
+            }
+            if (event.text == "v" || event.text == "V") {
+                root.tool-triggered("Move");
+                return accept;
+            }
+            if (event.text == "m" || event.text == "M") {
+                root.tool-triggered("Marq");
+                return accept;
+            }
+            if (event.text == "b" || event.text == "B") {
+                root.tool-triggered("Brush");
+                return accept;
+            }
+            if (event.text == "e" || event.text == "E") {
+                root.tool-triggered("Eras");
+                return accept;
+            }
+            if (event.text == "h" || event.text == "H") {
+                root.tool-triggered("Hand");
+                return accept;
+            }
+            if (event.text == "z" || event.text == "Z") {
+                root.tool-triggered("Zoom");
+                return accept;
+            }
+            reject;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: root.titlebar-height;
+            background: root.bg-chrome;
+            border-color: root.border-subtle;
+            border-width: 1px;
+
+            HorizontalLayout {
+                padding-left: root.panel-padding;
+                padding-right: root.panel-padding;
+                spacing: 8px;
+
+                Rectangle {
+                    min-width: 136px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            border-radius: 3px;
+                            background: root.button-bg-active;
+                            border-color: root.accent-primary;
+                            border-width: 1px;
+
+                            Image {
+                                source: @image-url("../../../assets/icons/RemixIcons/Design/layout-grid-line.svg");
+                                width: 10px;
+                                height: 10px;
+                                colorize: root.text-primary;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+
+                        Text {
+                            text: "PhotoTux";
+                            color: root.text-primary;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #00000000;
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: grab;
+
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                root.titlebar-dragged();
+                            }
+                        }
+
+                        double-clicked => {
+                            root.command-triggered("Window::ToggleMaximize");
+                        }
+                    }
+                }
+
+                Rectangle {
+                    min-width: 90px;
+                    max-width: 120px;
+                    background: root.bg-panel;
+                    border-color: root.border-default;
+                    border-width: 1px;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "Essentials";
+                            color: root.text-secondary;
+                            font-size: 10px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+
+                        Image {
+                            source: @image-url("../../../assets/icons/RemixIcons/Arrows/arrow-drop-down-line.svg");
+                            width: 12px;
+                            height: 12px;
+                            colorize: root.text-muted;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #00000000;
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: grab;
+
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                root.titlebar-dragged();
+                            }
+                        }
+
+                        double-clicked => {
+                            root.command-triggered("Window::ToggleMaximize");
+                        }
+                    }
+                }
+
+                IconButton {
+                    bg-default: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    accent-primary: root.accent-primary;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/search-line.svg");
+                    clicked => {
+                        root.command-triggered("Search");
+                    }
+                }
+
+                IconButton {
+                    bg-default: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    accent-primary: root.accent-primary;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/subtract-line.svg");
+                    clicked => {
+                        root.command-triggered("Window::Minimize");
+                    }
+                }
+
+                IconButton {
+                    bg-default: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    accent-primary: root.accent-primary;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/checkbox-blank-line.svg");
+                    clicked => {
+                        root.command-triggered("Window::ToggleMaximize");
+                    }
+                }
+
+                IconButton {
+                    bg-default: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    accent-primary: root.accent-primary;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/close-line.svg");
+                    clicked => {
+                        root.command-triggered("Window::Close");
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: root.menu-bar-height;
+            background: root.bg-menu;
+            border-color: root.border-subtle;
+            border-width: 1px;
+
+            HorizontalLayout {
+                padding-left: root.panel-padding;
+                padding-right: root.panel-padding;
+                spacing: 4px;
+
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "File"; active: root.active-menu-index == 0; clicked => { root.active-menu-index = root.active-menu-index == 0 ? -1 : 0; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Edit"; active: root.active-menu-index == 1; clicked => { root.active-menu-index = root.active-menu-index == 1 ? -1 : 1; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Image"; active: root.active-menu-index == 2; clicked => { root.active-menu-index = root.active-menu-index == 2 ? -1 : 2; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Layer"; active: root.active-menu-index == 3; clicked => { root.active-menu-index = root.active-menu-index == 3 ? -1 : 3; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Select"; active: root.active-menu-index == 4; clicked => { root.active-menu-index = root.active-menu-index == 4 ? -1 : 4; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Filter"; active: root.active-menu-index == 5; clicked => { root.active-menu-index = root.active-menu-index == 5 ? -1 : 5; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "View"; active: root.active-menu-index == 6; clicked => { root.active-menu-index = root.active-menu-index == 6 ? -1 : 6; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Window"; active: root.active-menu-index == 7; clicked => { root.active-menu-index = root.active-menu-index == 7 ? -1 : 7; } }
+                MenuTextButton { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text: "Help"; active: root.active-menu-index == 8; clicked => { root.active-menu-index = root.active-menu-index == 8 ? -1 : 8; } }
+                Rectangle {}
+
+                Text {
+                    text: "Ctrl+S Save  •  Ctrl+Shift+P Search  •  V/M/B/E/H/Z Tools";
+                    color: root.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.active-menu-index >= 0 : Rectangle {
+                x: root.active-menu-index == 0 ? root.panel-padding :
+                   root.active-menu-index == 1 ? root.panel-padding + 52px :
+                   root.active-menu-index == 2 ? root.panel-padding + 104px :
+                   root.active-menu-index == 3 ? root.panel-padding + 156px :
+                   root.active-menu-index == 4 ? root.panel-padding + 208px :
+                   root.active-menu-index == 5 ? root.panel-padding + 264px :
+                   root.active-menu-index == 6 ? root.panel-padding + 320px :
+                   root.active-menu-index == 7 ? root.panel-padding + 376px :
+                   root.panel-padding + 432px;
+                y: parent.height - 1px;
+                width: root.active-menu-index == 0 ? 188px :
+                       root.active-menu-index == 1 ? 148px :
+                       root.active-menu-index == 4 ? 176px : 172px;
+                background: root.bg-panel;
+                border-color: root.border-default;
+                border-width: 1px;
+                border-radius: 6px;
+                z: 100;
+
+                VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 2px;
+
+                    if root.active-menu-index == 0 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "New Document"; shortcut: "Ctrl+N"; clicked => { root.active-menu-index = -1; root.command-triggered("File::New"); } }
+                    if root.active-menu-index == 0 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Save"; shortcut: "Ctrl+S"; clicked => { root.active-menu-index = -1; root.command-triggered("File::Save"); } }
+                    if root.active-menu-index == 0 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Reopen Saved"; shortcut: ""; clicked => { root.active-menu-index = -1; root.command-triggered("File::Reopen"); } }
+                    if root.active-menu-index == 0 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Export PNG"; shortcut: "Ctrl+Shift+E"; clicked => { root.active-menu-index = -1; root.command-triggered("File::ExportPng"); } }
+
+                    if root.active-menu-index == 1 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Undo"; shortcut: "Ctrl+Z"; clicked => { root.active-menu-index = -1; root.command-triggered("Edit::Undo"); } }
+                    if root.active-menu-index == 1 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Redo"; shortcut: "Ctrl+Shift+Z"; clicked => { root.active-menu-index = -1; root.command-triggered("Edit::Redo"); } }
+
+                    if root.active-menu-index == 2 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Apply Sample Stroke"; shortcut: ""; clicked => { root.active-menu-index = -1; root.command-triggered("Image::SampleStroke"); } }
+
+                    if root.active-menu-index == 3 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Delete Active Layer"; shortcut: ""; clicked => { root.active-menu-index = -1; root.command-triggered("Layer::Delete"); } }
+
+                    if root.active-menu-index == 4 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Select All"; shortcut: "Ctrl+A"; clicked => { root.active-menu-index = -1; root.command-triggered("Select::All"); } }
+                    if root.active-menu-index == 4 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Clear Selection"; shortcut: "Ctrl+D"; clicked => { root.active-menu-index = -1; root.command-triggered("Select::Clear"); } }
+                    if root.active-menu-index == 4 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Invert Selection"; shortcut: "Ctrl+Shift+I"; clicked => { root.active-menu-index = -1; root.command-triggered("Select::Invert"); } }
+
+                    if root.active-menu-index == 5 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Filters Coming Soon"; shortcut: ""; clicked => { root.active-menu-index = -1; root.command-triggered("Filter"); } }
+
+                    if root.active-menu-index == 6 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Zoom In"; shortcut: "Ctrl++"; clicked => { root.active-menu-index = -1; root.command-triggered("View::ZoomIn"); } }
+                    if root.active-menu-index == 6 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Zoom Out"; shortcut: "Ctrl+-"; clicked => { root.active-menu-index = -1; root.command-triggered("View::ZoomOut"); } }
+                    if root.active-menu-index == 6 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Fit to View"; shortcut: "Ctrl+0"; clicked => { root.active-menu-index = -1; root.command-triggered("View::Reset"); } }
+                    if root.active-menu-index == 6 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Search Commands"; shortcut: "Ctrl+Shift+P"; clicked => { root.active-menu-index = -1; root.command-triggered("Search"); } }
+
+                    if root.active-menu-index == 7 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Export PNG"; shortcut: "Ctrl+Shift+E"; clicked => { root.active-menu-index = -1; root.command-triggered("File::ExportPng"); } }
+
+                    if root.active-menu-index == 8 : MenuDropdownItem { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Reload Saved Session"; shortcut: ""; clicked => { root.active-menu-index = -1; root.command-triggered("File::Reopen"); } }
+                }
+            }
+        }
+
+        Rectangle {
+            height: root.tool-options-height;
+            background: root.bg-chrome;
+            border-color: root.border-subtle;
+            border-width: 1px;
+
+            HorizontalLayout {
+                padding-left: root.panel-padding;
+                padding-right: root.panel-padding;
+                spacing: 6px;
+
+                Rectangle {
+                    min-width: 98px;
+
+                    Text {
+                        text: root.active-tool-label;
+                        color: root.text-primary;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                CompactOptionChip {
+                    bg-panel: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/Design/brush-2-line.svg");
+                    label: "Preset";
+                    value: root.tool-preset-label;
+                    value-active: true;
+                }
+
+                CompactOptionChip {
+                    bg-panel: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/checkbox-line.svg");
+                    label: "Mode";
+                    value: root.active-tool-key == "Move" ? "Auto" : "Active";
+                }
+
+                CompactOptionChip {
+                    bg-panel: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/checkbox-multiple-blank-line.svg");
+                    label: "Show";
+                    value: root.active-tool-key == "Move" ? "Transform" : "Controls";
+                }
+
+                ToolOptionStepper {
+                    bg-panel: root.bg-panel;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    border-default: root.border-default;
+                    border-strong: root.border-strong;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    label: root.tool-option-primary-label;
+                    value: root.tool-size-label;
+                    decrement => { root.tool-option-adjusted("size", -1); }
+                    increment => { root.tool-option-adjusted("size", 1); }
+                }
+
+                ToolOptionStepper {
+                    bg-panel: root.bg-panel;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    border-default: root.border-default;
+                    border-strong: root.border-strong;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    label: root.tool-option-secondary-label;
+                    value: root.tool-hardness-label;
+                    decrement => { root.tool-option-adjusted("hardness", -1); }
+                    increment => { root.tool-option-adjusted("hardness", 1); }
+                }
+
+                ToolOptionStepper {
+                    bg-panel: root.bg-panel;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    border-default: root.border-default;
+                    border-strong: root.border-strong;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    label: root.tool-option-tertiary-label;
+                    value: root.tool-opacity-label;
+                    decrement => { root.tool-option-adjusted("opacity", -1); }
+                    increment => { root.tool-option-adjusted("opacity", 1); }
+                }
+
+                ToolOptionStepper {
+                    bg-panel: root.bg-panel;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    border-default: root.border-default;
+                    border-strong: root.border-strong;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    label: root.tool-option-quaternary-label;
+                    value: root.tool-flow-label;
+                    decrement => { root.tool-option-adjusted("flow", -1); }
+                    increment => { root.tool-option-adjusted("flow", 1); }
+                }
+
+                Rectangle {}
+
+                CompactOptionChip {
+                    bg-panel: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/question-line.svg");
+                    label: "Mode";
+                    value: root.active-tool-key;
+                }
+
+                IconButton {
+                    bg-default: root.bg-panel;
+                    button-bg-hover: root.button-bg-hover;
+                    button-bg-active: root.button-bg-active;
+                    border-default: root.border-default;
+                    accent-primary: root.accent-primary;
+                    text-primary: root.text-primary;
+                    text-secondary: root.text-secondary;
+                    icon: @image-url("../../../assets/icons/RemixIcons/System/refresh-line.svg");
+                    label: "Reset";
+                    clicked => {
+                        root.tool-options-reset();
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            background: root.bg-app;
+
+            HorizontalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    width: root.toolbar-width;
+                    background: root.bg-chrome;
+                    border-color: root.border-subtle;
+                    border-width: 1px;
+
+                    VerticalLayout {
+                        padding-top: 4px;
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        padding-bottom: 4px;
+                        spacing: 4px;
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Arrows/drag-move-line.svg");
+                            text: "Move";
+                            active: root.active-tool-key == "Move";
+                            clicked => { root.tool-triggered("Move"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/focus-2-line.svg");
+                            text: "Marq";
+                            active: root.active-tool-key == "Marq";
+                            clicked => { root.tool-triggered("Marq"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/scissors-2-line.svg");
+                            text: "Lasso";
+                            active: root.active-tool-key == "Lasso";
+                            clicked => { root.tool-triggered("Lasso"); }
+                        }
+
+                        ToolRailDivider { border-subtle: root.border-subtle; }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/magic-line.svg");
+                            text: "Select";
+                            active: root.active-tool-key == "Select";
+                            clicked => { root.tool-triggered("Select"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/crop-2-line.svg");
+                            text: "Crop";
+                            active: root.active-tool-key == "Crop";
+                            clicked => { root.tool-triggered("Crop"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Health & Medical/dropper-line.svg");
+                            text: "Dropper";
+                            active: root.active-tool-key == "Dropper";
+                            clicked => { root.tool-triggered("Dropper"); }
+                        }
+
+                        ToolRailDivider { border-subtle: root.border-subtle; }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/brush-line.svg");
+                            text: "Brush";
+                            active: root.active-tool-key == "Brush";
+                            clicked => { root.tool-triggered("Brush"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Document/file-copy-line.svg");
+                            text: "Clone";
+                            active: root.active-tool-key == "Clone";
+                            clicked => { root.tool-triggered("Clone"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/System/history-line.svg");
+                            text: "History";
+                            active: root.active-tool-key == "History";
+                            clicked => { root.tool-triggered("History"); }
+                        }
+
+                        ToolRailDivider { border-subtle: root.border-subtle; }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/eraser-line.svg");
+                            text: "Eras";
+                            active: root.active-tool-key == "Eras";
+                            clicked => { root.tool-triggered("Eras"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Device/gradienter-line.svg");
+                            text: "Gradient";
+                            active: root.active-tool-key == "Gradient";
+                            clicked => { root.tool-triggered("Gradient"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/blur-off-line.svg");
+                            text: "Blur";
+                            active: root.active-tool-key == "Blur";
+                            clicked => { root.tool-triggered("Blur"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/contrast-drop-line.svg");
+                            text: "Dodge";
+                            active: root.active-tool-key == "Dodge";
+                            clicked => { root.tool-triggered("Dodge"); }
+                        }
+
+                        ToolRailDivider { border-subtle: root.border-subtle; }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/pen-nib-line.svg");
+                            text: "Pen";
+                            active: root.active-tool-key == "Pen";
+                            clicked => { root.tool-triggered("Pen"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Editor/text.svg");
+                            text: "Type";
+                            active: root.active-tool-key == "Type";
+                            clicked => { root.tool-triggered("Type"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Development/cursor-line.svg");
+                            text: "Path";
+                            active: root.active-tool-key == "Path";
+                            clicked => { root.tool-triggered("Path"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Design/shapes-line.svg");
+                            text: "Shape";
+                            active: root.active-tool-key == "Shape";
+                            clicked => { root.tool-triggered("Shape"); }
+                        }
+
+                        ToolRailDivider { border-subtle: root.border-subtle; }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/Editor/cursor-hand.svg");
+                            text: "Hand";
+                            active: root.active-tool-key == "Hand";
+                            clicked => { root.tool-triggered("Hand"); }
+                        }
+
+                        ToolRailButton {
+                            bg-default: root.bg-chrome;
+                            button-bg-hover: root.button-bg-hover;
+                            button-bg-active: root.button-bg-active;
+                            border-subtle: root.border-subtle;
+                            accent-primary: root.accent-primary;
+                            text-primary: root.text-primary;
+                            text-secondary: root.text-secondary;
+                            icon: @image-url("../../../assets/icons/RemixIcons/System/zoom-in-line.svg");
+                            text: "Zoom";
+                            active: root.active-tool-key == "Zoom";
+                            clicked => { root.tool-triggered("Zoom"); }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            min-height: 124px;
+                            background: root.bg-panel;
+                            border-color: root.border-default;
+                            border-width: 1px;
+                            border-radius: 4px;
+
+                            VerticalLayout {
+                                padding-top: 6px;
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                padding-bottom: 6px;
+                                spacing: 4px;
+
+                                Rectangle {
+                                    min-height: 36px;
+
+                                    HorizontalLayout {
+                                        spacing: 2px;
+
+                                        Rectangle {
+                                            width: 14px;
+                                            height: 14px;
+                                            border-radius: 2px;
+                                            background: root.accent-primary;
+                                            border-color: root.border-strong;
+                                            border-width: 1px;
+                                        }
+
+                                        Rectangle {
+                                            width: 14px;
+                                            height: 14px;
+                                            border-radius: 2px;
+                                            background: #101216;
+                                            border-color: root.border-strong;
+                                            border-width: 1px;
+                                            y: 14px;
+                                        }
+                                    }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/Finance/swap-line.svg");
+                                    clicked => { root.command-triggered("Swap Colors"); }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/System/refresh-line.svg");
+                                    clicked => { root.command-triggered("Reset Colors"); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    background: root.bg-app;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            height: root.tab-height;
+                            background: root.bg-chrome;
+                            border-color: root.border-subtle;
+                            border-width: 1px;
+
+                            HorizontalLayout {
+                                padding-left: root.panel-padding;
+                                padding-right: root.panel-padding;
+                                spacing: 8px;
+
+                                Rectangle {
+                                    min-width: 316px;
+                                    background: root.bg-panel;
+                                    border-color: root.document-dirty ? root.accent-primary : root.border-default;
+                                    border-width: 1px;
+                                    border-radius: 4px;
+
+                                    Rectangle {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: 2px;
+                                        background: root.document-dirty ? root.accent-primary : root.border-strong;
+                                    }
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 6px;
+                                        spacing: 8px;
+
+                                        Image {
+                                            source: @image-url("../../../assets/icons/RemixIcons/Design/layout-grid-line.svg");
+                                            width: 12px;
+                                            height: 12px;
+                                            colorize: root.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+
+                                        VerticalLayout {
+                                            spacing: 0px;
+
+                                            Text {
+                                                text: root.document-title;
+                                                color: root.text-primary;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                            }
+
+                                            Text {
+                                                text: root.zoom-label + "  •  RGB/8";
+                                                color: root.text-muted;
+                                                font-size: 9px;
+                                            }
+                                        }
+
+                                        if root.document-dirty : Rectangle {
+                                            width: 7px;
+                                            height: 7px;
+                                            border-radius: 4px;
+                                            background: root.accent-primary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+
+                                        Rectangle {}
+
+                                        IconButton {
+                                            bg-default: #00000000;
+                                            button-bg-hover: root.button-bg-hover;
+                                            button-bg-active: root.button-bg-active;
+                                            border-default: #00000000;
+                                            accent-primary: root.accent-primary;
+                                            text-primary: root.text-primary;
+                                            text-secondary: root.text-secondary;
+                                            icon: @image-url("../../../assets/icons/RemixIcons/System/close-line.svg");
+                                            clicked => { root.command-triggered("Close Document"); }
+                                        }
+                                    }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/System/add-line.svg");
+                                    clicked => { root.command-triggered("New Document"); }
+                                }
+
+                                Rectangle {}
+                            }
+                        }
+
+                        Rectangle {
+                            background: root.bg-canvas-surround;
+                            border-color: root.border-subtle;
+                            border-width: 1px;
+
+                            Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: parent.width * 0.9;
+                                height: parent.height * 0.86;
+                                background: #101216;
+                                border-color: root.border-strong;
+                                border-width: 1px;
+                                border-radius: 8px;
+
+                                Rectangle {
+                                    x: 22px;
+                                    y: 6px;
+                                    width: parent.width - 44px;
+                                    height: 14px;
+                                    background: root.bg-panel-header;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+                                    border-radius: 3px;
+
+                                    for tick[index] in [0, 1, 2, 3, 4, 5, 6, 7] : Rectangle {
+                                        x: 12px + index * ((parent.width - 24px) / 8);
+                                        y: Math.mod(index, 2) == 0 ? 5px : 8px;
+                                        width: 1px;
+                                        height: Math.mod(index, 2) == 0 ? 6px : 3px;
+                                        background: root.text-muted;
+                                    }
+                                }
+
+                                Rectangle {
+                                    x: 6px;
+                                    y: 22px;
+                                    width: 14px;
+                                    height: parent.height - 44px;
+                                    background: root.bg-panel-header;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+                                    border-radius: 3px;
+
+                                    for tick[index] in [0, 1, 2, 3, 4, 5, 6, 7] : Rectangle {
+                                        x: Math.mod(index, 2) == 0 ? 5px : 8px;
+                                        y: 12px + index * ((parent.height - 24px) / 8);
+                                        width: Math.mod(index, 2) == 0 ? 6px : 3px;
+                                        height: 1px;
+                                        background: root.text-muted;
+                                    }
+                                }
+
+                                Rectangle {
+                                    x: 22px;
+                                    y: 22px;
+                                    width: parent.width - 44px;
+                                    height: parent.height - 44px;
+                                    background: #50555F;
+                                    border-color: root.border-strong;
+                                    border-width: 1px;
+
+                                    Rectangle {
+                                        x: 2px;
+                                        y: 2px;
+                                        width: parent.width - 4px;
+                                        height: parent.height - 4px;
+                                        background: #3E434C;
+                                        opacity: 0.42;
+                                    }
+
+                                    Image {
+                                        x: 2px;
+                                        y: 2px;
+                                        width: parent.width - 4px;
+                                        height: parent.height - 4px;
+                                        source: root.canvas-preview;
+                                        image-fit: contain;
+                                    }
+
+                                    TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        mouse-cursor: root.active-tool-key == "Hand" ? grab : root.active-tool-key == "Move" ? move : crosshair;
+
+                                        pointer-event(event) => {
+                                            let normalized-x = self.mouse-x / self.width;
+                                            let normalized-y = self.mouse-y / self.height;
+
+                                            if event.kind == PointerEventKind.down {
+                                                root.active-menu-index = -1;
+                                                root.canvas-pressed(normalized-x, normalized-y);
+                                            }
+
+                                            if event.kind == PointerEventKind.up {
+                                                root.canvas-released(normalized-x, normalized-y);
+                                            }
+                                        }
+
+                                        moved => {
+                                            let normalized-x = self.mouse-x / self.width;
+                                            let normalized-y = self.mouse-y / self.height;
+
+                                            if self.pressed {
+                                                root.canvas-dragged(normalized-x, normalized-y);
+                                            } else {
+                                                root.canvas-hovered(normalized-x, normalized-y);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    x: 14px;
+                                    y: 28px;
+                                    width: 160px;
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: root.bg-panel;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 6px;
+
+                                        Image {
+                                            source: @image-url("../../../assets/icons/RemixIcons/System/search-eye-line.svg");
+                                            width: 14px;
+                                            height: 14px;
+                                            colorize: root.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+
+                                        Text {
+                                            text: root.zoom-label + "  •  " + root.canvas-size-label;
+                                            color: root.text-secondary;
+                                            font-size: 9px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    x: (parent.width - self.width) / 2;
+                                    y: parent.height - self.height - 10px;
+                                    width: 254px;
+                                    height: 26px;
+                                    border-radius: 8px;
+                                    background: root.bg-panel;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 10px;
+
+                                        Text {
+                                            text: root.active-tool-label;
+                                            color: root.text-primary;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Rectangle {
+                                            width: 1px;
+                                            background: root.border-subtle;
+                                        }
+
+                                        Text {
+                                            text: "Space Pan";
+                                            color: root.text-secondary;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+S Save";
+                                            color: root.text-secondary;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: root.right-dock-width;
+                    background: root.bg-panel;
+                    border-color: root.border-subtle;
+                    border-width: 1px;
+
+                    HorizontalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            width: 28px;
+                            background: root.bg-panel-header;
+                            border-color: root.border-subtle;
+                            border-width: 1px;
+
+                            VerticalLayout {
+                                padding-top: 6px;
+                                padding-left: 3px;
+                                padding-right: 3px;
+                                spacing: 4px;
+
+                                IconButton {
+                                    bg-default: root.bg-panel-header;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/Design/palette-line.svg");
+                                    active: root.dock-shortcut-index == 0;
+                                    clicked => { root.dock-shortcut-index = 0; root.top-panel-index = 0; }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel-header;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/System/history-line.svg");
+                                    active: root.dock-shortcut-index == 1;
+                                    clicked => { root.dock-shortcut-index = 1; root.middle-panel-index = 2; }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel-header;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/System/settings-3-line.svg");
+                                    active: root.dock-shortcut-index == 2;
+                                    clicked => { root.dock-shortcut-index = 2; root.middle-panel-index = 1; }
+                                }
+
+                                IconButton {
+                                    bg-default: root.bg-panel-header;
+                                    button-bg-hover: root.button-bg-hover;
+                                    button-bg-active: root.button-bg-active;
+                                    border-default: root.border-default;
+                                    accent-primary: root.accent-primary;
+                                    text-primary: root.text-primary;
+                                    text-secondary: root.text-secondary;
+                                    icon: @image-url("../../../assets/icons/RemixIcons/Business/stack-line.svg");
+                                    active: root.dock-shortcut-index == 3;
+                                    clicked => { root.dock-shortcut-index = 3; root.bottom-panel-index = 0; }
+                                }
+
+                                Rectangle {}
+                            }
+                        }
+
+                        Rectangle {
+                            background: root.bg-panel;
+                            border-color: root.border-subtle;
+                            border-width: 1px;
+                            horizontal-stretch: 1;
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                padding-top: 3px;
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                padding-bottom: 3px;
+
+                                Rectangle {
+                                    min-height: 164px;
+                                    background: root.bg-panel;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+
+                                    VerticalLayout {
+                                        spacing: 0px;
+
+                                        Rectangle {
+                                            height: root.panel-header-height;
+                                            background: root.bg-panel-header;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                spacing: 2px;
+
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Color"; active: root.top-panel-index == 0; clicked => { root.top-panel-index = 0; root.dock-shortcut-index = 0; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Swatches"; active: root.top-panel-index == 1; clicked => { root.top-panel-index = 1; root.dock-shortcut-index = 0; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Gradients"; active: root.top-panel-index == 2; clicked => { root.top-panel-index = 2; root.dock-shortcut-index = 0; } }
+                                                Rectangle {}
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            background: root.bg-panel;
+                                            vertical-stretch: 1;
+
+                                            if root.top-panel-index == 0 : HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                padding-top: 6px;
+                                                padding-bottom: 6px;
+                                                spacing: 6px;
+
+                                                Rectangle {
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                    border-radius: 3px;
+                                                    horizontal-stretch: 1;
+
+                                                    Rectangle {
+                                                        x: 8px;
+                                                        y: 8px;
+                                                        width: parent.width - 16px;
+                                                        height: parent.height - 16px;
+                                                        border-radius: 2px;
+                                                        background: root.accent-primary;
+
+                                                        Rectangle {
+                                                            x: parent.width * 0.55;
+                                                            y: 0px;
+                                                            width: parent.width * 0.45;
+                                                            height: parent.height;
+                                                            background: #ffffff26;
+                                                        }
+
+                                                        Rectangle {
+                                                            x: 0px;
+                                                            y: parent.height * 0.58;
+                                                            width: parent.width;
+                                                            height: parent.height * 0.42;
+                                                            background: #00000038;
+                                                        }
+                                                    }
+                                                }
+
+                                                Rectangle {
+                                                    width: 14px;
+                                                    background: #00000000;
+
+                                                    Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 2px; background: #ff2a2a; }
+                                                    Rectangle { x: 0px; y: parent.height * 0.18; width: parent.width; height: parent.height * 0.18; background: #ff8c00; }
+                                                    Rectangle { x: 0px; y: parent.height * 0.36; width: parent.width; height: parent.height * 0.18; background: #f7e95b; }
+                                                    Rectangle { x: 0px; y: parent.height * 0.54; width: parent.width; height: parent.height * 0.18; background: #42d96b; }
+                                                    Rectangle { x: 0px; y: parent.height * 0.72; width: parent.width; height: parent.height * 0.14; background: #2e85ff; }
+                                                    Rectangle { x: 0px; y: parent.height * 0.86; width: parent.width; height: parent.height * 0.14; background: #d546ff; }
+                                                }
+                                            }
+
+                                            if root.top-panel-index == 1 : VerticalLayout {
+                                                padding-top: 8px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                padding-bottom: 8px;
+                                                spacing: 6px;
+
+                                                for swatch in [#f55b5b, #f39c12, #f4d35e, #5bd66c, #4f8cff, #8b5cf6, #ec4899, #e8ecf3] : Rectangle {
+                                                    height: 18px;
+                                                    border-radius: 3px;
+                                                    background: swatch;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                }
+                                            }
+
+                                            if root.top-panel-index == 2 : VerticalLayout {
+                                                padding-top: 8px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                padding-bottom: 8px;
+                                                spacing: 6px;
+
+                                                Rectangle { height: 22px; border-radius: 3px; background: @linear-gradient(90deg, #4f8cff, #8b5cf6); border-color: root.border-default; border-width: 1px; }
+                                                Rectangle { height: 22px; border-radius: 3px; background: @linear-gradient(90deg, #ff914d, #ffe066); border-color: root.border-default; border-width: 1px; }
+                                                Rectangle { height: 22px; border-radius: 3px; background: @linear-gradient(90deg, #14161A, #E8ECF3); border-color: root.border-default; border-width: 1px; }
+                                                Rectangle {}
+                                            }
+                                        }
+
+                                        if root.top-panel-index == 0 : HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            padding-bottom: 6px;
+                                            spacing: 6px;
+
+                                            Rectangle {
+                                                min-height: 30px;
+                                                background: root.bg-panel-header;
+                                                border-color: root.border-default;
+                                                border-width: 1px;
+                                                border-radius: 3px;
+                                                horizontal-stretch: 1;
+
+                                                VerticalLayout {
+                                                    padding-top: 4px;
+                                                    padding-left: 6px;
+                                                    spacing: 1px;
+                                                    Text { text: "Foreground"; color: root.text-muted; font-size: 9px; font-weight: 600; }
+                                                    Text { text: root.foreground-color-label; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                min-height: 30px;
+                                                background: root.bg-panel-header;
+                                                border-color: root.border-default;
+                                                border-width: 1px;
+                                                border-radius: 3px;
+                                                horizontal-stretch: 1;
+
+                                                VerticalLayout {
+                                                    padding-top: 4px;
+                                                    padding-left: 6px;
+                                                    spacing: 1px;
+                                                    Text { text: "Background"; color: root.text-muted; font-size: 9px; font-weight: 600; }
+                                                    Text { text: root.background-color-label; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                }
+                                            }
+                                        }
+
+                                        if root.top-panel-index != 0 : Rectangle {
+                                            height: 8px;
+                                            background: #00000000;
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    min-height: 96px;
+                                    background: root.bg-panel;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+
+                                    VerticalLayout {
+                                        spacing: 0px;
+
+                                        Rectangle {
+                                            height: root.panel-header-height;
+                                            background: root.bg-panel-header;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                spacing: 2px;
+
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Libraries"; active: root.middle-panel-index == 0; clicked => { root.middle-panel-index = 0; root.dock-shortcut-index = 2; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Adjustments"; active: root.middle-panel-index == 1; clicked => { root.middle-panel-index = 1; root.dock-shortcut-index = 2; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "History"; active: root.middle-panel-index == 2; clicked => { root.middle-panel-index = 2; root.dock-shortcut-index = 1; } }
+                                                Rectangle {}
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            background: root.bg-panel;
+                                            vertical-stretch: 1;
+
+                                            if root.middle-panel-index == 0 : VerticalLayout {
+                                                padding-top: 6px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 4px;
+
+                                                Text { text: "Workspace assets"; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                Text { text: "Library linking is later scope, but this region now behaves like a real panel tab."; color: root.text-muted; font-size: 9px; wrap: word-wrap; }
+                                                Rectangle {}
+                                            }
+
+                                            if root.middle-panel-index == 1 : VerticalLayout {
+                                                padding-top: 6px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 4px;
+
+                                                Text { text: "Adjustments"; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                for adj in ["Brightness", "Levels", "Curves", "Hue/Sat"] : Rectangle {
+                                                    height: 18px;
+                                                    border-radius: 3px;
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                    Text { text: adj; color: root.text-secondary; font-size: 9px; vertical-alignment: center; x: 6px; }
+                                                }
+                                            }
+
+                                            if root.middle-panel-index == 2 : VerticalLayout {
+                                                padding-top: 6px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 4px;
+
+                                                Text {
+                                                    text: root.history-entry-primary;
+                                                    color: root.text-primary;
+                                                    font-size: 10px;
+                                                    font-weight: 600;
+                                                }
+
+                                                Text {
+                                                    text: root.history-entry-secondary;
+                                                    color: root.text-muted;
+                                                    font-size: 9px;
+                                                }
+
+                                                Text { text: root.history-entry-tertiary; color: root.text-muted; font-size: 9px; }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    background: root.bg-panel;
+                                    border-color: root.border-default;
+                                    border-width: 1px;
+                                    vertical-stretch: 1;
+
+                                    VerticalLayout {
+                                        spacing: 0px;
+
+                                        Rectangle {
+                                            height: root.panel-header-height;
+                                            background: root.bg-panel-header;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                spacing: 2px;
+
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Layers"; active: root.bottom-panel-index == 0; clicked => { root.bottom-panel-index = 0; root.dock-shortcut-index = 3; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Channels"; active: root.bottom-panel-index == 1; clicked => { root.bottom-panel-index = 1; root.dock-shortcut-index = 3; } }
+                                                PanelTab { button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; text-primary: root.text-primary; text-secondary: root.text-secondary; text: "Paths"; active: root.bottom-panel-index == 2; clicked => { root.bottom-panel-index = 2; root.dock-shortcut-index = 3; } }
+                                                Rectangle {}
+                                                Text {
+                                                    text: root.layer-count-label;
+                                                    color: root.text-muted;
+                                                    font-size: 9px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 0 : Rectangle {
+                                            min-height: 24px;
+                                            background: root.bg-panel;
+
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                spacing: 4px;
+
+                                                CompactOptionChip {
+                                                    bg-panel: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/System/search-line.svg");
+                                                    label: "Kind";
+                                                    value: "All";
+                                                }
+
+                                                Rectangle {}
+
+                                                IconButton {
+                                                    bg-default: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    accent-primary: root.accent-primary;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/System/search-line.svg");
+                                                }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 0 : Rectangle {
+                                            min-height: 24px;
+                                            background: root.bg-panel;
+
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                spacing: 4px;
+
+                                                CompactOptionChip {
+                                                    bg-panel: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/Arrows/arrow-drop-down-line.svg");
+                                                    label: "Mode";
+                                                    value: root.layer-blend-mode-label;
+                                                }
+
+                                                CompactOptionChip {
+                                                    bg-panel: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/Arrows/arrow-drop-down-line.svg");
+                                                    label: "Opacity";
+                                                    value: root.layer-opacity-label;
+                                                }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 0 : Rectangle {
+                                            min-height: 24px;
+                                            background: root.bg-panel;
+
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                spacing: 4px;
+
+                                                Text { text: "Lock:"; color: root.text-muted; font-size: 9px; vertical-alignment: center; }
+                                                IconButton { bg-default: root.bg-panel-header; button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; accent-primary: root.accent-primary; text-primary: root.text-primary; text-secondary: root.text-secondary; icon: @image-url("../../../assets/icons/RemixIcons/System/lock-line.svg"); }
+                                                IconButton { bg-default: root.bg-panel-header; button-bg-hover: root.button-bg-hover; button-bg-active: root.button-bg-active; border-default: root.border-default; accent-primary: root.accent-primary; text-primary: root.text-primary; text-secondary: root.text-secondary; icon: @image-url("../../../assets/icons/RemixIcons/System/eye-line.svg"); active: true; }
+                                                Rectangle {}
+                                                Text { text: root.layer-visibility-label; color: root.text-muted; font-size: 9px; vertical-alignment: center; }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 0 : Rectangle {
+                                            background: root.bg-panel;
+                                            vertical-stretch: 1;
+
+                                            VerticalLayout {
+                                                padding-top: 6px;
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                spacing: 4px;
+
+                                                Rectangle {
+                                                    min-height: 36px;
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.accent-primary;
+                                                    border-width: 1px;
+                                                    border-radius: 3px;
+
+                                                    HorizontalLayout {
+                                                        padding-left: 6px;
+                                                        padding-right: 6px;
+                                                        spacing: 6px;
+
+                                                        Rectangle {
+                                                            width: 18px;
+                                                            height: 18px;
+                                                            border-radius: 2px;
+                                                            background: root.accent-primary;
+                                                            border-color: root.border-default;
+                                                            border-width: 1px;
+                                                            y: (parent.height - self.height) / 2;
+                                                        }
+
+                                                        VerticalLayout {
+                                                            spacing: 0px;
+
+                                                            Text { text: root.active-layer-name; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                            Text { text: root.layer-blend-mode-label + "  •  " + root.layer-opacity-label; color: root.text-muted; font-size: 9px; }
+                                                        }
+
+                                                        Rectangle {}
+
+                                                        Text { text: root.layer-visibility-label; color: root.text-secondary; font-size: 9px; vertical-alignment: center; }
+                                                    }
+                                                }
+
+                                                Rectangle {
+                                                    min-height: 44px;
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                    border-radius: 3px;
+
+                                                    VerticalLayout {
+                                                        padding-top: 6px;
+                                                        padding-left: 6px;
+                                                        padding-right: 6px;
+                                                        spacing: 2px;
+                                                        Text { text: "Canvas"; color: root.text-muted; font-size: 9px; font-weight: 600; }
+                                                        Text { text: root.canvas-size-label + "  •  " + root.selection-bounds-label; color: root.text-secondary; font-size: 9px; }
+                                                        Text { text: "The fixed dock now follows a grouped panel workspace instead of separate summary cards."; color: root.text-muted; font-size: 9px; wrap: word-wrap; }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 0 : Rectangle {
+                                            height: 28px;
+                                            background: root.bg-panel-header;
+                                            border-color: root.border-default;
+                                            border-width: 1px;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                spacing: 4px;
+
+                                                IconButton {
+                                                    bg-default: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    accent-primary: root.accent-primary;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/System/add-line.svg");
+                                                    clicked => { root.command-triggered("New Layer"); }
+                                                }
+
+                                                IconButton {
+                                                    bg-default: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    accent-primary: root.accent-primary;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/System/delete-bin-line.svg");
+                                                    clicked => { root.command-triggered("Delete Layer"); }
+                                                }
+
+                                                Rectangle {}
+
+                                                IconButton {
+                                                    bg-default: root.bg-panel-header;
+                                                    button-bg-hover: root.button-bg-hover;
+                                                    button-bg-active: root.button-bg-active;
+                                                    border-default: root.border-default;
+                                                    accent-primary: root.accent-primary;
+                                                    text-primary: root.text-primary;
+                                                    text-secondary: root.text-secondary;
+                                                    icon: @image-url("../../../assets/icons/RemixIcons/Design/focus-2-line.svg");
+                                                }
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 1 : Rectangle {
+                                            background: root.bg-panel;
+                                            vertical-stretch: 1;
+
+                                            VerticalLayout {
+                                                padding-top: 8px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 6px;
+                                                Text { text: "Channels"; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                for channel in ["RGB", "Red", "Green", "Blue"] : Rectangle {
+                                                    height: 20px;
+                                                    border-radius: 3px;
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                    Text { text: channel; color: root.text-secondary; font-size: 9px; vertical-alignment: center; x: 6px; }
+                                                }
+                                                Rectangle {}
+                                            }
+                                        }
+
+                                        if root.bottom-panel-index == 2 : Rectangle {
+                                            background: root.bg-panel;
+                                            vertical-stretch: 1;
+
+                                            VerticalLayout {
+                                                padding-top: 8px;
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 6px;
+                                                Text { text: "Paths"; color: root.text-primary; font-size: 10px; font-weight: 600; }
+                                                Rectangle {
+                                                    min-height: 42px;
+                                                    border-radius: 3px;
+                                                    background: root.bg-panel-header;
+                                                    border-color: root.border-default;
+                                                    border-width: 1px;
+                                                    Text { text: "Work path"; color: root.text-secondary; font-size: 9px; vertical-alignment: center; x: 6px; }
+                                                }
+                                                Rectangle {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: root.status-bar-height;
+            background: root.bg-chrome;
+            border-color: root.border-subtle;
+            border-width: 1px;
+
+            HorizontalLayout {
+                padding-left: root.panel-padding;
+                padding-right: root.panel-padding;
+                spacing: 10px;
+
+                Text {
+                    text: root.zoom-label + "  |  " + root.canvas-size-label;
+                    color: root.text-secondary;
+                    font-size: 11px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 1px;
+                    background: root.border-subtle;
+                }
+
+                Text {
+                    text: root.cursor-position-label;
+                    color: root.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.selection-bounds-label;
+                    color: root.text-muted;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {}
+
+                Text {
+                    text: "FG " + root.foreground-color-label + "  BG " + root.background-color-label;
+                    color: root.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 1px;
+                    background: root.border-subtle;
+                }
+
+                Text {
+                    text: root.status-message;
+                    color: root.text-muted;
+                    font-size: 11px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
