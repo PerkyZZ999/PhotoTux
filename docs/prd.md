@@ -99,6 +99,7 @@ It should feel professional before it feels feature-complete.
 - **Progressive complexity:** Start with destructive or simpler implementations where they reduce delivery risk.
 - **Predictable behavior:** Tools, transforms, and history should behave consistently.
 - **Separation of concerns:** Document state, rendering, UI, and file persistence must remain cleanly separated.
+- **Responsive architecture:** The shell must remain responsive while expensive work runs off the UI thread.
 
 ---
 
@@ -286,6 +287,7 @@ The first usable UI should include:
 
 ### MVP UI Constraint
 The MVP should use a fixed but polished panel layout rather than a full dockable layout system.
+The initial shell should prioritize native Linux behavior and predictable interaction over custom window-chrome experimentation.
 
 ---
 
@@ -295,6 +297,7 @@ The MVP should use a fixed but polished panel layout rather than a full dockable
 - Brush latency should stay low enough to feel direct.
 - Zoom and pan should remain smooth on large but reasonable documents.
 - Layer composition should remain usable as document complexity grows.
+- File IO, import/export, autosave, and other long-running work must not freeze the shell during normal editing.
 
 ### Reliability Targets
 - No data corruption in normal editing flows.
@@ -390,6 +393,8 @@ The MVP should use a fixed but polished panel layout rather than a full dockable
 - tile size for runtime raster storage
 - history model for raster edits
 - MVP blend mode list
+- Linux shell technology and canvas-hosting strategy
+- background job model for file IO, autosave, imports, exports, thumbnails, and heavy operations
 - fixed layout first versus dockable layout later
 - PSD compatibility policy and supported feature subset
 

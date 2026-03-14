@@ -1,7 +1,7 @@
 # PhotoTux UI Layout Specification
 Version: 1.0
 Target: Linux desktop
-Stack: Rust + Slint + wgpu
+Stack: Rust + GTK4 + wgpu
 
 ---
 
@@ -21,7 +21,7 @@ The layout should support:
 - tool-specific options
 - complex layer management
 - contextual editing controls
-- future docking and workspace presets
+- later workspace presets without destabilizing the fixed MVP shell
 
 Scope note: only the fixed-layout shell is part of the MVP direction. Docking, floating panels, and persistent workspace systems remain later-phase features unless the core roadmap changes.
 
@@ -31,7 +31,7 @@ Scope note: only the fixed-layout shell is part of the MVP direction. Docking, f
 
 The main window is composed of these vertical regions:
 
-1. Native titlebar or custom titlebar
+1. Native titlebar or GTK header bar
 2. Menu bar
 3. Tool options bar
 4. Main workspace body
@@ -101,9 +101,9 @@ The body is composed of three horizontal columns:
 Provide app identity, workspace preset access, quick search, and window controls while leaving document-specific chrome to the document region.
 
 ### Window Framing
-- The early shell should use a frameless window so only the custom PhotoTux titlebar is visible
-- Window controls remain in the custom titlebar surface rather than relying on native decorations
-- Drag and maximize behavior should be provided by the custom titlebar interactions
+- The early shell should prefer native GTK window behavior or a GTK header bar with native-feeling controls
+- Custom window chrome is later scope and should not delay editing-core milestones
+- Drag, maximize, and window-state behavior should feel native on Linux before any deeper shell customization
 
 ### Layout
 - Left: app icon + app name
@@ -832,9 +832,9 @@ When the app has abundant width:
 
 ---
 
-## 11. Slint-Oriented Component Hierarchy
+## 11. GTK-Oriented Component Hierarchy
 
-This is structural pseudocode for planning. It is not literal final Slint syntax.
+This is structural pseudocode for planning. It is not literal GTK widget code.
 
 ```text
 <AppWindow>
@@ -949,4 +949,4 @@ The layout is complete when:
 - right-side panels are usable without crowding the canvas
 - the layer panel supports realistic editing workflows
 - the layout remains coherent at 1280×800 and 2560×1440
-- the structure is componentized for Slint
+- the structure is componentized for GTK4 without coupling document logic to widget state

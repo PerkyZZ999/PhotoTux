@@ -1,11 +1,17 @@
-# PHOTOSHOP UI
+# PHOTOSHOP UI REFERENCE
+
+This document is reference material for familiar pro-editor layout patterns.
+It is not a committed implementation contract for PhotoTux MVP.
+
+PhotoTux should borrow useful structural ideas without inheriting unnecessary scope, vendor-specific behavior, or deferred systems such as full docking.
 
 ***
 
 # 📑 DOCUMENT 1: Application Layout & Core Architecture
 
 ## 1. Overview
-The user interface is divided into five primary structural zones. The recommended underlying web layout approach is CSS Grid or CSS Flexbox to manage these fixed and fluid zones.
+The user interface is divided into five primary structural zones.
+This is a desktop layout reference, not a prescribed implementation technology.
 
 1. **Menu Bar:** Top-most fixed horizontal bar.
 2. **Options Bar:** Secondary horizontal bar situated immediately below the Menu Bar.
@@ -55,9 +61,10 @@ This bar is **dynamic**. Its contents change entirely based on which tool is cur
 
 # 📑 DOCUMENT 3: Tools Bar (Left Sidebar)
 
-This is a fixed vertical column. A crucial UI behavior to implement is the **"Fly-out" or "Nested" menus**. Many tool buttons have a small triangle in the bottom-right corner, indicating that clicking and holding the button will reveal a sub-menu of related tools.
+This is a fixed vertical column.
+Fly-out or nested tool families are useful reference behavior, but they are not required MVP scope for PhotoTux.
 
-Here is the exact layout of the tools grouped by their functional categories based on the standard Photoshop layout.
+Here is a reference grouping of tools based on common professional-editor patterns.
 
 ## Group A: Move & Selection
 * **Move Tool (V)** -> *Nested: Artboard Tool*
@@ -100,17 +107,20 @@ Here is the exact layout of the tools grouped by their functional categories bas
 
 # 📑 DOCUMENT 4: Panels (Right Sidebar)
 
-The right sidebar is modular. It consists of individual "Panels" that can be grouped together using tabs. The AI should build this as a docking system where panels can be collapsed, expanded, or dragged to create new groups.
+The right sidebar is modular. It consists of individual panels that can be grouped together using tabs.
+For PhotoTux MVP, treat this as a reference only. The chosen implementation direction is a fixed dock layout rather than a full docking system.
 
 ## Core Panels to Implement
 1. **Layers Panel (Crucial):**
    * **List Area:** Displays stacked layers with a visibility toggle (eye icon) and lock toggle.
-   * **Bottom Toolbar:** Buttons for Delete Layer, New Layer, New Group (folder), Adjustment Layer, Layer Mask, and Layer Styles.
-   * **Top Area:** Blending Mode dropdown, Opacity slider, Fill slider.
+  * **Bottom Toolbar:** Buttons for Delete Layer and New Layer are the MVP baseline. Group, mask, and adjustment controls are later additions.
+  * **Top Area:** Blending Mode dropdown and Opacity slider are reasonable early controls. Fill is later scope.
 2. **Properties Panel:** Context-sensitive. If a text layer is selected, it shows typography settings. If a shape is selected, it shows fill/stroke settings.
 3. **Color & Swatches Panel:** A color picker UI (RGB/CMYK sliders or a color wheel) and a grid of saved color swatches.
 4. **History Panel:** A vertical list of actions the user has taken, allowing them to click back to an earlier state (Undo history).
 5. **Adjustments Panel:** A grid of icons for adding non-destructive adjustment layers (e.g., Brightness/Contrast, Hue/Saturation, Curves).
+
+For PhotoTux MVP, Layers, Properties, Color, and History are the committed panels. Swatches and Adjustments remain later scope.
 
 ## Panel Grouping Layout
 By default, panels are stacked vertically in tabbed groups. A standard default view looks like:

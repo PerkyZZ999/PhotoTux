@@ -2,7 +2,7 @@
 
 ## Project Name
 **Project Codename:** PhotoTux
-**Stack:** Rust + Slint + wgpu
+**Stack:** Rust + GTK4 + wgpu
 **Primary Target:** Linux desktop
 **Primary Environment:** KDE Plasma on Wayland
 **Architecture Style:** Modular Rust workspace
@@ -40,12 +40,13 @@ These constraints are deliberate and should influence every early implementation
 - Rust
 
 ### UI Layer
-- Slint for application chrome, panels, toolbars, dialogs, menus, and inspector surfaces
-- Slint must run on a GPU-backed renderer for the live desktop shell, not the software renderer
+- GTK4 via `gtk4-rs` for application chrome, panels, toolbars, dialogs, menus, and platform integration
+- `relm4` is optional for shell state organization, not a locked architectural requirement
 
 ### Canvas and Rendering
 - wgpu for custom canvas rendering, layer composition, overlays, and viewport presentation
 - the live viewport path must target GPU-backed presentation even while some edit operations remain CPU-authored in early milestones
+- raw Vulkan is deferred unless a later measured bottleneck proves `wgpu` insufficient
 
 ### Shading Language
 - WGSL
@@ -54,13 +55,15 @@ These constraints are deliberate and should influence every early implementation
 - CPU-side raster editing for early tools and simple operations
 - GPU-side composition and viewport display
 - selected GPU acceleration later where it materially improves user-facing latency
+- the `image` crate is primarily for import, export, and utility operations rather than the core hot editing path
 
 ### Serialization
 - serde for manifests, preferences, and metadata
 - versioned container format for native project files
 
 ### Background Work
-- standard library threads or a lightweight task model first
+- use a lightweight job system for save/load, autosave, import/export, thumbnails, heavy transforms, and other long-running work
+- keep the UI thread focused on widgets, command dispatch, and presentation state
 - avoid introducing tokio unless the workload clearly justifies it
 
 ### Logging and Errors
@@ -85,10 +88,11 @@ The following decisions are locked for the first implementation phase.
 - UI state must not own document state.
 
 ### Rendering Boundary
-- Slint owns the app shell.
+- GTK4 owns the app shell and platform integration.
 - The canvas is a custom rendering surface driven by wgpu.
 - Canvas rendering and panel UI must remain loosely coupled.
-- CPU `SharedPixelBuffer` previews are a transitional fallback only and must not remain the primary interactive viewport path.
+- GTK must not become the primary canvas rasterization path.
+- direct low-level surface interop is a feasibility tool, not a baseline requirement for the first implementation.
 
 ### Layout Boundary
 - Start with a fixed professional layout.
@@ -137,7 +141,7 @@ phototux/
 - preferences and autosave coordination
 
 #### `ui_shell`
-- Slint components
+- GTK4 widgets and shell composition
 - fixed panel layout
 - command routing to application services
 - menus, dialogs, status surfaces
@@ -256,7 +260,7 @@ These rules must be implemented consistently from the first render path.
 The application is divided into the following major layers:
 
 1. **UI Layer**
-   - Slint application shell
+   - GTK4 application shell
    - toolbars, panels, dialogs, menus
    - status surfaces and input routing
 
@@ -290,6 +294,11 @@ The application is divided into the following major layers:
    - recovery handling
    - import and export adapters
 
+7. **Job System**
+   - background execution for long-running work
+   - task prioritization for user-visible operations
+   - safe result delivery back to the shell and session state
+
 ---
 
 ## 9. Rendering Model
@@ -313,6 +322,7 @@ Use a tile-aware composition pipeline with dirty-tile invalidation and an offscr
 
 ### Non-Requirement for Early Phases
 - Do not introduce compute-heavy GPU filters until the core viewport path is stable.
+- Do not add Skia as a second rendering system unless a concrete later use case justifies the extra integration cost.
 
 ---
 
@@ -397,6 +407,9 @@ Use a hybrid history model.
 - visible stroke feedback must feel immediate
 - large brushes should degrade gracefully rather than stall
 - UI thread work during strokes must stay minimal
+
+### Interaction Rule
+- direct-manipulation paths such as brush preview, pan, zoom, selection drag, and transform preview must favor low-latency incremental updates over heavyweight background scheduling
 
 ### Deferred Features
 - pressure sensitivity
@@ -536,6 +549,7 @@ PSD support must remain an import and export adapter concern. The native `.ptx` 
 - canvas remains the visual focus
 - no dockable framework in MVP
 - minimal chrome and restrained iconography
+- native Linux behavior is preferred over deep custom shell chrome in early milestones
 
 ---
 
@@ -569,7 +583,26 @@ Map raw input into:
 
 ---
 
-## 18. Performance Strategy
+## 18. Concurrency and Responsiveness Model
+
+### Execution Classes
+1. UI thread for GTK widgets, menus, shortcuts, shell state, and command dispatch.
+2. Render path for viewport presentation, overlays, and immediate interaction feedback.
+3. Worker jobs for file IO, serialization, autosave, imports, exports, thumbnails, heavy resampling, and later filters.
+
+### Rules
+- the UI thread must never block on long-running file or image operations
+- interactive viewport feedback must remain incremental and cancelable where practical
+- worker results must be applied on the document/session boundary, never by mutating UI-owned state directly
+- prioritise user-visible tasks over background maintenance work
+
+### Rationale
+- a responsive editor depends on clear separation between shell work, rendering, and heavyweight processing
+- this model preserves responsiveness without forcing the entire application into an async runtime
+
+---
+
+## 19. Performance Strategy
 
 ### Core Strategies
 - dirty-tile invalidation
@@ -590,7 +623,7 @@ The UI thread must never block on expensive file IO or long-running image operat
 
 ---
 
-## 19. Error Handling and Recovery
+## 20. Error Handling and Recovery
 
 ### Requirements
 - actionable import and export errors
@@ -606,7 +639,7 @@ The UI thread must never block on expensive file IO or long-running image operat
 
 ---
 
-## 20. Testing Strategy
+## 21. Testing Strategy
 
 ### Unit Tests
 - geometry
@@ -641,7 +674,7 @@ The UI thread must never block on expensive file IO or long-running image operat
 
 ---
 
-## 21. Packaging and Distribution
+## 22. Packaging and Distribution
 
 ### Primary Targets
 - native Linux development build
@@ -656,11 +689,11 @@ The UI thread must never block on expensive file IO or long-running image operat
 
 ---
 
-## 22. Technical Roadmap
+## 23. Technical Roadmap
 
 ### Tech Milestone A - Feasibility
 - workspace created
-- Slint shell renders
+- GTK4 shell renders
 - custom canvas surface works
 - zoom and pan behave correctly
 - single-layer paint path works
@@ -699,7 +732,7 @@ The UI thread must never block on expensive file IO or long-running image operat
 
 ---
 
-## 23. Definition of Done for MVP
+## 24. Definition of Done for MVP
 
 The MVP is complete when:
 - a user can create and save a layered document

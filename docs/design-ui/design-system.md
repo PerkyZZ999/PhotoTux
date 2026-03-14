@@ -601,7 +601,7 @@ Accent usage must be selective.
 
 ---
 
-## 18. Slint Token Export Example
+## 18. Rust Token Export Example
 
 This Rust example is illustrative only. It does not define a required final API shape.
 
@@ -626,27 +626,27 @@ pub struct ThemeTokens {
 
 ---
 
-## 19. Slint-Friendly Theme Mapping
+## 19. GTK4-Friendly Theme Mapping
 
-This mapping is Slint-oriented reference material, not a locked final implementation.
+This mapping is GTK-oriented reference material, not a locked final implementation.
 
-```xml
-export global Theme {
-    in property <color> bg-app: #1B1D21;
-    in property <color> bg-panel: #252930;
-    in property <color> bg-panel-header: #2C3139;
-    in property <color> text-primary: #E8ECF3;
-    in property <color> text-secondary: #B3BCC8;
-    in property <color> accent-primary: #4F8CFF;
-    in property <color> border-subtle: #313741;
+```css
+:root {
+  --bg-app: #1B1D21;
+  --bg-panel: #252930;
+  --bg-panel-header: #2C3139;
+  --text-primary: #E8ECF3;
+  --text-secondary: #B3BCC8;
+  --accent-primary: #4F8CFF;
+  --border-subtle: #313741;
 
-    in property <length> radius-sm: 4px;
-    in property <length> radius-md: 6px;
-    in property <length> panel-padding: 8px;
-    in property <length> control-height-md: 32px;
-    in property <length> toolbar-width: 60px;
-    in property <length> panel-header-height: 30px;
-    in property <length> tab-height: 34px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --panel-padding: 8px;
+  --control-height-md: 32px;
+  --toolbar-width: 60px;
+  --panel-header-height: 30px;
+  --tab-height: 34px;
 }
 ```
 
