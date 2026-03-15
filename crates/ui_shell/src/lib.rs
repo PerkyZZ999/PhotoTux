@@ -3,9 +3,9 @@ use common::{CanvasRaster, CanvasRect, CanvasSize, APP_NAME};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    gdk, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, EventControllerScroll,
-    EventControllerScrollFlags, GestureDrag, HeaderBar, Label, Orientation, Paned, Picture,
-    Separator,
+    gdk, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, EventControllerKey,
+    EventControllerScroll, EventControllerScrollFlags, GestureDrag, HeaderBar, Label, Orientation,
+    Paned, Picture, Separator,
 };
 use render_wgpu::{CanvasOverlayRect, OffscreenCanvasRenderer, ViewportSize, ViewportState};
 use std::cell::RefCell;
@@ -25,6 +25,7 @@ pub struct LayerPanelItem {
 pub enum ShellToolKind {
     Move,
     RectangularMarquee,
+    Transform,
     Brush,
     Eraser,
     Hand,
@@ -36,6 +37,7 @@ impl ShellToolKind {
         match self {
             Self::Move => "Move Tool",
             Self::RectangularMarquee => "Rectangular Marquee",
+            Self::Transform => "Transform Tool",
             Self::Brush => "Brush Tool",
             Self::Eraser => "Eraser Tool",
             Self::Hand => "Hand Tool",
@@ -47,6 +49,7 @@ impl ShellToolKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSnapshot {
     pub document_title: String,
+    pub status_message: String,
     pub canvas_size: CanvasSize,
     pub canvas_revision: u64,
     pub active_tool_name: String,
@@ -57,6 +60,9 @@ pub struct ShellSnapshot {
     pub active_layer_visible: bool,
     pub active_layer_blend_mode: String,
     pub active_layer_bounds: Option<CanvasRect>,
+    pub transform_preview_rect: Option<CanvasRect>,
+    pub transform_active: bool,
+    pub transform_scale_percent: u32,
     pub selection_rect: Option<CanvasRect>,
     pub selection_inverted: bool,
     pub foreground_color: [u8; 4],
@@ -76,14 +82,23 @@ pub trait ShellController {
     fn toggle_layer_visibility(&mut self, index: usize);
     fn increase_active_layer_opacity(&mut self);
     fn decrease_active_layer_opacity(&mut self);
+    fn next_active_layer_blend_mode(&mut self);
+    fn previous_active_layer_blend_mode(&mut self);
     fn move_active_layer_up(&mut self);
     fn move_active_layer_down(&mut self);
     fn swap_colors(&mut self);
     fn reset_colors(&mut self);
     fn clear_selection(&mut self);
     fn invert_selection(&mut self);
+    fn begin_transform(&mut self);
+    fn scale_transform_up(&mut self);
+    fn scale_transform_down(&mut self);
+    fn commit_transform(&mut self);
+    fn cancel_transform(&mut self);
     fn undo(&mut self);
     fn redo(&mut self);
+    fn save_document(&mut self);
+    fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
     fn update_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
@@ -124,6 +139,7 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
     root.append(&shell_state.status_bar);
 
     window.set_child(Some(&root));
+    wire_window_shortcuts(&window, shell_state.clone());
     window.present();
 
     shell_state.refresh();
@@ -209,6 +225,7 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
     for (index, (tool, label)) in [
         (ShellToolKind::Move, "Move"),
         (ShellToolKind::RectangularMarquee, "Marquee"),
+        (ShellToolKind::Transform, "Transform"),
         (ShellToolKind::Brush, "Brush"),
         (ShellToolKind::Eraser, "Eraser"),
         (ShellToolKind::Hand, "Hand"),
@@ -217,7 +234,7 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
     .into_iter()
     .enumerate()
     {
-        if index == 3 || index == 5 {
+        if index == 4 || index == 6 {
             rail.append(&Separator::new(Orientation::Horizontal));
         }
 
@@ -297,8 +314,7 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     canvas_frame.set_hexpand(true);
     canvas_frame.set_vexpand(true);
 
-    let canvas = build_canvas_host(shell_state.controller.clone());
-    canvas_frame.append(&canvas);
+    canvas_frame.append(&shell_state.canvas_picture);
 
     content.append(&canvas_frame);
     workspace.append(&content);
@@ -381,6 +397,8 @@ fn build_status_label(text: &str) -> Label {
 
 struct ShellUiState {
     controller: Rc<RefCell<dyn ShellController>>,
+    canvas_state: Rc<RefCell<CanvasHostState>>,
+    canvas_picture: Picture,
     tool_rail: GtkBox,
     tool_buttons: Vec<(ShellToolKind, Button)>,
     document_tabs: GtkBox,
@@ -404,6 +422,7 @@ impl ShellUiState {
     fn new(controller: Rc<RefCell<dyn ShellController>>) -> Rc<Self> {
         let (tool_rail, tool_buttons) = build_left_tool_rail(controller.clone());
         let (document_tabs, document_tab_label) = build_document_tabs();
+        let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
 
         let color_body = GtkBox::new(Orientation::Vertical, 6);
         color_body.add_css_class("panel-group-body");
@@ -425,6 +444,8 @@ impl ShellUiState {
 
         Rc::new(Self {
             controller,
+            canvas_state,
+            canvas_picture,
             tool_rail,
             tool_buttons,
             document_tabs,
@@ -445,7 +466,90 @@ impl ShellUiState {
         })
     }
 
+    fn handle_shortcut(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+        let is_control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
+        let is_shift = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+        let key_char = key.to_unicode().map(|character| character.to_ascii_lowercase());
+
+        if is_control {
+            match key_char {
+                Some('z') if is_shift => {
+                    self.controller.borrow_mut().redo();
+                    return true;
+                }
+                Some('z') => {
+                    self.controller.borrow_mut().undo();
+                    return true;
+                }
+                Some('y') => {
+                    self.controller.borrow_mut().redo();
+                    return true;
+                }
+                Some('s') => {
+                    self.controller.borrow_mut().save_document();
+                    return true;
+                }
+                Some('d') => {
+                    self.controller.borrow_mut().clear_selection();
+                    return true;
+                }
+                Some('i') => {
+                    self.controller.borrow_mut().invert_selection();
+                    return true;
+                }
+                Some('=') | Some('+') => {
+                    self.canvas_state.borrow_mut().zoom_in();
+                    return true;
+                }
+                Some('-') => {
+                    self.canvas_state.borrow_mut().zoom_out();
+                    return true;
+                }
+                Some('0') => {
+                    self.canvas_state.borrow_mut().fit_to_view();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        match key {
+            gdk::Key::Return | gdk::Key::KP_Enter => {
+                if self.controller.borrow().snapshot().transform_active {
+                    self.controller.borrow_mut().commit_transform();
+                    return true;
+                }
+            }
+            gdk::Key::Escape => {
+                let snapshot = self.controller.borrow().snapshot();
+                if snapshot.transform_active {
+                    self.controller.borrow_mut().cancel_transform();
+                    return true;
+                }
+                if snapshot.selection_rect.is_some() {
+                    self.controller.borrow_mut().clear_selection();
+                    return true;
+                }
+            }
+            _ => {}
+        }
+
+        match key_char {
+            Some('v') => self.controller.borrow_mut().select_tool(ShellToolKind::Move),
+            Some('m') => self.controller.borrow_mut().select_tool(ShellToolKind::RectangularMarquee),
+            Some('t') => self.controller.borrow_mut().select_tool(ShellToolKind::Transform),
+            Some('b') => self.controller.borrow_mut().select_tool(ShellToolKind::Brush),
+            Some('e') => self.controller.borrow_mut().select_tool(ShellToolKind::Eraser),
+            Some('h') => self.controller.borrow_mut().select_tool(ShellToolKind::Hand),
+            Some('z') => self.controller.borrow_mut().select_tool(ShellToolKind::Zoom),
+            _ => return false,
+        }
+
+        true
+    }
+
     fn refresh(&self) {
+        self.controller.borrow_mut().poll_background_tasks();
         let snapshot = self.controller.borrow().snapshot();
         self.document_tab_label
             .set_label(&format!("{}   100%   RGB/8", snapshot.document_title));
@@ -455,7 +559,12 @@ impl ShellUiState {
         ));
         self.status_zoom.set_label("Zoom: 100%");
         self.status_cursor.set_label("Cursor: 0,0");
-        self.status_mode.set_label("RGB/8");
+        if snapshot.status_message.is_empty() {
+            self.status_mode.set_label("RGB/8");
+        } else {
+            self.status_mode
+                .set_label(&format!("RGB/8  {}", snapshot.status_message));
+        }
 
         self.refresh_tool_buttons(&snapshot);
         self.refresh_color_panel(&snapshot);
@@ -536,6 +645,16 @@ impl ShellUiState {
                 label.add_css_class("panel-row");
                 self.properties_body.append(&label);
             }
+
+            if snapshot.transform_active {
+                let label = Label::new(Some(&format!(
+                    "Transform: {}%",
+                    snapshot.transform_scale_percent
+                )));
+                label.set_xalign(0.0);
+                label.add_css_class("panel-row");
+                self.properties_body.append(&label);
+            }
         }
 
         let controls = GtkBox::new(Orientation::Horizontal, 6);
@@ -556,6 +675,24 @@ impl ShellUiState {
         controls.append(&opacity_up);
         self.properties_body.append(&controls);
 
+        let blend_controls = GtkBox::new(Orientation::Horizontal, 6);
+        let blend_prev = Button::with_label("Blend -");
+        blend_prev.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            blend_prev.connect_clicked(move |_| controller.borrow_mut().previous_active_layer_blend_mode());
+        }
+        blend_controls.append(&blend_prev);
+
+        let blend_next = Button::with_label("Blend +");
+        blend_next.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            blend_next.connect_clicked(move |_| controller.borrow_mut().next_active_layer_blend_mode());
+        }
+        blend_controls.append(&blend_next);
+        self.properties_body.append(&blend_controls);
+
         let selection_controls = GtkBox::new(Orientation::Horizontal, 6);
         let clear_selection = Button::with_label("Clear Sel");
         clear_selection.add_css_class("tool-chip");
@@ -575,6 +712,56 @@ impl ShellUiState {
         }
         selection_controls.append(&invert_selection);
         self.properties_body.append(&selection_controls);
+
+        let transform_controls = GtkBox::new(Orientation::Horizontal, 6);
+
+        let begin_transform = Button::with_label("Start Xform");
+        begin_transform.add_css_class("tool-chip");
+        begin_transform.set_sensitive(snapshot.active_layer_bounds.is_some() && !snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            begin_transform.connect_clicked(move |_| controller.borrow_mut().begin_transform());
+        }
+        transform_controls.append(&begin_transform);
+
+        let scale_down = Button::with_label("Scale -");
+        scale_down.add_css_class("tool-chip");
+        scale_down.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_down.connect_clicked(move |_| controller.borrow_mut().scale_transform_down());
+        }
+        transform_controls.append(&scale_down);
+
+        let scale_up = Button::with_label("Scale +");
+        scale_up.add_css_class("tool-chip");
+        scale_up.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_up.connect_clicked(move |_| controller.borrow_mut().scale_transform_up());
+        }
+        transform_controls.append(&scale_up);
+        self.properties_body.append(&transform_controls);
+
+        let transform_commit_row = GtkBox::new(Orientation::Horizontal, 6);
+        let commit_transform = Button::with_label("Commit Xform");
+        commit_transform.add_css_class("tool-chip");
+        commit_transform.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            commit_transform.connect_clicked(move |_| controller.borrow_mut().commit_transform());
+        }
+        transform_commit_row.append(&commit_transform);
+
+        let cancel_transform = Button::with_label("Cancel Xform");
+        cancel_transform.add_css_class("tool-chip");
+        cancel_transform.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            cancel_transform.connect_clicked(move |_| controller.borrow_mut().cancel_transform());
+        }
+        transform_commit_row.append(&cancel_transform);
+        self.properties_body.append(&transform_commit_row);
     }
 
     fn refresh_layers_panel(&self, snapshot: &ShellSnapshot) {
@@ -702,7 +889,19 @@ fn install_theme() {
     }
 }
 
-fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> Picture {
+fn wire_window_shortcuts(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) {
+    let key_controller = EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+        if shell_state.handle_shortcut(key, modifiers) {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(key_controller);
+}
+
+fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, Rc<RefCell<CanvasHostState>>) {
     let picture = Picture::new();
     picture.set_hexpand(true);
     picture.set_vexpand(true);
@@ -713,12 +912,13 @@ fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> Picture {
     wire_canvas_drag(&picture, state.clone());
     wire_canvas_scroll(&picture, state.clone());
 
+    let tick_state = state.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        state.borrow_mut().tick();
+        tick_state.borrow_mut().tick();
         ControlFlow::Continue
     });
 
-    picture
+    (picture, state)
 }
 
 fn wire_canvas_drag(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
@@ -867,6 +1067,13 @@ impl CanvasHostState {
                 fill_rgba: None,
             });
         }
+        if let Some(bounds) = snapshot.transform_preview_rect {
+            overlays.push(CanvasOverlayRect {
+                rect: bounds,
+                stroke_rgba: [255, 170, 61, 255],
+                fill_rgba: Some([255, 170, 61, 28]),
+            });
+        }
         if let Some(selection) = snapshot.selection_rect {
             overlays.push(CanvasOverlayRect {
                 rect: selection,
@@ -908,7 +1115,11 @@ impl CanvasHostState {
             ShellToolKind::Hand => {
                 self.drag_origin_pan = Some((self.viewport_state.pan_x, self.viewport_state.pan_y));
             }
-            ShellToolKind::Move | ShellToolKind::RectangularMarquee | ShellToolKind::Brush | ShellToolKind::Eraser => {
+            ShellToolKind::Move
+            | ShellToolKind::RectangularMarquee
+            | ShellToolKind::Transform
+            | ShellToolKind::Brush
+            | ShellToolKind::Eraser => {
                 let (canvas_x, canvas_y) = self.screen_to_canvas(start_x, start_y);
                 self.controller.borrow_mut().begin_canvas_interaction(canvas_x, canvas_y);
             }
@@ -926,7 +1137,11 @@ impl CanvasHostState {
                     self.dirty = true;
                 }
             }
-            ShellToolKind::Move | ShellToolKind::RectangularMarquee | ShellToolKind::Brush | ShellToolKind::Eraser => {
+            ShellToolKind::Move
+            | ShellToolKind::RectangularMarquee
+            | ShellToolKind::Transform
+            | ShellToolKind::Brush
+            | ShellToolKind::Eraser => {
                 if let Some((start_x, start_y)) = self.drag_start_screen {
                     let (canvas_x, canvas_y) = self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
                     self.controller.borrow_mut().update_canvas_interaction(canvas_x, canvas_y);
@@ -947,6 +1162,32 @@ impl CanvasHostState {
     fn zoom(&mut self, delta_y: f64, focal_x: f32, focal_y: f32) {
         let zoom_factor = if delta_y < 0.0 { 1.1 } else { 1.0 / 1.1 };
         self.viewport_state.zoom_towards(zoom_factor, focal_x, focal_y);
+        self.dirty = true;
+    }
+
+    fn zoom_in(&mut self) {
+        let width = self.picture.width().max(1) as f32;
+        let height = self.picture.height().max(1) as f32;
+        self.viewport_state.zoom_towards(1.1, width * 0.5, height * 0.5);
+        self.dirty = true;
+    }
+
+    fn zoom_out(&mut self) {
+        let width = self.picture.width().max(1) as f32;
+        let height = self.picture.height().max(1) as f32;
+        self.viewport_state.zoom_towards(1.0 / 1.1, width * 0.5, height * 0.5);
+        self.dirty = true;
+    }
+
+    fn fit_to_view(&mut self) {
+        let logical_width = self.picture.width().max(1) as u32;
+        let logical_height = self.picture.height().max(1) as u32;
+        self.viewport_state = ViewportState::fit_canvas(
+            self.canvas_size,
+            ViewportSize::new(logical_width as f32, logical_height as f32),
+        );
+        self.viewport_fitted = true;
+        self.last_logical_size = (logical_width, logical_height);
         self.dirty = true;
     }
 

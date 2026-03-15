@@ -16,12 +16,12 @@ Consult these files before making architectural or feature decisions:
 
 - `docs/prd.md`
 - `docs/technical-specifications.md`
-- `docs/research.md`
+- `docs/research/research.md`
 - `docs/architecture-overview.md`
 - `docs/development-workflow.md`
 - `docs/testing-strategy.md`
 - `docs/roadmap.md`
-- `docs/tasks-list.md`
+- `docs/pre-mvp/tasks-list.md`
 
 Consult these UI references when working on shell or layout code:
 
@@ -125,7 +125,7 @@ Minimum expectations:
 ## Workflow Rules
 
 - Implement from model and behavior outward, then wire the shell.
-- Update `docs/tasks-list.md` as work progresses.
+- Update `docs/pre-mvp/tasks-list.md` as work progresses.
 - Update `docs/roadmap.md` if milestone ordering changes.
 - Update `docs/technical-specifications.md` if architectural decisions change.
 - Do not treat aspirational reference material as committed scope.

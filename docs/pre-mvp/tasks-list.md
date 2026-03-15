@@ -29,6 +29,13 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - [x] T11 - Implement the Layers, Properties, Color, and History panels
 - [x] T12 - Add move-tool workflow
 - [x] T13 - Add rectangular selection workflow
+- [x] T14 - Add simple transform workflow
+- [x] T15 - Add initial blend modes
+- [x] T16 - Complete import and export support for JPEG and WebP
+- [x] T17 - Add keyboard shortcuts and command routing
+- [x] T18 - Add autosave and crash recovery
+- [x] T19 - Harden responsiveness with a lightweight job system
+- [x] T20 - Validate and stabilize the MVP workflow
 
 ## MVP Tasks
 
@@ -293,7 +300,7 @@ Progress notes:
 
 ### T14 - Add simple transform workflow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: users can scale and translate content reliably
 - Includes:
   - transform preview
@@ -304,9 +311,16 @@ Progress notes:
 - Done when:
   - preview and committed output match expected results
 
+Progress notes:
+- `tool_system` now includes a simple transform tool that scales and translates active-layer raster content with deterministic nearest-neighbor resampling
+- `doc_model` now exposes layer-state snapshots so transform commit and history can restore raster content and offsets exactly
+- `app_core` now owns a transform preview session with drag-to-translate, scale controls, and single-action commit or cancel behavior
+- `ui_shell` now exposes a Transform tool plus Properties controls for starting, scaling, committing, and canceling the previewed transform
+- transform preview now flows through the same flattened canvas presentation path as the committed image, reducing preview-versus-commit mismatch in the current architecture
+
 ### T15 - Add initial blend modes
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: layered compositing becomes meaningfully useful
 - Includes:
   - Normal
@@ -319,9 +333,15 @@ Progress notes:
 - Done when:
   - blend output is correct in viewport, save, and export paths
 
+Progress notes:
+- `color_math` now contains tested blend math for Normal, Multiply, Screen, Overlay, Darken, and Lighten compositing
+- `file_io` flattening now uses the shared blend-math path, which keeps viewport-fed raster presentation and export output aligned in the current architecture
+- `doc_model` now exposes active-layer blend-mode updates instead of treating blend mode as load-only metadata
+- `app_core` and `ui_shell` now expose simple blend-mode cycling controls in the Properties panel so the initial blend set is usable from the shell
+
 ### T16 - Complete import and export support for JPEG and WebP
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: the promised MVP interchange set is complete
 - Includes:
   - JPEG import and export
@@ -331,9 +351,15 @@ Progress notes:
 - Done when:
   - the documented import/export set works end to end
 
+Progress notes:
+- `file_io` now supports JPEG and WebP import/export alongside PNG using the shared flattened composite path
+- JPEG export now flattens transparency against an opaque white background while WebP export preserves alpha through the RGBA path
+- malformed JPEG and WebP imports now return contextual errors instead of failing with raw codec messages only
+- regression tests now cover PNG, JPEG, and WebP roundtrips plus malformed-file error handling
+
 ### T17 - Add keyboard shortcuts and command routing
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: the editor becomes efficient for repeat use
 - Includes:
   - core tool shortcuts
@@ -345,9 +371,15 @@ Progress notes:
 - Done when:
   - the main workflow no longer depends on menu-only access
 
+Progress notes:
+- `ui_shell` now installs a window-level keyboard controller for tool selection, undo and redo, selection actions, transform commit and cancel, and viewport zoom controls
+- `app_core` now exposes a quick-save command route so `Ctrl+S` saves the current document to its known path or to the current working directory using the current document title
+- zoom shortcuts now operate through the existing canvas viewport state rather than introducing duplicate zoom state in the controller layer
+- the shortcut set covers the current MVP workflows: `V`, `M`, `T`, `B`, `E`, `H`, `Z`, `Ctrl+Z`, `Ctrl+Shift+Z`, `Ctrl+Y`, `Ctrl+S`, `Ctrl+D`, `Ctrl+I`, `Ctrl++`, `Ctrl+-`, `Ctrl+0`, `Enter`, and `Escape`
+
 ### T18 - Add autosave and crash recovery
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: editing sessions are resilient to crashes or forced shutdowns
 - Includes:
   - autosave triggers
@@ -358,9 +390,16 @@ Progress notes:
 - Done when:
   - recovery works without corrupting the main document or history behavior
 
+Progress notes:
+- `app_core` now tracks dirty state separately for primary saves and autosaves, and triggers background autosave after an idle interval following document changes
+- autosave writes a recovery file beside the primary `.ptx` target using `file_io` recovery-path helpers instead of touching the primary document file
+- successful primary saves now clear stale recovery files so crash-recovery state does not linger after an explicit save
+- startup now detects a recovery file for the current working document, loads it through the controller boundary, restores the document state, and records the recovery event in history
+- regression tests now cover autosave recovery-file creation and startup recovery loading
+
 ### T19 - Harden responsiveness with a lightweight job system
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: long-running work stops blocking the shell
 - Includes:
   - background execution for save/load, autosave, import/export, and thumbnails
@@ -370,9 +409,16 @@ Progress notes:
 - Done when:
   - common file operations do not freeze the editor shell
 
+Progress notes:
+- `app_core` now owns a lightweight prioritized worker queue built on standard threads, mutexes, condition variables, and result polling rather than an async runtime
+- user-visible jobs are prioritized ahead of background maintenance jobs, which gives manual save and recovery load precedence over autosave work when both are queued
+- manual save, autosave, and startup recovery load now run off the UI path and return results through the session/controller boundary before shell state is refreshed
+- `ui_shell` now polls background job completions during its normal refresh cycle and surfaces controller status text in the status bar without moving document ownership into the shell
+- the current worker path is ready to absorb future import/export and thumbnail jobs as those shell commands are expanded
+
 ### T20 - Validate and stabilize the MVP workflow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: MVP is trustworthy enough for real use
 - Includes:
   - regression fixes
@@ -384,6 +430,13 @@ Progress notes:
 - Depends on: T01 through T19
 - Done when:
   - a real layered design or compositing workflow can be completed without major instability
+
+Progress notes:
+- representative compositing scenes now have explicit regression coverage for `.ptx` save/load, repeated roundtrips, and PNG export parity in `file_io`
+- controller-level tests now assert that the viewport-facing canvas raster matches the shared flattened export path for a representative layered scene
+- large sparse layered documents now have automated persistence and export consistency coverage to reduce risk around larger canvases and sparse tile distributions
+- manual save no longer inserts a history entry, so undo still targets the last real edit immediately after a save
+- documentation now records the canonical fixture categories and the current MVP validation coverage
 
 ## Suggested Execution Order
 

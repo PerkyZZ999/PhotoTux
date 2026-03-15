@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+color_math = { path = "../color_math" }
 common = { path = "../common" }
 doc_model = { path = "../doc_model" }
 image.workspace = true

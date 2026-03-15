@@ -1,12 +1,30 @@
+use anyhow::Context;
+use color_math::{blend_rgba_over, BlendModeMath};
 use common::{CanvasSize, LayerId};
 use doc_model::{BlendMode, Document, RasterLayer, RasterTile, TileCoord};
-use image::{ImageBuffer, ImageFormat, Rgba};
+use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
 pub const PROJECT_FILE_EXTENSION: &str = "ptx";
 pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
+pub const RECOVERY_FILE_SUFFIX: &str = ".autosave";
+
+pub fn recovery_path_for_project_path(path: &Path) -> std::path::PathBuf {
+	let mut file_name = OsString::from(path.as_os_str());
+	file_name.push(RECOVERY_FILE_SUFFIX);
+	std::path::PathBuf::from(file_name)
+}
+
+pub fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
+	match fs::remove_file(path) {
+		Ok(()) => Ok(()),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+		Err(error) => Err(error.into()),
+	}
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectManifest {
@@ -184,7 +202,56 @@ pub fn export_png_to_path(path: &Path, document: &Document) -> anyhow::Result<()
 	Ok(())
 }
 
+pub fn export_jpeg_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
+	let flattened = flatten_document_rgb(document, [255, 255, 255]);
+	let image = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(
+		document.canvas_size.width,
+		document.canvas_size.height,
+		flattened,
+	)
+	.ok_or_else(|| anyhow::anyhow!("failed to build JPEG image buffer from flattened document"))?;
+
+	if let Some(parent) = path.parent() {
+		fs::create_dir_all(parent)?;
+	}
+
+	image.save_with_format(path, ImageFormat::Jpeg)?;
+	Ok(())
+}
+
+pub fn export_webp_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
+	let flattened = flatten_document_rgba(document);
+	let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+		document.canvas_size.width,
+		document.canvas_size.height,
+		flattened,
+	)
+	.ok_or_else(|| anyhow::anyhow!("failed to build WebP image buffer from flattened document"))?;
+
+	if let Some(parent) = path.parent() {
+		fs::create_dir_all(parent)?;
+	}
+
+	image.save_with_format(path, ImageFormat::WebP)?;
+	Ok(())
+}
+
 pub fn import_png_from_path(path: &Path) -> anyhow::Result<Document> {
+	import_raster_document_from_path(path)
+		.with_context(|| format!("failed to import PNG from {}", path.display()))
+}
+
+pub fn import_jpeg_from_path(path: &Path) -> anyhow::Result<Document> {
+	import_raster_document_from_path(path)
+		.with_context(|| format!("failed to import JPEG from {}", path.display()))
+}
+
+pub fn import_webp_from_path(path: &Path) -> anyhow::Result<Document> {
+	import_raster_document_from_path(path)
+		.with_context(|| format!("failed to import WebP from {}", path.display()))
+}
+
+fn import_raster_document_from_path(path: &Path) -> anyhow::Result<Document> {
 	let decoded = image::open(path)?.to_rgba8();
 	let (width, height) = decoded.dimensions();
 	let mut document = Document::new(width, height);
@@ -258,43 +325,152 @@ pub fn flatten_document_rgba(document: &Document) -> Vec<u8> {
 	output
 }
 
+fn flatten_document_rgb(document: &Document, background_rgb: [u8; 3]) -> Vec<u8> {
+	let flattened_rgba = flatten_document_rgba(document);
+	let mut flattened_rgb = Vec::with_capacity((document.canvas_size.width * document.canvas_size.height * 3) as usize);
+
+	for pixel in flattened_rgba.chunks_exact(4) {
+		let alpha = pixel[3] as f32 / 255.0;
+		for channel in 0..3 {
+			let output = pixel[channel] as f32 * alpha + background_rgb[channel] as f32 * (1.0 - alpha);
+			flattened_rgb.push(output.round().clamp(0.0, 255.0) as u8);
+		}
+	}
+
+	flattened_rgb
+}
+
 fn composite_pixel(destination: &mut [u8], source: &[u8], layer_opacity: f32, blend_mode: BlendMode) {
-	let effective_alpha = (source[3] as f32 / 255.0) * layer_opacity;
-	if effective_alpha <= 0.0 {
-		return;
-	}
-
-	let destination_alpha = destination[3] as f32 / 255.0;
-	let output_alpha = effective_alpha + destination_alpha * (1.0 - effective_alpha);
-
-	for channel in 0..3 {
-		let source_value = source[channel] as f32 / 255.0;
-		let destination_value = destination[channel] as f32 / 255.0;
-		let blended = match blend_mode {
-			BlendMode::Normal
-			| BlendMode::Multiply
-			| BlendMode::Screen
-			| BlendMode::Overlay
-			| BlendMode::Darken
-			| BlendMode::Lighten => source_value,
-		};
-		let output = blended * effective_alpha + destination_value * (1.0 - effective_alpha);
-		destination[channel] = (output * 255.0).round().clamp(0.0, 255.0) as u8;
-	}
-
-	destination[3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+	let result = blend_rgba_over(
+		[destination[0], destination[1], destination[2], destination[3]],
+		[source[0], source[1], source[2], source[3]],
+		layer_opacity,
+		match blend_mode {
+			BlendMode::Normal => BlendModeMath::Normal,
+			BlendMode::Multiply => BlendModeMath::Multiply,
+			BlendMode::Screen => BlendModeMath::Screen,
+			BlendMode::Overlay => BlendModeMath::Overlay,
+			BlendMode::Darken => BlendModeMath::Darken,
+			BlendMode::Lighten => BlendModeMath::Lighten,
+		},
+	);
+	destination.copy_from_slice(&result);
 }
 
 #[cfg(test)]
 mod tests {
 	use super::{
-		export_png_to_path, flatten_document_rgba, import_png_from_path, load_document_from_path,
-		save_document_to_path, ProjectFile, ProjectManifest, CURRENT_PROJECT_FORMAT_VERSION,
+		export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
+		import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
+		recovery_path_for_project_path, save_document_to_path, ProjectFile, ProjectManifest,
+		CURRENT_PROJECT_FORMAT_VERSION,
 	};
-	use doc_model::Document;
+	use doc_model::{BlendMode, Document};
 	use std::fs;
 	use std::path::PathBuf;
 	use std::time::{SystemTime, UNIX_EPOCH};
+
+	fn set_pixel(document: &mut Document, layer_index: usize, x: u32, y: u32, rgba: [u8; 4]) {
+		let tile_size = document.tile_size as usize;
+		let coord = document
+			.tile_coord_for_pixel(x, y)
+			.expect("representative scene pixel should land inside canvas");
+		let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+		let tile = document
+			.ensure_tile_for_pixel(layer_index, x, y)
+			.expect("tile should be created for representative scene");
+		let local_x = (x - tile_origin_x) as usize;
+		let local_y = (y - tile_origin_y) as usize;
+		let pixel_index = (local_y * tile_size + local_x) * 4;
+		tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&rgba);
+	}
+
+	fn build_representative_scene() -> Document {
+		let mut document = Document::new(64, 64);
+		document.rename_layer(0, "Background");
+
+		for y in 0..16 {
+			for x in 0..16 {
+				set_pixel(&mut document, 0, x, y, [40, 80, 120, 255]);
+			}
+		}
+		for y in 20..36 {
+			for x in 20..44 {
+				set_pixel(&mut document, 0, x, y, [10, 20, 30, 255]);
+			}
+		}
+
+		document.add_layer("Multiply");
+		let multiply_index = document.active_layer_index();
+		document.set_layer_blend_mode(multiply_index, BlendMode::Multiply);
+		for y in 0..16 {
+			for x in 0..16 {
+				set_pixel(&mut document, multiply_index, x, y, [200, 128, 100, 255]);
+			}
+		}
+
+		document.add_layer("Screen Accent");
+		let screen_index = document.active_layer_index();
+		document.set_layer_blend_mode(screen_index, BlendMode::Screen);
+		document.set_layer_opacity(screen_index, 70);
+		assert!(document.set_layer_offset(screen_index, 4, 6));
+		for y in 8..24 {
+			for x in 8..24 {
+				set_pixel(&mut document, screen_index, x, y, [120, 180, 220, 220]);
+			}
+		}
+
+		document.add_layer("Lighten Edge");
+		let lighten_index = document.active_layer_index();
+		document.set_layer_blend_mode(lighten_index, BlendMode::Lighten);
+		for y in 40..56 {
+			for x in 6..18 {
+				set_pixel(&mut document, lighten_index, x, y, [250, 50, 140, 180]);
+			}
+		}
+
+		assert!(document.set_active_layer(lighten_index));
+		document
+	}
+
+	fn build_large_sparse_document() -> Document {
+		let mut document = Document::new(2048, 2048);
+		document.rename_layer(0, "Background");
+
+		for &(x, y, rgba) in &[
+			(0, 0, [25, 30, 35, 255]),
+			(255, 255, [50, 80, 120, 255]),
+			(512, 256, [90, 110, 130, 255]),
+			(1024, 1024, [120, 20, 90, 255]),
+			(2047, 2047, [200, 210, 220, 255]),
+		] {
+			set_pixel(&mut document, 0, x, y, rgba);
+		}
+
+		for layer_number in 0..3 {
+			document.add_layer(format!("Sparse Layer {}", layer_number + 1));
+			let layer_index = document.active_layer_index();
+			let mode = match layer_number {
+				0 => BlendMode::Multiply,
+				1 => BlendMode::Screen,
+				_ => BlendMode::Overlay,
+			};
+			document.set_layer_blend_mode(layer_index, mode);
+			document.set_layer_opacity(layer_index, 65 + layer_number as u8 * 10);
+			assert!(document.set_layer_offset(layer_index, 12 * (layer_number as i32 + 1), -7 * layer_number as i32));
+
+			for &(x, y, rgba) in &[
+				(64 + layer_number as u32 * 128, 96, [220, 40, 40, 255]),
+				(700, 600 + layer_number as u32 * 40, [40, 220, 120, 200]),
+				(1536, 1536, [80, 120, 240, 255]),
+				(1900, 300 + layer_number as u32 * 20, [200, 160, 40, 180]),
+			] {
+				set_pixel(&mut document, layer_index, x, y, rgba);
+			}
+		}
+
+		document
+	}
 
 	#[test]
 	fn project_manifest_uses_current_version() {
@@ -398,6 +574,86 @@ mod tests {
 	}
 
 	#[test]
+	fn export_and_import_jpeg_roundtrip() {
+		let mut document = Document::new(8, 8);
+		let tile_size = document.tile_size as usize;
+		let tile = document
+			.ensure_tile_for_pixel(0, 2, 3)
+			.expect("tile should be created");
+		for pixel_y in 0..8 {
+			for pixel_x in 0..8 {
+				let pixel_index = (pixel_y * tile_size + pixel_x) * 4;
+				tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&[200, 100, 50, 255]);
+			}
+		}
+
+		let path = std::env::temp_dir().join(format!("phototux-jpeg-{}.jpg", temporary_suffix()));
+		export_jpeg_to_path(&path, &document).expect("jpeg export should succeed");
+		let restored = import_jpeg_from_path(&path).expect("jpeg import should succeed");
+		fs::remove_file(&path).expect("temporary jpeg should be removed");
+
+		assert_eq!(restored.canvas_size.width, 8);
+		assert_eq!(restored.canvas_size.height, 8);
+		let restored_tile = restored
+			.layer(0)
+			.expect("layer exists")
+			.tiles
+			.get(&doc_model::TileCoord::new(0, 0))
+			.expect("tile exists");
+		let pixel_index = (3 * tile_size + 2) * 4;
+		let restored = &restored_tile.pixels[pixel_index..pixel_index + 4];
+		assert!((restored[0] as i16 - 200).abs() <= 20);
+		assert!((restored[1] as i16 - 100).abs() <= 20);
+		assert!((restored[2] as i16 - 50).abs() <= 20);
+		assert_eq!(restored[3], 255);
+	}
+
+	#[test]
+	fn export_and_import_webp_roundtrip() {
+		let mut document = Document::new(8, 8);
+		let tile_size = document.tile_size as usize;
+		let tile = document
+			.ensure_tile_for_pixel(0, 2, 3)
+			.expect("tile should be created");
+		let pixel_index = (3 * tile_size + 2) * 4;
+		tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&[40, 160, 220, 200]);
+
+		let path = std::env::temp_dir().join(format!("phototux-webp-{}.webp", temporary_suffix()));
+		export_webp_to_path(&path, &document).expect("webp export should succeed");
+		let restored = import_webp_from_path(&path).expect("webp import should succeed");
+		fs::remove_file(&path).expect("temporary webp should be removed");
+
+		assert_eq!(restored.canvas_size.width, 8);
+		assert_eq!(restored.canvas_size.height, 8);
+		let restored_tile = restored
+			.layer(0)
+			.expect("layer exists")
+			.tiles
+			.get(&doc_model::TileCoord::new(0, 0))
+			.expect("tile exists");
+		let restored = &restored_tile.pixels[pixel_index..pixel_index + 4];
+		assert!((restored[0] as i16 - 40).abs() <= 10);
+		assert!((restored[1] as i16 - 160).abs() <= 10);
+		assert!((restored[2] as i16 - 220).abs() <= 10);
+		assert!((restored[3] as i16 - 200).abs() <= 15);
+	}
+
+	#[test]
+	fn malformed_jpeg_and_webp_imports_return_contextual_errors() {
+		let jpeg_path = std::env::temp_dir().join(format!("phototux-bad-{}.jpg", temporary_suffix()));
+		fs::write(&jpeg_path, b"not a jpeg").expect("invalid jpeg fixture should be written");
+		let jpeg_error = import_jpeg_from_path(&jpeg_path).expect_err("invalid jpeg should fail");
+		fs::remove_file(&jpeg_path).expect("temporary jpeg should be removed");
+		assert!(jpeg_error.to_string().contains("failed to import JPEG"));
+
+		let webp_path = std::env::temp_dir().join(format!("phototux-bad-{}.webp", temporary_suffix()));
+		fs::write(&webp_path, b"not a webp").expect("invalid webp fixture should be written");
+		let webp_error = import_webp_from_path(&webp_path).expect_err("invalid webp should fail");
+		fs::remove_file(&webp_path).expect("temporary webp should be removed");
+		assert!(webp_error.to_string().contains("failed to import WebP"));
+	}
+
+	#[test]
 	fn flatten_document_respects_layer_order_visibility_and_opacity() {
 		let mut document = Document::new(4, 4);
 		let tile_size = document.tile_size as usize;
@@ -423,6 +679,39 @@ mod tests {
 		document.set_layer_visibility(top_index, false);
 		let hidden = flatten_document_rgba(&document);
 		assert_eq!(&hidden[index..index + 4], &[40, 80, 120, 255]);
+	}
+
+	#[test]
+	fn flatten_document_applies_initial_blend_modes() {
+		let mut document = Document::new(4, 4);
+		let tile_size = document.tile_size as usize;
+		let base_tile = document
+			.ensure_tile_for_pixel(0, 1, 1)
+			.expect("base tile should exist");
+		base_tile.pixels[(1 * tile_size + 1) * 4..(1 * tile_size + 1) * 4 + 4]
+			.copy_from_slice(&[128, 128, 128, 255]);
+
+		document.add_layer("Top");
+		let top_index = document.active_layer_index();
+		let top_tile = document
+			.ensure_tile_for_pixel(top_index, 1, 1)
+			.expect("top tile should exist");
+		top_tile.pixels[(1 * tile_size + 1) * 4..(1 * tile_size + 1) * 4 + 4]
+			.copy_from_slice(&[128, 64, 255, 255]);
+
+		let index = (1 * 4 + 1) * 4;
+
+		document.set_layer_blend_mode(top_index, BlendMode::Multiply);
+		let multiply = flatten_document_rgba(&document);
+		assert_eq!(&multiply[index..index + 4], &[64, 32, 128, 255]);
+
+		document.set_layer_blend_mode(top_index, BlendMode::Darken);
+		let darken = flatten_document_rgba(&document);
+		assert_eq!(&darken[index..index + 4], &[128, 64, 128, 255]);
+
+		document.set_layer_blend_mode(top_index, BlendMode::Lighten);
+		let lighten = flatten_document_rgba(&document);
+		assert_eq!(&lighten[index..index + 4], &[128, 128, 255, 255]);
 	}
 
 	#[test]
@@ -468,9 +757,77 @@ mod tests {
 		assert_eq!(&flattened[shifted_index..shifted_index + 4], &[220, 50, 50, 255]);
 	}
 
+	#[test]
+	fn representative_scene_roundtrip_preserves_flattened_output() {
+		let document = build_representative_scene();
+		let expected = flatten_document_rgba(&document);
+
+		let path = temporary_project_path();
+		save_document_to_path(&path, &document).expect("representative scene should save");
+		let restored = load_document_from_path(&path).expect("representative scene should load");
+		fs::remove_file(&path).expect("temporary project file should be removed");
+
+		assert_eq!(flatten_document_rgba(&restored), expected);
+	}
+
+	#[test]
+	fn repeated_project_roundtrip_preserves_representative_scene() {
+		let mut document = build_representative_scene();
+		let expected = flatten_document_rgba(&document);
+
+		for _ in 0..3 {
+			let path = temporary_project_path();
+			save_document_to_path(&path, &document).expect("representative scene should save during repeated roundtrip");
+			document = load_document_from_path(&path).expect("representative scene should load during repeated roundtrip");
+			fs::remove_file(&path).expect("temporary project file should be removed");
+		}
+
+		assert_eq!(flatten_document_rgba(&document), expected);
+	}
+
+	#[test]
+	fn representative_scene_png_export_matches_flattened_output() {
+		let document = build_representative_scene();
+		let expected = flatten_document_rgba(&document);
+
+		let path = std::env::temp_dir().join(format!("phototux-scene-{}.png", temporary_suffix()));
+		export_png_to_path(&path, &document).expect("representative scene png export should succeed");
+		let restored = import_png_from_path(&path).expect("representative scene png import should succeed");
+		fs::remove_file(&path).expect("temporary png should be removed");
+
+		assert_eq!(flatten_document_rgba(&restored), expected);
+	}
+
+	#[test]
+	fn large_sparse_document_save_load_and_export_remain_consistent() {
+		let document = build_large_sparse_document();
+		let expected = flatten_document_rgba(&document);
+
+		let project_path = temporary_project_path();
+		save_document_to_path(&project_path, &document).expect("large sparse document should save");
+		let restored = load_document_from_path(&project_path).expect("large sparse document should load");
+		fs::remove_file(&project_path).expect("temporary project file should be removed");
+		assert_eq!(flatten_document_rgba(&restored), expected);
+
+		let png_path = std::env::temp_dir().join(format!("phototux-large-{}.png", temporary_suffix()));
+		export_png_to_path(&png_path, &document).expect("large sparse document png export should succeed");
+		let restored_png = import_png_from_path(&png_path).expect("large sparse document png import should succeed");
+		fs::remove_file(&png_path).expect("temporary png should be removed");
+		assert_eq!(flatten_document_rgba(&restored_png), expected);
+	}
+
 	fn temporary_project_path() -> PathBuf {
 		let unique = temporary_suffix();
 		std::env::temp_dir().join(format!("phototux-{unique}.ptx"))
+	}
+
+	#[test]
+	fn recovery_path_appends_expected_suffix() {
+		let project_path = PathBuf::from("/tmp/example.ptx");
+		assert_eq!(
+			recovery_path_for_project_path(&project_path),
+			PathBuf::from("/tmp/example.ptx.autosave")
+		);
 	}
 
 	fn temporary_suffix() -> u128 {

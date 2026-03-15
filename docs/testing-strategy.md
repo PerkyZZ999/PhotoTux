@@ -89,6 +89,15 @@ Recommended fixture categories:
 - transform stress scene
 - save/reopen fidelity scene
 
+Current implemented fixture set:
+
+- representative layered compositing scene in `file_io` tests
+- repeated save/reopen scene in `file_io` tests
+- PNG export parity scene in `file_io` tests
+- large sparse document stress scene in `file_io` tests
+- controller viewport/export parity scene in `app_core` tests
+- autosave and recovery scenes in `app_core` tests
+
 These should be used repeatedly for regressions instead of inventing new ad hoc files every time.
 
 ## Feature-Level Testing Requirements
@@ -160,6 +169,15 @@ Before closing a milestone, confirm:
 3. representative manual workflows were exercised
 4. no known data-loss bug remains open
 5. no release-blocking mismatch exists between viewport and export output
+
+T20 validation summary:
+
+- representative compositing scenes now roundtrip through `.ptx` save/load without flattened-output drift
+- repeated save/load cycles now preserve representative scene output
+- PNG export is now checked against the same representative scene used for flattened composite validation
+- large sparse layered documents now have automated save/load and export consistency coverage
+- app-core controller tests now assert that the viewport-facing canvas raster matches the shared flattened export path when no preview-only workflow is active
+- manual save no longer pollutes undo history, so the first undo after save still reaches the last real edit
 
 ## MVP Release-Blocking Bugs
 

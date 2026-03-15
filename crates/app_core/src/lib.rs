@@ -1,13 +1,22 @@
+use anyhow::Context;
+use std::collections::VecDeque;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use common::{CanvasRaster, CanvasRect};
-use doc_model::Document;
-use file_io::flatten_document_rgba;
+use doc_model::{BlendMode, Document};
+use file_io::{
+    flatten_document_rgba, load_document_from_path, recovery_path_for_project_path,
+    remove_file_if_exists, save_document_to_path, PROJECT_FILE_EXTENSION,
+};
 use history_engine::HistoryStack;
 use tool_system::{
     BrushSettings, BrushStrokeRecord, BrushTool, BrushToolMode, MoveLayerRecord,
-    RectangularMarqueeTool, RectangularSelectionRecord,
+    RectangularMarqueeTool, RectangularSelectionRecord, SimpleTransformTool, LayerTransformRecord,
 };
 use ui_shell::{LayerPanelItem, ShellController, ShellSnapshot, ShellToolKind};
 
@@ -15,17 +24,39 @@ pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
     Rc::new(RefCell::new(PhotoTuxController::new()))
 }
 
+const AUTOSAVE_IDLE_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Debug)]
 struct PhotoTuxController {
     document: Document,
     history: HistoryStack<EditorHistoryEntry>,
     foreground_color: [u8; 4],
     background_color: [u8; 4],
+    status_message: String,
     document_title: String,
+    document_path: Option<PathBuf>,
+    recovery_path: Option<PathBuf>,
+    working_directory: PathBuf,
     next_layer_number: usize,
     active_tool: ShellToolKind,
     canvas_revision: u64,
+    dirty_since_primary_save: bool,
+    dirty_since_autosave: bool,
+    last_change_at: Option<Instant>,
+    pending_primary_save_job: Option<u64>,
+    pending_autosave_job: Option<u64>,
+    pending_recovery_load_job: Option<u64>,
+    jobs: JobSystem,
+    transform_session: Option<TransformSession>,
     interaction: Option<CanvasInteraction>,
+}
+
+#[derive(Debug, Clone)]
+struct TransformSession {
+    layer_id: common::LayerId,
+    translate_x: i32,
+    translate_y: i32,
+    scale: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -60,12 +91,219 @@ struct EditorHistoryEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorOperation {
     BrushStroke(BrushStrokeRecord),
+    TransformLayer(LayerTransformRecord),
     MoveLayer(MoveLayerRecord),
     Selection(RectangularSelectionRecord),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobPriority {
+    UserVisible,
+    Background,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveKind {
+    Primary,
+    Recovery,
+}
+
+#[derive(Debug)]
+enum JobRequest {
+    SaveDocument {
+        job_id: u64,
+        path: PathBuf,
+        document: Document,
+        kind: SaveKind,
+        cleanup_recovery_path: Option<PathBuf>,
+    },
+    LoadRecovery {
+        job_id: u64,
+        recovery_path: PathBuf,
+        document_path: Option<PathBuf>,
+        document_title: String,
+    },
+}
+
+#[derive(Debug)]
+enum JobResult {
+    SaveCompleted {
+        job_id: u64,
+        path: PathBuf,
+        kind: SaveKind,
+    },
+    SaveFailed {
+        job_id: u64,
+        path: PathBuf,
+        kind: SaveKind,
+        error: String,
+    },
+    RecoveryLoaded {
+        job_id: u64,
+        recovery_path: PathBuf,
+        document_path: Option<PathBuf>,
+        document_title: String,
+        document: Document,
+    },
+    RecoveryLoadFailed {
+        job_id: u64,
+        recovery_path: PathBuf,
+        error: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct JobQueues {
+    user_visible: VecDeque<JobRequest>,
+    background: VecDeque<JobRequest>,
+    shutdown: bool,
+}
+
+#[derive(Debug)]
+struct JobSystem {
+    queues: Arc<(Mutex<JobQueues>, Condvar)>,
+    result_receiver: mpsc::Receiver<JobResult>,
+    worker: Option<thread::JoinHandle<()>>,
+    next_job_id: u64,
+}
+
+impl JobSystem {
+    fn new() -> Self {
+        let queues = Arc::new((Mutex::new(JobQueues::default()), Condvar::new()));
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker_queues = queues.clone();
+        let worker = thread::spawn(move || worker_main(worker_queues, result_sender));
+
+        Self {
+            queues,
+            result_receiver,
+            worker: Some(worker),
+            next_job_id: 1,
+        }
+    }
+
+    fn enqueue(&mut self, priority: JobPriority, make_request: impl FnOnce(u64) -> JobRequest) -> u64 {
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+
+        let request = make_request(job_id);
+        let (lock, condition) = &*self.queues;
+        let mut queues = lock.lock().expect("job queue lock should not be poisoned");
+        match priority {
+            JobPriority::UserVisible => queues.user_visible.push_back(request),
+            JobPriority::Background => queues.background.push_back(request),
+        }
+        condition.notify_one();
+        job_id
+    }
+
+    fn try_recv(&self) -> Option<JobResult> {
+        self.result_receiver.try_recv().ok()
+    }
+}
+
+impl Drop for JobSystem {
+    fn drop(&mut self) {
+        let (lock, condition) = &*self.queues;
+        if let Ok(mut queues) = lock.lock() {
+            queues.shutdown = true;
+            condition.notify_all();
+        }
+
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn worker_main(
+    queues: Arc<(Mutex<JobQueues>, Condvar)>,
+    result_sender: mpsc::Sender<JobResult>,
+) {
+    loop {
+        let request = {
+            let (lock, condition) = &*queues;
+            let mut queues = lock.lock().expect("job queue lock should not be poisoned");
+            loop {
+                if queues.shutdown {
+                    return;
+                }
+
+                if let Some(request) = queues.user_visible.pop_front() {
+                    break request;
+                }
+
+                if let Some(request) = queues.background.pop_front() {
+                    break request;
+                }
+
+                queues = condition
+                    .wait(queues)
+                    .expect("job queue lock should not be poisoned while waiting");
+            }
+        };
+
+        let result = match request {
+            JobRequest::SaveDocument {
+                job_id,
+                path,
+                document,
+                kind,
+                cleanup_recovery_path,
+            } => match save_document_to_path(&path, &document)
+                .with_context(|| format!("failed to save document to {}", path.display()))
+            {
+                Ok(()) => {
+                    if let Some(recovery_path) = cleanup_recovery_path {
+                        if let Err(error) = remove_file_if_exists(&recovery_path) {
+                            tracing::warn!(%error, path = %recovery_path.display(), "failed to remove stale recovery file after save");
+                        }
+                    }
+                    JobResult::SaveCompleted { job_id, path, kind }
+                }
+                Err(error) => JobResult::SaveFailed {
+                    job_id,
+                    path,
+                    kind,
+                    error: error.to_string(),
+                },
+            },
+            JobRequest::LoadRecovery {
+                job_id,
+                recovery_path,
+                document_path,
+                document_title,
+            } => match load_document_from_path(&recovery_path)
+                .with_context(|| format!("failed to load recovery document from {}", recovery_path.display()))
+            {
+                Ok(document) => JobResult::RecoveryLoaded {
+                    job_id,
+                    recovery_path,
+                    document_path,
+                    document_title,
+                    document,
+                },
+                Err(error) => JobResult::RecoveryLoadFailed {
+                    job_id,
+                    recovery_path,
+                    error: error.to_string(),
+                },
+            },
+        };
+
+        if result_sender.send(result).is_err() {
+            return;
+        }
+    }
+}
+
 impl PhotoTuxController {
     fn new() -> Self {
+        let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_with_working_directory(working_directory)
+    }
+
+    fn new_with_working_directory(working_directory: PathBuf) -> Self {
         let mut document = Document::new(1920, 1080);
         document.rename_layer(0, "Background");
         let background_tile = document
@@ -94,17 +332,32 @@ impl PhotoTuxController {
             operation: None,
         });
 
-        Self {
+        let mut controller = Self {
             document,
             history,
             foreground_color: [232, 236, 243, 255],
             background_color: [27, 29, 33, 255],
+            status_message: "Ready".to_string(),
             document_title: "untitled.ptx".to_string(),
+            document_path: None,
+            recovery_path: None,
+            working_directory,
             next_layer_number: 4,
             active_tool: ShellToolKind::Brush,
             canvas_revision: 1,
+            dirty_since_primary_save: false,
+            dirty_since_autosave: false,
+            last_change_at: None,
+            pending_primary_save_job: None,
+            pending_autosave_job: None,
+            pending_recovery_load_job: None,
+            jobs: JobSystem::new(),
+            transform_session: None,
             interaction: None,
-        }
+        };
+        controller.refresh_recovery_path();
+        controller.enqueue_recovery_load_if_present();
+        controller
     }
 
     fn active_layer_name(&self) -> String {
@@ -196,12 +449,300 @@ impl PhotoTuxController {
         let active_name = self.active_layer_name();
         if self.document.move_layer(current as usize, target as usize) {
             self.bump_canvas_revision();
+            self.mark_document_dirty();
             self.push_history(format!("Move Layer {}", active_name));
         }
     }
 
     fn active_layer_bounds(&self) -> Option<CanvasRect> {
         self.document.layer_canvas_bounds(self.document.active_layer_index())
+    }
+
+    fn primary_document_path(&self) -> PathBuf {
+        self.document_path
+            .clone()
+            .unwrap_or_else(|| self.working_directory.join(self.save_file_name()))
+    }
+
+    fn refresh_recovery_path(&mut self) {
+        self.recovery_path = Some(recovery_path_for_project_path(&self.primary_document_path()));
+    }
+
+    fn enqueue_recovery_load_if_present(&mut self) {
+        let Some(recovery_path) = self.recovery_path.clone() else {
+            return;
+        };
+
+        if !recovery_path.exists() || self.pending_recovery_load_job.is_some() {
+            return;
+        }
+
+        self.status_message = "Recovery file detected".to_string();
+        let document_path = self.document_path.clone();
+        let document_title = self.document_title.clone();
+        self.pending_recovery_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::LoadRecovery {
+                job_id,
+                recovery_path,
+                document_path,
+                document_title,
+            }
+        }));
+    }
+
+    fn mark_document_dirty_at(&mut self, now: Instant) {
+        self.dirty_since_primary_save = true;
+        self.dirty_since_autosave = true;
+        self.last_change_at = Some(now);
+        if self.pending_primary_save_job.is_none() {
+            self.status_message = "Modified".to_string();
+        }
+    }
+
+    fn mark_document_dirty(&mut self) {
+        self.mark_document_dirty_at(Instant::now());
+    }
+
+    fn enqueue_primary_save(&mut self, path: PathBuf) {
+        if self.pending_primary_save_job.is_some() {
+            return;
+        }
+
+        let recovery_path = self.recovery_path.clone();
+        let document = self.document.clone();
+        self.status_message = format!("Saving {}", path.display());
+        self.pending_primary_save_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::SaveDocument {
+                job_id,
+                path,
+                document,
+                kind: SaveKind::Primary,
+                cleanup_recovery_path: recovery_path,
+            }
+        }));
+    }
+
+    fn enqueue_autosave(&mut self) {
+        if self.pending_autosave_job.is_some() || !self.dirty_since_autosave {
+            return;
+        }
+
+        self.refresh_recovery_path();
+        let Some(recovery_path) = self.recovery_path.clone() else {
+            return;
+        };
+
+        let document = self.document.clone();
+        self.status_message = format!("Autosaving {}", recovery_path.display());
+        self.pending_autosave_job = Some(self.jobs.enqueue(JobPriority::Background, move |job_id| {
+            JobRequest::SaveDocument {
+                job_id,
+                path: recovery_path,
+                document,
+                kind: SaveKind::Recovery,
+                cleanup_recovery_path: None,
+            }
+        }));
+    }
+
+    fn apply_job_result(&mut self, result: JobResult) {
+        match result {
+            JobResult::SaveCompleted { job_id, path, kind } => match kind {
+                SaveKind::Primary => {
+                    if self.pending_primary_save_job == Some(job_id) {
+                        self.pending_primary_save_job = None;
+                        self.document_path = Some(path.clone());
+                        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                            self.document_title = file_name.to_string();
+                        }
+                        self.refresh_recovery_path();
+                        self.dirty_since_primary_save = false;
+                        self.dirty_since_autosave = false;
+                        self.last_change_at = None;
+                        self.status_message = format!("Saved {}", path.display());
+                    }
+                }
+                SaveKind::Recovery => {
+                    if self.pending_autosave_job == Some(job_id) {
+                        self.pending_autosave_job = None;
+                        self.dirty_since_autosave = false;
+                        self.status_message = format!("Recovered state written to {}", path.display());
+                    }
+                }
+            },
+            JobResult::SaveFailed { job_id, path, kind, error } => {
+                tracing::error!(%error, path = %path.display(), ?kind, "background save failed");
+                match kind {
+                    SaveKind::Primary if self.pending_primary_save_job == Some(job_id) => {
+                        self.pending_primary_save_job = None;
+                    }
+                    SaveKind::Recovery if self.pending_autosave_job == Some(job_id) => {
+                        self.pending_autosave_job = None;
+                    }
+                    _ => {}
+                }
+                self.status_message = format!("Save failed: {}", error);
+            }
+            JobResult::RecoveryLoaded {
+                job_id,
+                recovery_path,
+                document_path,
+                document_title,
+                document,
+            } => {
+                if self.pending_recovery_load_job == Some(job_id) {
+                    self.pending_recovery_load_job = None;
+                    self.document = document;
+                    self.document_path = document_path;
+                    self.document_title = document_title;
+                    self.recovery_path = Some(recovery_path.clone());
+                    self.dirty_since_primary_save = true;
+                    self.dirty_since_autosave = false;
+                    self.last_change_at = None;
+                    self.bump_canvas_revision();
+                    self.push_history("Recovered Autosave");
+                    self.status_message = format!("Recovered document from {}", recovery_path.display());
+                }
+            }
+            JobResult::RecoveryLoadFailed {
+                job_id,
+                recovery_path,
+                error,
+            } => {
+                if self.pending_recovery_load_job == Some(job_id) {
+                    self.pending_recovery_load_job = None;
+                    tracing::error!(%error, path = %recovery_path.display(), "recovery load failed");
+                    self.status_message = format!("Recovery load failed: {}", error);
+                }
+            }
+        }
+    }
+
+    fn poll_background_tasks_at(&mut self, now: Instant) {
+        while let Some(result) = self.jobs.try_recv() {
+            self.apply_job_result(result);
+        }
+
+        if self.pending_primary_save_job.is_none()
+            && self.pending_recovery_load_job.is_none()
+            && self.dirty_since_autosave
+            && self.pending_autosave_job.is_none()
+            && self
+                .last_change_at
+                .map(|last_change| now.duration_since(last_change) >= AUTOSAVE_IDLE_INTERVAL)
+                .unwrap_or(false)
+        {
+            self.enqueue_autosave();
+        }
+    }
+
+    fn save_file_name(&self) -> String {
+        if self.document_title.ends_with(&format!(".{PROJECT_FILE_EXTENSION}")) {
+            self.document_title.clone()
+        } else {
+            format!("{}.{}", self.document_title, PROJECT_FILE_EXTENSION)
+        }
+    }
+
+    #[cfg(test)]
+    fn save_document_in_directory(&mut self, base_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+        let target_path = self
+            .document_path
+            .clone()
+            .unwrap_or_else(|| base_dir.join(self.save_file_name()));
+        save_document_to_path(&target_path, &self.document)
+            .with_context(|| format!("failed to save document to {}", target_path.display()))?;
+        self.document_path = Some(target_path.clone());
+        if let Some(file_name) = target_path.file_name().and_then(|name| name.to_str()) {
+            self.document_title = file_name.to_string();
+        }
+        self.working_directory = base_dir.to_path_buf();
+        self.refresh_recovery_path();
+        if let Some(recovery_path) = &self.recovery_path {
+            remove_file_if_exists(recovery_path)?;
+        }
+        self.dirty_since_primary_save = false;
+        self.dirty_since_autosave = false;
+        self.last_change_at = None;
+        self.status_message = format!("Saved {}", target_path.display());
+        Ok(target_path)
+    }
+
+    fn cycle_active_layer_blend_mode(&mut self, step: isize) {
+        const MODES: [BlendMode; 6] = [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+        ];
+
+        let active_index = self.document.active_layer_index();
+        let current_mode = self.document.active_layer().blend_mode;
+        let current_index = MODES
+            .iter()
+            .position(|mode| *mode == current_mode)
+            .unwrap_or(0) as isize;
+        let next_index = (current_index + step).rem_euclid(MODES.len() as isize) as usize;
+        self.document.set_layer_blend_mode(active_index, MODES[next_index]);
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_history(format!("Set Blend Mode {:?}", MODES[next_index]));
+    }
+
+    fn begin_transform_session_if_needed(&mut self) {
+        if self.transform_session.is_some() {
+            return;
+        }
+
+        let layer_index = self.document.active_layer_index();
+        let Some(layer) = self.document.layer(layer_index) else {
+            return;
+        };
+        if self.document.layer_canvas_bounds(layer_index).is_none() {
+            return;
+        }
+
+        self.transform_session = Some(TransformSession {
+            layer_id: layer.id,
+            translate_x: 0,
+            translate_y: 0,
+            scale: 1.0,
+        });
+        self.bump_canvas_revision();
+    }
+
+    fn transform_preview_rect(&self) -> Option<CanvasRect> {
+        let session = self.transform_session.as_ref()?;
+        let layer_index = self.document.layer_index_by_id(session.layer_id)?;
+        SimpleTransformTool::preview_bounds(
+            &self.document,
+            layer_index,
+            session.scale,
+            session.translate_x,
+            session.translate_y,
+        )
+    }
+
+    fn preview_canvas_raster(&self) -> CanvasRaster {
+        let mut preview_document = self.document.clone();
+        if let Some(session) = &self.transform_session {
+            if let Some(layer_index) = preview_document.layer_index_by_id(session.layer_id) {
+                let _ = SimpleTransformTool::transform_layer(
+                    &mut preview_document,
+                    layer_index,
+                    session.scale,
+                    session.translate_x,
+                    session.translate_y,
+                );
+            }
+        }
+
+        CanvasRaster {
+            size: preview_document.canvas_size,
+            pixels: flatten_document_rgba(&preview_document),
+        }
     }
 }
 
@@ -210,6 +751,7 @@ impl ShellController for PhotoTuxController {
         let active_layer = self.document.active_layer();
         ShellSnapshot {
             document_title: self.document_title.clone(),
+            status_message: self.status_message.clone(),
             canvas_size: self.document.canvas_size,
             canvas_revision: self.canvas_revision,
             active_tool_name: self.active_tool.label().to_string(),
@@ -220,6 +762,13 @@ impl ShellController for PhotoTuxController {
             active_layer_visible: active_layer.visible,
             active_layer_blend_mode: format!("{:?}", active_layer.blend_mode),
             active_layer_bounds: self.active_layer_bounds(),
+            transform_preview_rect: self.transform_preview_rect(),
+            transform_active: self.transform_session.is_some(),
+            transform_scale_percent: self
+                .transform_session
+                .as_ref()
+                .map(|session| (session.scale * 100.0).round() as u32)
+                .unwrap_or(100),
             selection_rect: self.document.selection(),
             selection_inverted: self.document.selection_inverted(),
             foreground_color: self.foreground_color,
@@ -237,9 +786,13 @@ impl ShellController for PhotoTuxController {
     }
 
     fn canvas_raster(&self) -> CanvasRaster {
-        CanvasRaster {
-            size: self.document.canvas_size,
-            pixels: flatten_document_rgba(&self.document),
+        if self.transform_session.is_some() {
+            self.preview_canvas_raster()
+        } else {
+            CanvasRaster {
+                size: self.document.canvas_size,
+                pixels: flatten_document_rgba(&self.document),
+            }
         }
     }
 
@@ -248,6 +801,7 @@ impl ShellController for PhotoTuxController {
         self.next_layer_number += 1;
         self.document.add_layer(layer_name.clone());
         self.bump_canvas_revision();
+        self.mark_document_dirty();
         self.push_history(format!("Add Layer {}", layer_name));
     }
 
@@ -256,6 +810,7 @@ impl ShellController for PhotoTuxController {
         let active_name = self.active_layer_name();
         if self.document.duplicate_layer(active_index).is_some() {
             self.bump_canvas_revision();
+            self.mark_document_dirty();
             self.push_history(format!("Duplicate Layer {}", active_name));
         }
     }
@@ -265,6 +820,7 @@ impl ShellController for PhotoTuxController {
         let active_name = self.active_layer_name();
         if self.document.delete_layer(active_index) {
             self.bump_canvas_revision();
+            self.mark_document_dirty();
             self.push_history(format!("Delete Layer {}", active_name));
         }
     }
@@ -279,6 +835,7 @@ impl ShellController for PhotoTuxController {
             let layer_name = layer.name.clone();
             self.document.set_layer_visibility(index, visible);
             self.bump_canvas_revision();
+            self.mark_document_dirty();
             self.push_history(format!("Toggle Visibility {}", layer_name));
         }
     }
@@ -288,6 +845,7 @@ impl ShellController for PhotoTuxController {
         let next_opacity = (self.document.active_layer().opacity_percent + 10).min(100);
         self.document.set_layer_opacity(active_index, next_opacity);
         self.bump_canvas_revision();
+        self.mark_document_dirty();
         self.push_history(format!("Increase Opacity {}", self.active_layer_name()));
     }
 
@@ -296,7 +854,16 @@ impl ShellController for PhotoTuxController {
         let next_opacity = self.document.active_layer().opacity_percent.saturating_sub(10);
         self.document.set_layer_opacity(active_index, next_opacity);
         self.bump_canvas_revision();
+        self.mark_document_dirty();
         self.push_history(format!("Decrease Opacity {}", self.active_layer_name()));
+    }
+
+    fn next_active_layer_blend_mode(&mut self) {
+        self.cycle_active_layer_blend_mode(1);
+    }
+
+    fn previous_active_layer_blend_mode(&mut self) {
+        self.cycle_active_layer_blend_mode(-1);
     }
 
     fn move_active_layer_up(&mut self) {
@@ -326,6 +893,7 @@ impl ShellController for PhotoTuxController {
         }
 
         self.document.clear_selection();
+        self.mark_document_dirty();
         self.push_operation(
             "Clear Selection",
             EditorOperation::Selection(RectangularSelectionRecord {
@@ -344,6 +912,7 @@ impl ShellController for PhotoTuxController {
             return;
         }
 
+        self.mark_document_dirty();
         self.push_operation(
             "Invert Selection",
             EditorOperation::Selection(RectangularSelectionRecord {
@@ -353,6 +922,57 @@ impl ShellController for PhotoTuxController {
                 after_inverted: self.document.selection_inverted(),
             }),
         );
+    }
+
+    fn begin_transform(&mut self) {
+        self.begin_transform_session_if_needed();
+    }
+
+    fn scale_transform_up(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale = (session.scale + 0.1).min(4.0);
+        self.bump_canvas_revision();
+    }
+
+    fn scale_transform_down(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale = (session.scale - 0.1).max(0.1);
+        self.bump_canvas_revision();
+    }
+
+    fn commit_transform(&mut self) {
+        let Some(session) = self.transform_session.take() else {
+            return;
+        };
+        let Some(layer_index) = self.document.layer_index_by_id(session.layer_id) else {
+            return;
+        };
+
+        if let Some(record) = SimpleTransformTool::transform_layer(
+            &mut self.document,
+            layer_index,
+            session.scale,
+            session.translate_x,
+            session.translate_y,
+        ) {
+            self.bump_canvas_revision();
+            self.mark_document_dirty();
+            self.push_operation("Transform Layer", EditorOperation::TransformLayer(record));
+        } else {
+            self.bump_canvas_revision();
+        }
+    }
+
+    fn cancel_transform(&mut self) {
+        if self.transform_session.take().is_some() {
+            self.bump_canvas_revision();
+        }
     }
 
     fn undo(&mut self) {
@@ -365,12 +985,22 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::BrushStroke(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
+                EditorOperation::TransformLayer(record) => {
+                    record.undo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
                 }
                 EditorOperation::MoveLayer(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
+                    self.mark_document_dirty();
                 }
-                EditorOperation::Selection(record) => record.undo(&mut self.document),
+                EditorOperation::Selection(record) => {
+                    record.undo(&mut self.document);
+                    self.mark_document_dirty();
+                }
             }
         }
     }
@@ -385,14 +1015,33 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::BrushStroke(record) => {
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
+                EditorOperation::TransformLayer(record) => {
+                    record.redo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
                 }
                 EditorOperation::MoveLayer(record) => {
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
+                    self.mark_document_dirty();
                 }
-                EditorOperation::Selection(record) => record.redo(&mut self.document),
+                EditorOperation::Selection(record) => {
+                    record.redo(&mut self.document);
+                    self.mark_document_dirty();
+                }
             }
         }
+    }
+
+    fn save_document(&mut self) {
+        let target_path = self.primary_document_path();
+        self.enqueue_primary_save(target_path);
+    }
+
+    fn poll_background_tasks(&mut self) {
+        self.poll_background_tasks_at(Instant::now());
     }
 
     fn select_tool(&mut self, tool: ShellToolKind) {
@@ -422,6 +1071,18 @@ impl ShellController for PhotoTuxController {
                     start_canvas_y: canvas_y,
                 });
             }
+            ShellToolKind::Transform => {
+                self.begin_transform_session_if_needed();
+                if let Some(session) = &self.transform_session {
+                    self.interaction = Some(CanvasInteraction::Move {
+                        layer_id: session.layer_id,
+                        start_canvas_x: canvas_x,
+                        start_canvas_y: canvas_y,
+                        start_offset_x: session.translate_x,
+                        start_offset_y: session.translate_y,
+                    });
+                }
+            }
             ShellToolKind::Brush | ShellToolKind::Eraser => {
                 let mode = if self.active_tool == ShellToolKind::Brush {
                     BrushToolMode::Paint
@@ -430,6 +1091,9 @@ impl ShellController for PhotoTuxController {
                 };
                 let aggregate =
                     self.apply_active_layer_stroke_segment(mode, &[(canvas_x as f32, canvas_y as f32)]);
+                if aggregate.is_some() {
+                    self.mark_document_dirty();
+                }
                 self.interaction = Some(CanvasInteraction::Brush {
                     mode,
                     last_canvas_x: canvas_x,
@@ -456,11 +1120,19 @@ impl ShellController for PhotoTuxController {
             } => {
                 let delta_x = canvas_x - start_canvas_x;
                 let delta_y = canvas_y - start_canvas_y;
-                let _ = self.document.set_layer_offset(
-                    self.document.active_layer_index(),
-                    start_offset_x + delta_x,
-                    start_offset_y + delta_y,
-                );
+                if self.active_tool == ShellToolKind::Transform {
+                    if let Some(session) = &mut self.transform_session {
+                        session.translate_x = start_offset_x + delta_x;
+                        session.translate_y = start_offset_y + delta_y;
+                    }
+                } else {
+                    let _ = self.document.set_layer_offset(
+                        self.document.active_layer_index(),
+                        start_offset_x + delta_x,
+                        start_offset_y + delta_y,
+                    );
+                    self.mark_document_dirty();
+                }
                 self.bump_canvas_revision();
                 Some(CanvasInteraction::Move {
                     layer_id,
@@ -483,6 +1155,7 @@ impl ShellController for PhotoTuxController {
                 } else {
                     self.document.clear_selection();
                 }
+                self.mark_document_dirty();
                 Some(CanvasInteraction::Marquee {
                     before,
                     before_inverted,
@@ -509,6 +1182,7 @@ impl ShellController for PhotoTuxController {
                         } else {
                             aggregate = Some(segment);
                         }
+                        self.mark_document_dirty();
                     }
                 }
 
@@ -530,6 +1204,9 @@ impl ShellController for PhotoTuxController {
                 start_offset_y,
                 ..
             }) => {
+                if self.active_tool == ShellToolKind::Transform {
+                    return;
+                }
                 let (current_x, current_y) = self
                     .document
                     .layer_offset(self.document.active_layer_index())
@@ -571,6 +1248,7 @@ impl ShellController for PhotoTuxController {
                         start_canvas_x,
                         start_canvas_y,
                     );
+                    self.mark_document_dirty();
                 }
             }
             Some(CanvasInteraction::Brush { mode, aggregate, .. }) => {
@@ -589,9 +1267,78 @@ impl ShellController for PhotoTuxController {
 
 #[cfg(test)]
 mod tests {
-    use super::PhotoTuxController;
+    use super::{PhotoTuxController, AUTOSAVE_IDLE_INTERVAL};
     use common::CanvasRect;
+    use file_io::{
+        flatten_document_rgba, load_document_from_path, recovery_path_for_project_path,
+        save_document_to_path,
+    };
+    use std::fs;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use ui_shell::{ShellController, ShellToolKind};
+
+    fn set_pixel(document: &mut doc_model::Document, layer_index: usize, x: u32, y: u32, rgba: [u8; 4]) {
+        let tile_size = document.tile_size as usize;
+        let coord = document
+            .tile_coord_for_pixel(x, y)
+            .expect("pixel should lie inside representative controller scene");
+        let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+        let tile = document
+            .ensure_tile_for_pixel(layer_index, x, y)
+            .expect("tile should exist for representative controller scene");
+        let local_x = (x - tile_origin_x) as usize;
+        let local_y = (y - tile_origin_y) as usize;
+        let pixel_index = (local_y * tile_size + local_x) * 4;
+        tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&rgba);
+    }
+
+    fn build_representative_controller_document() -> doc_model::Document {
+        let mut document = doc_model::Document::new(64, 64);
+        document.rename_layer(0, "Background");
+        for y in 0..20 {
+            for x in 0..20 {
+                set_pixel(&mut document, 0, x, y, [60, 90, 140, 255]);
+            }
+        }
+
+        document.add_layer("Overlay");
+        let overlay_index = document.active_layer_index();
+        document.set_layer_blend_mode(overlay_index, doc_model::BlendMode::Overlay);
+        for y in 8..28 {
+            for x in 8..28 {
+                set_pixel(&mut document, overlay_index, x, y, [220, 120, 60, 220]);
+            }
+        }
+
+        document.add_layer("Lighten");
+        let lighten_index = document.active_layer_index();
+        document.set_layer_blend_mode(lighten_index, doc_model::BlendMode::Lighten);
+        document.set_layer_opacity(lighten_index, 70);
+        assert!(document.set_layer_offset(lighten_index, 6, 10));
+        for y in 4..18 {
+            for x in 24..40 {
+                set_pixel(&mut document, lighten_index, x, y, [80, 220, 200, 255]);
+            }
+        }
+
+        document
+    }
+
+    fn wait_for_background_jobs(controller: &mut PhotoTuxController) {
+        for _ in 0..50 {
+            controller.poll_background_tasks_at(Instant::now());
+            if controller.pending_primary_save_job.is_none()
+                && controller.pending_autosave_job.is_none()
+                && controller.pending_recovery_load_job.is_none()
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("background jobs did not complete in time");
+    }
 
     #[test]
     fn layer_actions_update_snapshot() {
@@ -624,6 +1371,133 @@ mod tests {
         let reset = controller.snapshot();
         assert_eq!(reset.foreground_color, [232, 236, 243, 255]);
         assert_eq!(reset.background_color, [27, 29, 33, 255]);
+    }
+
+    #[test]
+    fn blend_mode_actions_update_snapshot_and_canvas() {
+        let mut controller = PhotoTuxController::new();
+        let tile_size = controller.document.tile_size as usize;
+        let base_tile = controller
+            .document
+            .ensure_tile_for_pixel(1, 180, 140)
+            .expect("base tile should exist");
+        let base_index = (140 % tile_size * tile_size + (180 % tile_size)) * 4;
+        base_tile.pixels[base_index..base_index + 4].copy_from_slice(&[128, 128, 128, 255]);
+
+        let top_tile = controller
+            .document
+            .ensure_tile_for_pixel(2, 180, 140)
+            .expect("top tile should exist");
+        top_tile.pixels[base_index..base_index + 4].copy_from_slice(&[128, 64, 255, 255]);
+
+        let before_mode = controller.snapshot().active_layer_blend_mode;
+        let before_canvas = controller.canvas_raster();
+
+        controller.next_active_layer_blend_mode();
+
+        let after_snapshot = controller.snapshot();
+        let after_canvas = controller.canvas_raster();
+        assert_ne!(after_snapshot.active_layer_blend_mode, before_mode);
+        assert_ne!(after_canvas.pixels, before_canvas.pixels);
+    }
+
+    #[test]
+    fn save_document_in_directory_writes_a_project_file() {
+        let mut controller = PhotoTuxController::new();
+        let output_dir = std::env::temp_dir().join(format!("phototux-save-{}", std::process::id()));
+        fs::create_dir_all(&output_dir).expect("temporary output directory should be created");
+
+        let saved_path = controller
+            .save_document_in_directory(&output_dir)
+            .expect("document should save into temp directory");
+        let restored = load_document_from_path(&saved_path).expect("saved project should load");
+
+        assert_eq!(restored.canvas_size, controller.document.canvas_size);
+        assert_eq!(restored.layers.len(), controller.document.layers.len());
+
+        fs::remove_file(&saved_path).expect("saved project file should be removed");
+        fs::remove_dir(&output_dir).expect("temporary output directory should be removed");
+    }
+
+    #[test]
+    fn canvas_raster_matches_flattened_document_for_representative_scene() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+
+        let viewport_pixels = controller.canvas_raster().pixels;
+        let exported_pixels = flatten_document_rgba(&controller.document);
+
+        assert_eq!(viewport_pixels, exported_pixels);
+    }
+
+    #[test]
+    fn save_does_not_block_undo_of_previous_edit() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-save-undo-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary save+undo directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        let before = controller.canvas_raster();
+        controller.select_tool(ShellToolKind::Brush);
+        controller.begin_canvas_interaction(120, 120);
+        controller.update_canvas_interaction(144, 132);
+        controller.end_canvas_interaction();
+        let painted = controller.canvas_raster();
+        assert_ne!(before.pixels, painted.pixels);
+
+        controller.save_document();
+        wait_for_background_jobs(&mut controller);
+        controller.undo();
+
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+
+        let saved_path = working_directory.join("untitled.ptx");
+        if saved_path.exists() {
+            fs::remove_file(&saved_path).expect("saved project file should be removed");
+        }
+        fs::remove_dir(&working_directory).expect("temporary save+undo directory should be removed");
+    }
+
+    #[test]
+    fn autosave_writes_recovery_file_after_idle_period() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-autosave-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary autosave directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.add_layer();
+        controller.last_change_at = Some(Instant::now() - AUTOSAVE_IDLE_INTERVAL - Duration::from_millis(1));
+
+        controller.poll_background_tasks_at(Instant::now());
+        wait_for_background_jobs(&mut controller);
+
+        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        let recovered = load_document_from_path(&recovery_path).expect("autosave recovery file should load");
+        assert_eq!(recovered.layers.len(), controller.document.layers.len());
+        assert!(!controller.dirty_since_autosave);
+
+        fs::remove_file(&recovery_path).expect("autosave recovery file should be removed");
+        fs::remove_dir(&working_directory).expect("temporary autosave directory should be removed");
+    }
+
+    #[test]
+    fn startup_recovery_load_replaces_document_state() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-recovery-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
+
+        let mut recovered_document = doc_model::Document::new(320, 240);
+        recovered_document.add_layer("Recovered Layer");
+        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        save_document_to_path(&recovery_path, &recovered_document).expect("recovery document should save");
+
+        let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        wait_for_background_jobs(&mut controller);
+
+        assert_eq!(controller.document.canvas_size.width, 320);
+        assert_eq!(controller.document.canvas_size.height, 240);
+        assert_eq!(controller.document.layers.len(), 2);
+        assert!(controller.snapshot().history_entries.iter().any(|entry| entry.contains("Recovered Autosave")));
+
+        fs::remove_file(&recovery_path).expect("recovery file should be removed");
+        fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
     }
 
     #[test]
@@ -718,5 +1592,31 @@ mod tests {
         assert_eq!(controller.snapshot().selection_rect, None);
         controller.redo();
         assert_eq!(controller.snapshot().selection_rect, Some(CanvasRect::new(10, 10, 20, 30)));
+    }
+
+    #[test]
+    fn transform_preview_and_commit_update_canvas_and_history() {
+        let mut controller = PhotoTuxController::new();
+        let before = controller.canvas_raster();
+
+        controller.select_tool(ShellToolKind::Transform);
+        controller.begin_transform();
+        controller.scale_transform_up();
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(20, 10);
+        controller.end_canvas_interaction();
+
+        let preview = controller.canvas_raster();
+        assert_ne!(before.pixels, preview.pixels);
+        assert!(controller.snapshot().transform_active);
+        assert!(controller.snapshot().transform_preview_rect.is_some());
+
+        controller.commit_transform();
+        assert!(!controller.snapshot().transform_active);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Transform Layer")));
     }
 }

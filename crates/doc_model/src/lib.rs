@@ -92,6 +92,13 @@ pub struct TileGridSize {
 
 pub type RectSelection = CanvasRect;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerStateSnapshot {
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub tiles: HashMap<TileCoord, RasterTile>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub id: DocumentId,
@@ -308,6 +315,31 @@ impl Document {
         Some(duplicate_id)
     }
 
+    pub fn layer_state_snapshot(&self, index: usize) -> Option<LayerStateSnapshot> {
+        let layer = self.layers.get(index)?;
+        Some(LayerStateSnapshot {
+            offset_x: layer.offset_x,
+            offset_y: layer.offset_y,
+            tiles: layer.tiles.clone(),
+        })
+    }
+
+    pub fn apply_layer_state_snapshot(&mut self, layer_id: LayerId, snapshot: LayerStateSnapshot) -> bool {
+        let Some(layer_index) = self.layer_index_by_id(layer_id) else {
+            return false;
+        };
+
+        let Some(layer) = self.layers.get_mut(layer_index) else {
+            return false;
+        };
+
+        layer.offset_x = snapshot.offset_x;
+        layer.offset_y = snapshot.offset_y;
+        layer.tiles = snapshot.tiles;
+        layer.dirty_tiles = layer.tiles.keys().copied().collect();
+        true
+    }
+
     pub fn ensure_tile_for_pixel(
         &mut self,
         layer_index: usize,
@@ -371,6 +403,12 @@ impl Document {
     pub fn set_layer_opacity(&mut self, index: usize, opacity_percent: u8) {
         if let Some(layer) = self.layers.get_mut(index) {
             layer.opacity_percent = opacity_percent.min(100);
+        }
+    }
+
+    pub fn set_layer_blend_mode(&mut self, index: usize, blend_mode: BlendMode) {
+        if let Some(layer) = self.layers.get_mut(index) {
+            layer.blend_mode = blend_mode;
         }
     }
 
@@ -512,10 +550,12 @@ mod tests {
         document.rename_layer(0, "Base");
         document.set_layer_visibility(0, false);
         document.set_layer_opacity(0, 255);
+        document.set_layer_blend_mode(0, BlendMode::Screen);
 
         assert_eq!(document.layers[0].name, "Base");
         assert!(!document.layers[0].visible);
         assert_eq!(document.layers[0].opacity_percent, 100);
+        assert_eq!(document.layers[0].blend_mode, BlendMode::Screen);
     }
 
     #[test]
@@ -663,5 +703,25 @@ mod tests {
         assert!(document.tile_snapshot(0, coord).is_some());
         assert!(document.apply_tile_snapshot(layer_id, coord, None));
         assert!(document.tile_snapshot(0, coord).is_none());
+    }
+
+    #[test]
+    fn layer_state_snapshot_roundtrips_tiles_and_offsets() {
+        let mut document = Document::new(512, 512);
+        assert!(document.set_layer_offset(0, 12, -9));
+        let tile = document
+            .ensure_tile_for_pixel(0, 20, 20)
+            .expect("tile should be created");
+        tile.pixels[0] = 180;
+        tile.pixels[3] = 255;
+
+        let snapshot = document.layer_state_snapshot(0).expect("snapshot should exist");
+        let layer_id = document.layer(0).expect("layer exists").id;
+        document.set_layer_offset(0, 0, 0);
+        document.layer_mut(0).expect("layer exists").tiles.clear();
+
+        assert!(document.apply_layer_state_snapshot(layer_id, snapshot.clone()));
+        assert_eq!(document.layer_offset(0), Some((12, -9)));
+        assert_eq!(document.layer_state_snapshot(0), Some(snapshot));
     }
 }

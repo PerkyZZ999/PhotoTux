@@ -1,6 +1,7 @@
 use common::{CanvasRect, LayerId};
-use doc_model::{Document, RasterTile, RectSelection, TileCoord};
+use doc_model::{Document, LayerStateSnapshot, RasterTile, RectSelection, TileCoord};
 use image_ops::{apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped, BrushDab};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolKind {
@@ -48,6 +49,13 @@ pub struct BrushStrokeRecord {
     pub changes: Vec<TileChange>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerTransformRecord {
+    pub layer_id: LayerId,
+    pub before: LayerStateSnapshot,
+    pub after: LayerStateSnapshot,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveLayerRecord {
     pub layer_id: LayerId,
@@ -83,9 +91,20 @@ impl BrushStrokeRecord {
     }
 }
 
+impl LayerTransformRecord {
+    pub fn undo(&self, document: &mut Document) {
+        let _ = document.apply_layer_state_snapshot(self.layer_id, self.before.clone());
+    }
+
+    pub fn redo(&self, document: &mut Document) {
+        let _ = document.apply_layer_state_snapshot(self.layer_id, self.after.clone());
+    }
+}
+
 pub struct BrushTool;
 pub struct MoveTool;
 pub struct RectangularMarqueeTool;
+pub struct SimpleTransformTool;
 
 impl BrushTool {
     pub fn apply_stroke(
@@ -274,6 +293,197 @@ impl RectangularMarqueeTool {
     }
 }
 
+impl SimpleTransformTool {
+    pub fn preview_bounds(
+        document: &Document,
+        layer_index: usize,
+        scale: f32,
+        translate_x: i32,
+        translate_y: i32,
+    ) -> Option<CanvasRect> {
+        let bounds = document.layer_canvas_bounds(layer_index)?;
+        if scale <= 0.0 {
+            return None;
+        }
+
+        Some(CanvasRect::new(
+            bounds.x + translate_x,
+            bounds.y + translate_y,
+            ((bounds.width as f32) * scale).round().max(1.0) as u32,
+            ((bounds.height as f32) * scale).round().max(1.0) as u32,
+        ))
+    }
+
+    pub fn transform_layer(
+        document: &mut Document,
+        layer_index: usize,
+        scale: f32,
+        translate_x: i32,
+        translate_y: i32,
+    ) -> Option<LayerTransformRecord> {
+        if scale <= 0.0 {
+            return None;
+        }
+
+        let before = document.layer_state_snapshot(layer_index)?;
+        if before.tiles.is_empty() {
+            return None;
+        }
+
+        let layer_id = document.layer(layer_index)?.id;
+        let source_bounds = document.layer_canvas_bounds(layer_index)?;
+        let (source_width, source_height, source_pixels) = rasterize_layer_snapshot(
+            &before,
+            document.tile_size,
+            source_bounds,
+        )?;
+        let target_width = ((source_width as f32) * scale).round().max(1.0) as u32;
+        let target_height = ((source_height as f32) * scale).round().max(1.0) as u32;
+        let transformed_pixels = resample_nearest_rgba(
+            &source_pixels,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+        );
+        let after = layer_state_from_pixels(
+            document.tile_size,
+            source_bounds.x + translate_x,
+            source_bounds.y + translate_y,
+            target_width,
+            target_height,
+            &transformed_pixels,
+        );
+
+        if before == after {
+            return None;
+        }
+
+        let _ = document.apply_layer_state_snapshot(layer_id, after.clone());
+        Some(LayerTransformRecord {
+            layer_id,
+            before,
+            after,
+        })
+    }
+}
+
+fn rasterize_layer_snapshot(
+    snapshot: &LayerStateSnapshot,
+    tile_size: u32,
+    bounds: CanvasRect,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let width = bounds.width;
+    let height = bounds.height;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let mut pixels = vec![0_u8; (width * height * 4) as usize];
+    for (coord, tile) in &snapshot.tiles {
+        let tile_origin_x = coord.x as i32 * tile_size as i32 + snapshot.offset_x;
+        let tile_origin_y = coord.y as i32 * tile_size as i32 + snapshot.offset_y;
+
+        for local_y in 0..tile_size as usize {
+            for local_x in 0..tile_size as usize {
+                let canvas_x = tile_origin_x + local_x as i32;
+                let canvas_y = tile_origin_y + local_y as i32;
+                if canvas_x < bounds.x
+                    || canvas_y < bounds.y
+                    || canvas_x >= bounds.x + width as i32
+                    || canvas_y >= bounds.y + height as i32
+                {
+                    continue;
+                }
+
+                let source_index = (local_y * tile_size as usize + local_x) * 4;
+                let target_x = (canvas_x - bounds.x) as usize;
+                let target_y = (canvas_y - bounds.y) as usize;
+                let target_index = (target_y * width as usize + target_x) * 4;
+                pixels[target_index..target_index + 4]
+                    .copy_from_slice(&tile.pixels[source_index..source_index + 4]);
+            }
+        }
+    }
+
+    Some((width, height, pixels))
+}
+
+fn resample_nearest_rgba(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<u8> {
+    let mut output = vec![0_u8; (target_width * target_height * 4) as usize];
+
+    for target_y in 0..target_height {
+        for target_x in 0..target_width {
+            let source_x = ((target_x as f32 + 0.5) * source_width as f32 / target_width as f32)
+                .floor()
+                .clamp(0.0, source_width.saturating_sub(1) as f32) as u32;
+            let source_y = ((target_y as f32 + 0.5) * source_height as f32 / target_height as f32)
+                .floor()
+                .clamp(0.0, source_height.saturating_sub(1) as f32) as u32;
+            let source_index = ((source_y * source_width + source_x) * 4) as usize;
+            let target_index = ((target_y * target_width + target_x) * 4) as usize;
+            output[target_index..target_index + 4].copy_from_slice(&source[source_index..source_index + 4]);
+        }
+    }
+
+    output
+}
+
+fn layer_state_from_pixels(
+    tile_size: u32,
+    offset_x: i32,
+    offset_y: i32,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> LayerStateSnapshot {
+    let mut tiles = HashMap::new();
+    let tile_columns = width.div_ceil(tile_size);
+    let tile_rows = height.div_ceil(tile_size);
+
+    for tile_y in 0..tile_rows {
+        for tile_x in 0..tile_columns {
+            let mut tile = RasterTile::new(tile_size);
+            let mut has_content = false;
+            for local_y in 0..tile_size as usize {
+                let pixel_y = tile_y * tile_size + local_y as u32;
+                if pixel_y >= height {
+                    break;
+                }
+                for local_x in 0..tile_size as usize {
+                    let pixel_x = tile_x * tile_size + local_x as u32;
+                    if pixel_x >= width {
+                        break;
+                    }
+                    let source_index = ((pixel_y * width + pixel_x) * 4) as usize;
+                    let target_index = (local_y * tile_size as usize + local_x) * 4;
+                    tile.pixels[target_index..target_index + 4]
+                        .copy_from_slice(&pixels[source_index..source_index + 4]);
+                    if pixels[source_index + 3] != 0 {
+                        has_content = true;
+                    }
+                }
+            }
+
+            if has_content {
+                tiles.insert(TileCoord::new(tile_x, tile_y), tile);
+            }
+        }
+    }
+
+    LayerStateSnapshot {
+        offset_x,
+        offset_y,
+        tiles,
+    }
+}
+
 fn interpolate_dab_positions(points: &[(f32, f32)], spacing: f32) -> Vec<(f32, f32)> {
     let mut positions = vec![points[0]];
 
@@ -300,7 +510,10 @@ fn interpolate_dab_positions(points: &[(f32, f32)], spacing: f32) -> Vec<(f32, f
 
 #[cfg(test)]
 mod tests {
-    use super::{BrushSettings, BrushTool, BrushToolMode, MoveTool, RectangularMarqueeTool};
+    use super::{
+        BrushSettings, BrushTool, BrushToolMode, MoveTool, RectangularMarqueeTool,
+        SimpleTransformTool,
+    };
     use common::CanvasRect;
     use doc_model::{Document, TileCoord};
     use history_engine::HistoryStack;
@@ -539,5 +752,37 @@ mod tests {
 
         let center_alpha = pixel_alpha(&document, 0, 64, 64);
         assert_eq!(center_alpha, 255);
+    }
+
+    #[test]
+    fn simple_transform_preview_bounds_include_scale_and_translation() {
+        let mut document = Document::new(512, 512);
+        let _ = document.ensure_tile_for_pixel(0, 32, 32);
+
+        let bounds = SimpleTransformTool::preview_bounds(&document, 0, 1.5, 20, -10)
+            .expect("preview bounds should exist");
+
+        assert_eq!(bounds, CanvasRect::new(20, -10, 384, 384));
+    }
+
+    #[test]
+    fn simple_transform_can_be_undone_and_redone() {
+        let mut document = Document::new(512, 512);
+        let tile_size = document.tile_size as usize;
+        let tile = document
+            .ensure_tile_for_pixel(0, 8, 8)
+            .expect("tile should be created");
+        tile.pixels[(8 * tile_size + 8) * 4 + 3] = 255;
+
+        let before = document.layer_state_snapshot(0).expect("snapshot should exist");
+        let record = SimpleTransformTool::transform_layer(&mut document, 0, 2.0, 15, 5)
+            .expect("transform should produce a record");
+        let after = document.layer_state_snapshot(0).expect("snapshot should exist");
+
+        assert_ne!(before, after);
+        record.undo(&mut document);
+        assert_eq!(document.layer_state_snapshot(0), Some(before.clone()));
+        record.redo(&mut document);
+        assert_eq!(document.layer_state_snapshot(0), Some(after));
     }
 }

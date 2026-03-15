@@ -6,6 +6,12 @@ This roadmap turns the PRD and technical specification into a delivery sequence.
 
 It is milestone-oriented rather than calendar-oriented.
 
+Current status:
+
+- Milestones 0 through 5 are now implemented at the task-list level
+- MVP stabilization coverage now includes representative compositing scenes, repeated persistence checks, large sparse document validation, autosave and recovery regression coverage, and viewport-versus-export parity checks
+- next planning can move beyond the current MVP task list into post-MVP prioritization
+
 ## Guiding Rules
 
 - complete reliability layers before feature breadth
