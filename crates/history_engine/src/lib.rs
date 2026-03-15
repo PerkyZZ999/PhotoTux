@@ -79,6 +79,14 @@ impl<T> HistoryStack<T> {
     pub fn current_redo(&self) -> Option<&T> {
         self.redo_entries.last()
     }
+
+    pub fn undo_entries(&self) -> &[T] {
+        &self.undo_entries
+    }
+
+    pub fn redo_entries(&self) -> &[T] {
+        &self.redo_entries
+    }
 }
 
 #[cfg(test)]

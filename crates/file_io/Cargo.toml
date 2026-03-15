@@ -7,6 +7,7 @@ edition = "2024"
 anyhow.workspace = true
 common = { path = "../common" }
 doc_model = { path = "../doc_model" }
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

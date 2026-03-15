@@ -11,5 +11,5 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!("starting PhotoTux shell");
-    ui_shell::run()
+    ui_shell::run(app_core::build_shell_controller())
 }

@@ -1,4 +1,4 @@
-use common::CanvasSize;
+use common::{CanvasRaster, CanvasRect, CanvasSize};
 use std::num::NonZeroU64;
 
 use anyhow::{Context, Result};
@@ -56,6 +56,13 @@ pub struct CanvasFrame {
     pub height: u32,
     pub stride: usize,
     pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasOverlayRect {
+    pub rect: CanvasRect,
+    pub stroke_rgba: [u8; 4],
+    pub fill_rgba: Option<[u8; 4]>,
 }
 
 pub struct OffscreenCanvasRenderer {
@@ -168,6 +175,8 @@ impl OffscreenCanvasRenderer {
         logical_width: u32,
         logical_height: u32,
         scale_factor: f64,
+        canvas_raster: Option<&CanvasRaster>,
+        overlays: &[CanvasOverlayRect],
     ) -> Result<CanvasFrame> {
         let physical_width = ((logical_width as f64 * scale_factor).round() as u32).max(1);
         let physical_height = ((logical_height as f64 * scale_factor).round() as u32).max(1);
@@ -297,6 +306,26 @@ impl OffscreenCanvasRenderer {
         drop(mapped);
         output_buffer.unmap();
 
+        if let Some(canvas_raster) = canvas_raster {
+            draw_canvas_raster(
+                &mut pixels,
+                physical_width,
+                physical_height,
+                viewport_state,
+                scale_factor as f32,
+                canvas_raster,
+            );
+        }
+
+        draw_overlay_rects(
+            &mut pixels,
+            physical_width,
+            physical_height,
+            viewport_state,
+            scale_factor as f32,
+            overlays,
+        );
+
         Ok(CanvasFrame {
             width: physical_width,
             height: physical_height,
@@ -304,6 +333,106 @@ impl OffscreenCanvasRenderer {
             pixels,
         })
     }
+}
+
+fn draw_canvas_raster(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    canvas_raster: &CanvasRaster,
+) {
+    let left = (viewport_state.pan_x * scale_factor).round() as i32;
+    let top = (viewport_state.pan_y * scale_factor).round() as i32;
+    let canvas_width = (canvas_raster.size.width as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let canvas_height = (canvas_raster.size.height as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let right = left + canvas_width;
+    let bottom = top + canvas_height;
+
+    for y in top.max(0)..bottom.min(frame_height as i32) {
+        for x in left.max(0)..right.min(frame_width as i32) {
+            let source_x = (((x - left) as f32) / viewport_state.zoom).floor() as i32;
+            let source_y = (((y - top) as f32) / viewport_state.zoom).floor() as i32;
+            if source_x < 0
+                || source_y < 0
+                || source_x >= canvas_raster.size.width as i32
+                || source_y >= canvas_raster.size.height as i32
+            {
+                continue;
+            }
+
+            let source_index = ((source_y as u32 * canvas_raster.size.width + source_x as u32) * 4) as usize;
+            blend_overlay_pixel(
+                pixels,
+                frame_width,
+                x as u32,
+                y as u32,
+                [
+                    canvas_raster.pixels[source_index],
+                    canvas_raster.pixels[source_index + 1],
+                    canvas_raster.pixels[source_index + 2],
+                    canvas_raster.pixels[source_index + 3],
+                ],
+            );
+        }
+    }
+}
+
+fn draw_overlay_rects(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    overlays: &[CanvasOverlayRect],
+) {
+    for overlay in overlays {
+        draw_overlay_rect(pixels, frame_width, frame_height, viewport_state, scale_factor, *overlay);
+    }
+}
+
+fn draw_overlay_rect(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    overlay: CanvasOverlayRect,
+) {
+    let left = (viewport_state.pan_x * scale_factor + overlay.rect.x as f32 * viewport_state.zoom).round() as i32;
+    let top = (viewport_state.pan_y * scale_factor + overlay.rect.y as f32 * viewport_state.zoom).round() as i32;
+    let width = (overlay.rect.width as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let height = (overlay.rect.height as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let right = left + width;
+    let bottom = top + height;
+
+    if let Some(fill) = overlay.fill_rgba {
+        for y in top.max(0)..bottom.min(frame_height as i32) {
+            for x in left.max(0)..right.min(frame_width as i32) {
+                blend_overlay_pixel(pixels, frame_width, x as u32, y as u32, fill);
+            }
+        }
+    }
+
+    for y in top.max(0)..bottom.min(frame_height as i32) {
+        for x in left.max(0)..right.min(frame_width as i32) {
+            if x == left.max(0) || x == right - 1 || y == top.max(0) || y == bottom - 1 {
+                blend_overlay_pixel(pixels, frame_width, x as u32, y as u32, overlay.stroke_rgba);
+            }
+        }
+    }
+}
+
+fn blend_overlay_pixel(pixels: &mut [u8], frame_width: u32, x: u32, y: u32, rgba: [u8; 4]) {
+    let index = ((y * frame_width + x) * 4) as usize;
+    let alpha = rgba[3] as f32 / 255.0;
+    for channel in 0..3 {
+        let dst = pixels[index + channel] as f32;
+        let src = rgba[channel] as f32;
+        pixels[index + channel] = (src * alpha + dst * (1.0 - alpha)).round() as u8;
+    }
+    pixels[index + 3] = 255;
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {
@@ -415,8 +544,8 @@ impl ViewportState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ViewportSize, ViewportState};
-    use common::CanvasSize;
+    use super::{draw_canvas_raster, draw_overlay_rects, CanvasOverlayRect, ViewportSize, ViewportState};
+    use common::{CanvasRaster, CanvasRect, CanvasSize};
 
     #[test]
     fn pan_by_offsets_the_viewport() {
@@ -461,5 +590,46 @@ mod tests {
         assert!((state.zoom - 1.2).abs() < 0.001);
         assert!((state.pan_x - 0.0).abs() < 0.001);
         assert!((state.pan_y - 300.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn overlay_rect_draws_visible_stroke() {
+        let mut pixels = vec![0_u8; 64 * 64 * 4];
+        draw_overlay_rects(
+            &mut pixels,
+            64,
+            64,
+            ViewportState::default(),
+            1.0,
+            &[CanvasOverlayRect {
+                rect: CanvasRect::new(10, 10, 20, 20),
+                stroke_rgba: [255, 0, 0, 255],
+                fill_rgba: None,
+            }],
+        );
+
+        let top_left = ((10 * 64 + 10) * 4) as usize;
+        assert_eq!(&pixels[top_left..top_left + 4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn canvas_raster_draws_into_frame() {
+        let mut pixels = vec![0_u8; 32 * 32 * 4];
+        let mut raster_pixels = vec![0_u8; 4 * 4 * 4];
+        raster_pixels[0..4].copy_from_slice(&[10, 20, 30, 255]);
+
+        draw_canvas_raster(
+            &mut pixels,
+            32,
+            32,
+            ViewportState::default(),
+            1.0,
+            &CanvasRaster {
+                size: CanvasSize::new(4, 4),
+                pixels: raster_pixels,
+            },
+        );
+
+        assert_eq!(&pixels[0..4], &[10, 20, 30, 255]);
     }
 }

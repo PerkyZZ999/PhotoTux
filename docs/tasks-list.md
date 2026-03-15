@@ -20,10 +20,15 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - [x] T02 - Host a `wgpu` canvas inside the GTK4 shell
 - [x] T03 - Implement viewport navigation basics
 - [x] T04 - Create the tile-backed raster document core
-- [-] T05 - Implement single-layer paint and erase
-- [-] T06 - Add undo and redo for raster edits
-- [-] T07 - Implement the native `.ptx` file format
-- [-] T10 - Build the fixed professional shell layout
+- [x] T05 - Implement single-layer paint and erase
+- [x] T06 - Add undo and redo for raster edits
+- [x] T07 - Implement the native `.ptx` file format
+- [x] T08 - Implement PNG export and baseline image import
+- [x] T09 - Expand from one layer to layered documents
+- [x] T10 - Build the fixed professional shell layout
+- [x] T11 - Implement the Layers, Properties, Color, and History panels
+- [x] T12 - Add move-tool workflow
+- [x] T13 - Add rectangular selection workflow
 
 ## MVP Tasks
 
@@ -106,7 +111,7 @@ Progress notes:
 
 ### T05 - Implement single-layer paint and erase
 
-- [-] Status: in progress
+- [x] Status: completed
 - Outcome: direct editing on a raster surface works with acceptable latency
 - Includes:
   - brush dab generation
@@ -120,10 +125,15 @@ Progress notes:
 Progress notes:
 - `image_ops` now contains a tested round-brush dab raster operation
 - the current brush foundation supports radius, hardness, opacity, tile origin handling, and alpha blending
+- `tool_system` now applies paint and erase strokes directly into tile-backed document layers
+- stroke records now capture per-tile before and after snapshots for undoable edits
+- stroke interpolation now places multiple dabs along a path using brush spacing
+- `app_core` now drives live brush and eraser interactions from the shell and commits them as single undoable stroke actions
+- `ui_shell` and `render_wgpu` now present the live flattened canvas raster so paint and erase are visible on the actual document surface during interaction
 
 ### T06 - Add undo and redo for raster edits
 
-- [-] Status: in progress
+- [x] Status: completed
 - Outcome: paint operations are reversible and grouped correctly
 - Includes:
   - history entry model
@@ -136,10 +146,12 @@ Progress notes:
 Progress notes:
 - `history_engine` now has a tested undo/redo stack foundation with proper redo invalidation on new edits
 - budget configuration and core stack transitions are covered by unit tests
+- brush strokes now produce a single `BrushStrokeRecord` with tile snapshots before and after the edit
+- `tool_system` tests now validate undo and redo of a full stroke as one action through the history stack
 
 ### T07 - Implement the native `.ptx` file format
 
-- [-] Status: in progress
+- [x] Status: completed
 - Outcome: PhotoTux projects can be saved and reopened reliably
 - Includes:
   - versioned manifest
@@ -154,10 +166,13 @@ Progress notes:
 - project manifest structures are in place in `file_io`
 - manifest JSON roundtrip tests pass
 - version and per-layer payload-path foundations are established
+- `file_io` now writes and loads `.ptx` project files with embedded per-layer tile payloads
+- save operations use a temporary file plus rename for atomic replacement behavior
+- save/load roundtrip tests verify restored structure and tile image content
 
 ### T08 - Implement PNG export and baseline image import
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: external images can enter and leave the editor
 - Includes:
   - flattened export path
@@ -167,9 +182,14 @@ Progress notes:
 - Done when:
   - imported images can be edited and exported correctly
 
+Progress notes:
+- `file_io` now flattens document layers into RGBA output for PNG export
+- baseline PNG import restores raster content into the internal tile-backed document model
+- PNG export/import roundtrip tests pass with pixel-content verification
+
 ### T09 - Expand from one layer to layered documents
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: the editor supports real compositing structure
 - Includes:
   - create, rename, duplicate, delete, reorder layers
@@ -180,9 +200,14 @@ Progress notes:
 - Done when:
   - multi-layer projects can be edited, saved, reopened, and exported
 
+Progress notes:
+- `doc_model` now supports active-layer selection and layer duplication with copied tile content
+- multi-layer save/load roundtrip tests verify preserved ordering, opacity, and per-layer tile payloads
+- flattening tests verify composite order, visibility toggles, and opacity handling during export
+
 ### T10 - Build the fixed professional shell layout
 
-- [-] Status: in progress
+- [x] Status: completed
 - Outcome: the application has the planned three-column editor workspace
 - Includes:
   - header bar or title region
@@ -198,12 +223,13 @@ Progress notes:
 
 Progress notes:
 - GTK application startup is wired through `app_core` and `ui_shell`
-- the shell already has a header area, menu placeholder, tool options bar, left tool rail, document region, right dock, and status bar
-- the document region now hosts a live renderer-backed canvas instead of a placeholder
+- the shell now follows the documented dark pro layout direction from the design docs with denser chrome and panel framing
+- the document region includes a tab strip, ruler framing, and a live renderer-backed canvas surface
+- the right side is structured as grouped panel sections with a Photoshop-style fixed dock instead of generic placeholders
 
 ### T11 - Implement the Layers, Properties, Color, and History panels
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: the main editing panels are operational rather than decorative
 - Includes:
   - layer list interactions
@@ -214,9 +240,17 @@ Progress notes:
 - Done when:
   - core editing state can be inspected and controlled from the shell
 
+Progress notes:
+- `app_core` now owns a live shell controller rather than leaving document-like state inside the UI layer
+- `ui_shell` panels now read real document, color, and history snapshots through that controller boundary
+- the Layers panel supports selection, visibility toggles, add, duplicate, delete, and reorder actions
+- the Properties panel shows active-layer state and supports opacity adjustment controls
+- the Color panel exposes foreground and background color state with swap and reset actions
+- the History panel shows a visible action list driven from the controller history stack
+
 ### T12 - Add move-tool workflow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: raster content can be repositioned intentionally
 - Includes:
   - move interaction model
@@ -227,9 +261,18 @@ Progress notes:
 - Done when:
   - selected content or layer movement behaves predictably and is undoable
 
+Progress notes:
+- `doc_model` now supports per-layer positional offsets as part of the document source of truth
+- `file_io` save/load and PNG export now respect layer offsets during persistence and flattening
+- `tool_system` now has an undoable move-layer record with unit tests for apply, undo, and redo behavior
+- `ui_shell` now routes canvas drag gestures through the selected tool instead of treating every drag as viewport pan
+- the move tool now previews active-layer bounds live on the canvas while dragging and commits a single history entry on release
+- `app_core` now stores typed history entries for move operations instead of only text labels, and the History panel can undo and redo them from the shell
+- live canvas raster presentation now makes move-tool preview visible on the document image itself, not only through bounds overlays
+
 ### T13 - Add rectangular selection workflow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: selection becomes part of the editing model
 - Includes:
   - marquee selection creation
@@ -239,6 +282,14 @@ Progress notes:
 - Depends on: T09, T10
 - Done when:
   - selection state is visible, stable, and usable by editing tools
+
+Progress notes:
+- `doc_model` now has source-of-truth rectangular selection state and selection helpers
+- `tool_system` now includes a rectangular marquee tool with normalized selection records and undo/redo tests
+- `app_core` and `ui_shell` now support marquee drag interactions on the canvas
+- `render_wgpu` now draws visible selection overlays into the offscreen frame for live feedback
+- selection state now supports clear and invert actions with undo/redo through the shell History panel and Properties controls
+- paint and erase strokes in `tool_system` now respect the current rectangular selection, including inverted selection state
 
 ### T14 - Add simple transform workflow
 

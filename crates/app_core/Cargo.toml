@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+common = { path = "../common" }
+doc_model = { path = "../doc_model" }
+file_io = { path = "../file_io" }
+history_engine = { path = "../history_engine" }
+tool_system = { path = "../tool_system" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ui_shell = { path = "../ui_shell" }

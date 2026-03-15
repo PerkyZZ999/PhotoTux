@@ -1,5 +1,13 @@
+use common::CanvasRect;
+
 pub fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushBlendMode {
+    Paint,
+    Erase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,6 +38,103 @@ pub fn apply_round_brush_dab(
     center_y: f32,
     dab: BrushDab,
 ) -> bool {
+    apply_round_brush_dab_clipped(
+        tile_pixels,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        None,
+        false,
+    )
+}
+
+pub fn apply_round_brush_dab_clipped(
+    tile_pixels: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: u32,
+    tile_origin_y: u32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
+    apply_round_dab(
+        tile_pixels,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        BrushBlendMode::Paint,
+        clip_rect,
+        clip_inverted,
+    )
+}
+
+pub fn apply_round_eraser_dab(
+    tile_pixels: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: u32,
+    tile_origin_y: u32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+) -> bool {
+    apply_round_eraser_dab_clipped(
+        tile_pixels,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        None,
+        false,
+    )
+}
+
+pub fn apply_round_eraser_dab_clipped(
+    tile_pixels: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: u32,
+    tile_origin_y: u32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
+    apply_round_dab(
+        tile_pixels,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        BrushBlendMode::Erase,
+        clip_rect,
+        clip_inverted,
+    )
+}
+
+fn apply_round_dab(
+    tile_pixels: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: u32,
+    tile_origin_y: u32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    blend_mode: BrushBlendMode,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
     if tile_pixels.len() != tile_size as usize * tile_size as usize * 4 || dab.radius <= 0.0 {
         return false;
     }
@@ -58,6 +163,10 @@ pub fn apply_round_brush_dab(
 
     for canvas_y in start_y..=end_y {
         for canvas_x in start_x..=end_x {
+            if !pixel_is_within_clip(canvas_x as i32, canvas_y as i32, clip_rect, clip_inverted) {
+                continue;
+            }
+
             let pixel_center_x = canvas_x as f32 + 0.5;
             let pixel_center_y = canvas_y as f32 + 0.5;
             let delta_x = pixel_center_x - center_x;
@@ -83,7 +192,7 @@ pub fn apply_round_brush_dab(
             let local_y = (canvas_y - tile_origin_y) as usize;
             let index = (local_y * tile_size as usize + local_x) * 4;
 
-            blend_pixel(&mut tile_pixels[index..index + 4], dab.color, alpha);
+            blend_pixel(&mut tile_pixels[index..index + 4], dab.color, alpha, blend_mode);
             changed = true;
         }
     }
@@ -91,7 +200,23 @@ pub fn apply_round_brush_dab(
     changed
 }
 
-fn blend_pixel(destination: &mut [u8], source: [u8; 4], alpha: f32) {
+fn pixel_is_within_clip(pixel_x: i32, pixel_y: i32, clip_rect: Option<CanvasRect>, clip_inverted: bool) -> bool {
+    let Some(clip_rect) = clip_rect else {
+        return true;
+    };
+
+    let right = clip_rect.x + clip_rect.width as i32;
+    let bottom = clip_rect.y + clip_rect.height as i32;
+    let inside = pixel_x >= clip_rect.x && pixel_x < right && pixel_y >= clip_rect.y && pixel_y < bottom;
+    inside != clip_inverted
+}
+
+fn blend_pixel(destination: &mut [u8], source: [u8; 4], alpha: f32, blend_mode: BrushBlendMode) {
+    if matches!(blend_mode, BrushBlendMode::Erase) {
+        erase_pixel(destination, alpha);
+        return;
+    }
+
     let source_alpha = alpha.clamp(0.0, 1.0);
     let destination_alpha = destination[3] as f32 / 255.0;
     let out_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
@@ -106,9 +231,17 @@ fn blend_pixel(destination: &mut [u8], source: [u8; 4], alpha: f32) {
     destination[3] = clamp_u8((out_alpha * 255.0).round() as i32);
 }
 
+fn erase_pixel(destination: &mut [u8], alpha: f32) {
+    let retain = (1.0 - alpha.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    for channel in destination.iter_mut() {
+        *channel = clamp_u8((*channel as f32 * retain).round() as i32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_round_brush_dab, BrushDab};
+    use super::{apply_round_brush_dab, apply_round_brush_dab_clipped, apply_round_eraser_dab, apply_round_eraser_dab_clipped, BrushDab};
+    use common::CanvasRect;
 
     #[test]
     fn brush_dab_changes_pixels_inside_radius() {
@@ -180,5 +313,67 @@ mod tests {
         let edge_index = (8 * 16 + 12) * 4 + 3;
         assert!(pixels[edge_index] > 0);
         assert!(pixels[edge_index] < 255);
+    }
+
+    #[test]
+    fn eraser_dab_reduces_existing_alpha() {
+        let mut pixels = vec![255_u8; 16 * 16 * 4];
+        let changed = apply_round_eraser_dab(
+            &mut pixels,
+            16,
+            0,
+            0,
+            8.0,
+            8.0,
+            BrushDab::new(3.0, 1.0, 0.5, [0, 0, 0, 255]),
+        );
+
+        assert!(changed);
+        let center_alpha = pixels[(8 * 16 + 8) * 4 + 3];
+        assert!(center_alpha < 255);
+    }
+
+    #[test]
+    fn clipped_brush_dab_only_affects_pixels_inside_selection() {
+        let mut pixels = vec![0_u8; 16 * 16 * 4];
+        let changed = apply_round_brush_dab_clipped(
+            &mut pixels,
+            16,
+            0,
+            0,
+            8.0,
+            8.0,
+            BrushDab::new(4.0, 1.0, 1.0, [255, 0, 0, 255]),
+            Some(CanvasRect::new(6, 6, 4, 4)),
+            false,
+        );
+
+        assert!(changed);
+        let inside = (8 * 16 + 8) * 4 + 3;
+        let outside = (8 * 16 + 4) * 4 + 3;
+        assert!(pixels[inside] > 0);
+        assert_eq!(pixels[outside], 0);
+    }
+
+    #[test]
+    fn clipped_eraser_dab_respects_inverted_selection() {
+        let mut pixels = vec![255_u8; 16 * 16 * 4];
+        let changed = apply_round_eraser_dab_clipped(
+            &mut pixels,
+            16,
+            0,
+            0,
+            8.0,
+            8.0,
+            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            Some(CanvasRect::new(6, 6, 4, 4)),
+            true,
+        );
+
+        assert!(changed);
+        let inside = (8 * 16 + 8) * 4 + 3;
+        let outside = (8 * 16 + 4) * 4 + 3;
+        assert_eq!(pixels[inside], 255);
+        assert!(pixels[outside] < 255);
     }
 }
