@@ -6,18 +6,30 @@ This is the end-to-end implementation list for reaching MVP.
 
 Each task should produce a meaningful project outcome, not just isolated code movement.
 
-## Status Legend
+## Checklist Legend
 
-- `todo`: not started
-- `doing`: in progress
-- `done`: completed
-- `blocked`: cannot proceed until a dependency is resolved
+- `[ ]` not started
+- `[-]` in progress
+- `[x]` completed
+- `[!]` blocked
+
+## Current Progress Snapshot
+
+- [x] Copilot instructions created
+- [x] T01 - Scaffold the Rust workspace
+- [x] T02 - Host a `wgpu` canvas inside the GTK4 shell
+- [x] T03 - Implement viewport navigation basics
+- [x] T04 - Create the tile-backed raster document core
+- [-] T05 - Implement single-layer paint and erase
+- [-] T06 - Add undo and redo for raster edits
+- [-] T07 - Implement the native `.ptx` file format
+- [-] T10 - Build the fixed professional shell layout
 
 ## MVP Tasks
 
 ### T01 - Scaffold the Rust workspace
 
-- Status: `todo`
+- [x] Status: completed
 - Outcome: a clean multi-crate workspace matching the planned architecture
 - Includes:
   - root workspace setup
@@ -29,9 +41,15 @@ Each task should produce a meaningful project outcome, not just isolated code mo
   - the workspace builds
   - crate boundaries reflect the architecture docs
 
+Progress notes:
+- workspace root `Cargo.toml` created
+- architecture crates scaffolded under `crates/`
+- shared lint and dependency policy added
+- `cargo check` and `cargo test` pass for the scaffolded workspace
+
 ### T02 - Host a `wgpu` canvas inside the GTK4 shell
 
-- Status: `todo`
+- [x] Status: completed
 - Outcome: a working native window with a live GPU-backed canvas region
 - Includes:
   - GTK4 application shell startup
@@ -44,9 +62,14 @@ Each task should produce a meaningful project outcome, not just isolated code mo
   - the shell opens reliably
   - the canvas redraws correctly on resize and scale changes
 
+Progress notes:
+- `ui_shell` now hosts a live `wgpu`-driven canvas view inside the GTK shell
+- the canvas redraw path handles resize and scale-factor changes
+- startup was smoke-tested through `cargo run -p app_core`
+
 ### T03 - Implement viewport navigation basics
 
-- Status: `todo`
+- [x] Status: completed
 - Outcome: the document can be viewed comfortably
 - Includes:
   - checkerboard and pasteboard rendering
@@ -57,9 +80,15 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - zoom and pan feel stable and predictable
 
+Progress notes:
+- viewport zoom and pan state lives in `render_wgpu`
+- fit-to-canvas and zoom-towards math are covered by unit tests
+- the live canvas host supports pan drag and scroll zoom
+- checkerboard canvas rendering and pasteboard framing now come from the `wgpu` render path
+
 ### T04 - Create the tile-backed raster document core
 
-- Status: `todo`
+- [x] Status: completed
 - Outcome: a source-of-truth document model suitable for editing and persistence
 - Includes:
   - document, canvas, raster-layer, and metadata structures
@@ -70,9 +99,14 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - documents and layers can exist without any UI dependency
 
+Progress notes:
+- `Document`, `RasterLayer`, and blend-mode foundations are in place
+- layer add, rename, reorder, visibility, opacity, and delete behavior are covered by tests
+- tile size, tile-grid math, lazy tile allocation, and dirty-tile tracking are now part of the document model foundation
+
 ### T05 - Implement single-layer paint and erase
 
-- Status: `todo`
+- [-] Status: in progress
 - Outcome: direct editing on a raster surface works with acceptable latency
 - Includes:
   - brush dab generation
@@ -83,9 +117,13 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - painting and erasing work on a single document layer with low-latency feedback
 
+Progress notes:
+- `image_ops` now contains a tested round-brush dab raster operation
+- the current brush foundation supports radius, hardness, opacity, tile origin handling, and alpha blending
+
 ### T06 - Add undo and redo for raster edits
 
-- Status: `todo`
+- [-] Status: in progress
 - Outcome: paint operations are reversible and grouped correctly
 - Includes:
   - history entry model
@@ -95,9 +133,13 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - a stroke undoes and redoes as one action without corruption
 
+Progress notes:
+- `history_engine` now has a tested undo/redo stack foundation with proper redo invalidation on new edits
+- budget configuration and core stack transitions are covered by unit tests
+
 ### T07 - Implement the native `.ptx` file format
 
-- Status: `todo`
+- [-] Status: in progress
 - Outcome: PhotoTux projects can be saved and reopened reliably
 - Includes:
   - versioned manifest
@@ -108,9 +150,14 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - a saved project reopens with matching structure and image content
 
+Progress notes:
+- project manifest structures are in place in `file_io`
+- manifest JSON roundtrip tests pass
+- version and per-layer payload-path foundations are established
+
 ### T08 - Implement PNG export and baseline image import
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: external images can enter and leave the editor
 - Includes:
   - flattened export path
@@ -122,7 +169,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T09 - Expand from one layer to layered documents
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: the editor supports real compositing structure
 - Includes:
   - create, rename, duplicate, delete, reorder layers
@@ -135,7 +182,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T10 - Build the fixed professional shell layout
 
-- Status: `todo`
+- [-] Status: in progress
 - Outcome: the application has the planned three-column editor workspace
 - Includes:
   - header bar or title region
@@ -149,9 +196,14 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 - Done when:
   - the shell structure matches the layout spec and stays usable at target sizes
 
+Progress notes:
+- GTK application startup is wired through `app_core` and `ui_shell`
+- the shell already has a header area, menu placeholder, tool options bar, left tool rail, document region, right dock, and status bar
+- the document region now hosts a live renderer-backed canvas instead of a placeholder
+
 ### T11 - Implement the Layers, Properties, Color, and History panels
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: the main editing panels are operational rather than decorative
 - Includes:
   - layer list interactions
@@ -164,7 +216,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T12 - Add move-tool workflow
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: raster content can be repositioned intentionally
 - Includes:
   - move interaction model
@@ -177,7 +229,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T13 - Add rectangular selection workflow
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: selection becomes part of the editing model
 - Includes:
   - marquee selection creation
@@ -190,7 +242,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T14 - Add simple transform workflow
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: users can scale and translate content reliably
 - Includes:
   - transform preview
@@ -203,7 +255,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T15 - Add initial blend modes
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: layered compositing becomes meaningfully useful
 - Includes:
   - Normal
@@ -218,7 +270,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T16 - Complete import and export support for JPEG and WebP
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: the promised MVP interchange set is complete
 - Includes:
   - JPEG import and export
@@ -230,7 +282,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T17 - Add keyboard shortcuts and command routing
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: the editor becomes efficient for repeat use
 - Includes:
   - core tool shortcuts
@@ -244,7 +296,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T18 - Add autosave and crash recovery
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: editing sessions are resilient to crashes or forced shutdowns
 - Includes:
   - autosave triggers
@@ -257,7 +309,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T19 - Harden responsiveness with a lightweight job system
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: long-running work stops blocking the shell
 - Includes:
   - background execution for save/load, autosave, import/export, and thumbnails
@@ -269,7 +321,7 @@ Each task should produce a meaningful project outcome, not just isolated code mo
 
 ### T20 - Validate and stabilize the MVP workflow
 
-- Status: `todo`
+- [ ] Status: not started
 - Outcome: MVP is trustworthy enough for real use
 - Includes:
   - regression fixes

@@ -1,0 +1,11 @@
+[package]
+name = "history_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../common" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "render_wgpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+common = { path = "../common" }
+pollster.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

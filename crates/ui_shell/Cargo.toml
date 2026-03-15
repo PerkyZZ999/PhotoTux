@@ -1,0 +1,17 @@
+[package]
+name = "ui_shell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+common = { path = "../common" }
+gio.workspace = true
+glib.workspace = true
+gtk4.workspace = true
+pollster.workspace = true
+render_wgpu = { path = "../render_wgpu" }
+tracing.workspace = true
+
+[lints]
+workspace = true

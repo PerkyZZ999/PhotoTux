@@ -1,0 +1,13 @@
+[package]
+name = "app_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ui_shell = { path = "../ui_shell" }
+
+[lints]
+workspace = true

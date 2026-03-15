@@ -1,0 +1,15 @@
+[package]
+name = "file_io"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+common = { path = "../common" }
+doc_model = { path = "../doc_model" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

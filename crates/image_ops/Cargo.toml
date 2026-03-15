@@ -1,0 +1,11 @@
+[package]
+name = "image_ops"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color_math = { path = "../color_math" }
+common = { path = "../common" }
+
+[lints]
+workspace = true
