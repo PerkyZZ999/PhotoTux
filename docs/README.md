@@ -82,6 +82,8 @@ Post-MVP planning references:
 - `post-mvp/tasks/shell-usability-and-native-workflows-tasks.md`: End-to-end implementation sequence for shell and native workflow polish.
 - `post-mvp/plans/release-and-distribution-plan.md`: CI, release validation, and Linux packaging planning.
 - `post-mvp/tasks/release-and-distribution-tasks.md`: End-to-end implementation sequence for release and distribution hardening.
+- `post-mvp/plans/gtk-ui-template-migration-plan.md`: Selective migration planning for stable GTK shell structure into `.ui` templates.
+- `post-mvp/tasks/gtk-ui-template-migration-tasks.md`: End-to-end implementation sequence for `.ui` template migration work.
 - `post-mvp/plans/painting-and-input-expressiveness-plan.md`: Pressure support, brush dynamics, and painting-oriented depth.
 - `post-mvp/tasks/painting-and-input-expressiveness-tasks.md`: End-to-end implementation sequence for painting and input expansion.
 - `post-mvp/plans/text-and-design-tools-plan.md`: Text layers and design-tool expansion planning.

@@ -1,0 +1,71 @@
+    label.add_css_class("panel-row");
+    label
+}
+
+fn install_theme() {
+    let provider = CssProvider::new();
+    provider.load_from_data(THEME_CSS);
+
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn wire_window_shortcuts(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) {
+    let key_controller = EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+        if shell_state.handle_shortcut(key, modifiers) {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.add_controller(key_controller);
+}
+
+fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, Rc<RefCell<CanvasHostState>>) {
+    let picture = Picture::new();
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
+    picture.set_can_shrink(true);
+    picture.add_css_class("frame");
+
+    let state = Rc::new(RefCell::new(CanvasHostState::new(picture.clone(), controller)));
+    wire_canvas_drag(&picture, state.clone());
+    wire_canvas_scroll(&picture, state.clone());
+
+    let tick_state = state.clone();
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        tick_state.borrow_mut().tick();
+        ControlFlow::Continue
+    });
+
+    (picture, state)
+}
+
+fn wire_canvas_drag(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
+    let drag = GestureDrag::new();
+
+    {
+        let state = state.clone();
+        drag.connect_drag_begin(move |_, start_x, start_y| {
+            state.borrow_mut().begin_drag(start_x as f32, start_y as f32);
+        });
+    }
+
+    {
+        let state = state.clone();
+        drag.connect_drag_update(move |_, offset_x, offset_y| {
+            state.borrow_mut().drag_to(offset_x as f32, offset_y as f32);
+        });
+    }
+
+    drag.connect_drag_end(move |_, _, _| {
+        state.borrow_mut().end_drag();
+    });
+

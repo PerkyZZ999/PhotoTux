@@ -1,0 +1,350 @@
+const THEME_CSS: &str = r#"
+.app-root {
+    background: #1B1D21; /* color.bg.app */
+    color: #E8ECF3;      /* color.text.primary */
+    font-family: "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
+    font-size: 11px;
+}
+
+.titlebar {
+    min-height: 28px;
+    background: #202329; /* color.bg.chrome */
+    color: #E8ECF3;
+    border-bottom: 1px solid #313741; /* color.border.subtle */
+}
+
+.titlebar-app-name {
+    font-weight: 600;
+    font-size: 11px;
+}
+
+.titlebar-icon,
+.remix-icon {
+    min-width: 12px;
+    min-height: 12px;
+}
+
+.chrome-button,
+.menu-button,
+.tool-chip,
+.tool-button,
+.document-tab-add,
+.panel-tab,
+.dock-icon-button,
+.color-chip {
+    background: #252930; /* color.bg.panel */
+    color: #E8ECF3;
+    border-radius: 4px;
+    border: 1px solid #3A414D; /* color.border.default */
+    padding: 4px 8px;
+    transition: all 100ms ease-in-out;
+}
+
+.document-tab-active {
+    background: #2A2F37; /* color.bg.panel.alt */
+    color: #4F8CFF;      /* color.accent.primary */
+    border-radius: 4px;
+    border: 1px solid #4F8CFF;
+    padding: 4px 8px;
+    font-weight: 600;
+    transition: all 100ms ease-in-out;
+}
+
+.chrome-button:hover,
+.menu-button:hover,
+.tool-chip:hover,
+.tool-button:hover,
+.panel-tab:hover,
+.document-tab-add:hover,
+.dock-icon-button:hover {
+    background: #2A2F37; /* color.bg.panel.alt */
+    border-color: #4A5361; /* color.border.strong */
+}
+
+.menu-button:active,
+.tool-chip:active,
+.tool-button:active {
+    background: #1F232A; /* color.bg.input */
+}
+
+.menu-bar {
+    min-height: 24px;
+    padding: 2px 6px;
+    background: #202329;
+    border-bottom: 1px solid #313741;
+}
+
+.menu-button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+
+.menu-button:hover {
+    background: #2A2F37;
+    border-color: #3A414D;
+}
+
+.tool-options-bar {
+    min-height: 36px;
+    padding: 4px 6px;
+    background: #202329;
+    border-bottom: 1px solid #313741;
+}
+
+.tool-options-label {
+    margin: 0 8px 0 4px;
+    font-weight: 600;
+    color: #E8ECF3;
+}
+
+.tool-options-icon {
+    margin-left: 2px;
+}
+
+.tool-chip {
+    padding: 4px 10px;
+    background: #1F232A;
+}
+
+.workspace-body {
+    background: #14161A; /* color.bg.canvas.surround */
+}
+
+.tool-rail {
+    padding: 8px 6px;
+    background: #202329;
+    border-right: 1px solid #313741;
+}
+
+.tool-button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.tool-button-active {
+    background: rgba(79, 140, 255, 0.14); /* color.overlay.selection.fill */
+    border-color: #74A7FF; /* color.overlay.selection.stroke */
+    color: #4F8CFF;
+}
+
+.swatch-stack {
+    margin-top: 8px;
+}
+
+.color-chip {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    border-radius: 4px;
+    border: 2px solid #3A414D;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.color-chip:hover {
+    border-color: #E8ECF3;
+}
+
+.swatch-fg {
+    background: #d8dce3;
+    color: #0E1116;
+    margin-bottom: -8px;
+    margin-right: 8px;
+    z-index: 2;
+}
+
+.swatch-bg {
+    background: #111317;
+    color: #E8ECF3;
+    margin-top: -8px;
+    margin-left: 8px;
+    z-index: 1;
+}
+
+.document-region {
+    background: #14161A;
+}
+
+.document-tabs {
+    min-height: 28px;
+    padding: 4px 8px 0 8px;
+    background: #202329;
+    border-bottom: 1px solid #3A414D;
+}
+
+.document-workspace {
+    background: #14161A;
+    padding: 0 4px 4px 4px;
+}
+
+.ruler-corner,
+.ruler-horizontal,
+.ruler-vertical {
+    background: #202329;
+    color: #8A94A3; /* color.text.muted */
+    border: 1px solid #313741;
+    font-size: 9px; /* font.size.xs */
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.ruler-horizontal {
+    min-height: 20px;
+    padding: 2px 8px;
+}
+
+.ruler-vertical {
+    min-width: 20px;
+    padding: 8px 2px;
+}
+
+.canvas-frame {
+    background: #101216; /* color.bg.canvas.pasteboard */
+    border: 1px solid #3A414D;
+    margin-left: 0;
+    box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+}
+
+.right-sidebar {
+    background: #202329;
+    border-left: 1px solid #313741;
+}
+
+.panel-icon-strip {
+    min-width: 36px;
+    padding: 8px 4px;
+    background: #1D2026;
+    border-right: 1px solid #313741;
+}
+
+.dock-icon-button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+}
+
+.dock-icon-button:hover {
+    background: #2A2F37;
+    border-color: #3A414D;
+}
+
+.chrome-icon-button,
+.layer-visibility-button {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: #B3BCC8;
+}
+
+.chrome-icon-button:hover,
+.layer-visibility-button:hover {
+    color: #E8ECF3;
+    background: rgba(255,255,255,0.05);
+    border-radius: 4px;
+}
+
+.panel-dock {
+    padding: 6px;
+    background: #252930;
+}
+
+.panel-group {
+    border: 1px solid #3A414D;
+    background: #252930;
+    border-radius: 6px;
+    margin-bottom: 6px;
+}
+
+.panel-group-header {
+    padding: 4px 6px;
+    background: #2C3139; /* color.bg.panel.header */
+    border-bottom: 1px solid #3A414D;
+    border-radius: 6px 6px 0 0;
+}
+
+.panel-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 500;
+    color: #B3BCC8; /* color.text.secondary */
+}
+
+.panel-tab:hover {
+    color: #E8ECF3;
+}
+
+.panel-tab-active {
+    background: #252930;
+    border: 1px solid #3A414D;
+    border-bottom-color: #252930; /* Connect with panel body visually */
+    color: #E8ECF3;
+    font-weight: 600;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: -1px;
+}
+
+.panel-group-body {
+    padding: 8px;
+}
+
+.panel-row {
+    color: #B3BCC8;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+
+.panel-row:hover {
+    background: #2A2F37;
+    color: #E8ECF3;
+}
+
+.layer-row,
+.layer-row-active {
+    padding: 4px 2px;
+    border-radius: 4px;
+    margin-bottom: 2px;
+}
+
+.layer-row:hover {
+    background: #2A2F37;
+}
+
+.layer-row-active {
+    background: rgba(79, 140, 255, 0.14);
+    border: 1px solid #4F8CFF;
+    color: #E8ECF3;
+}
+
+.status-bar {
+    min-height: 24px;
+    padding: 4px 12px;
+    background: #202329;
+    border-top: 1px solid #313741;
+}
+
+.status-label {
+    color: #8A94A3; /* color.text.muted */
+    font-size: 10px;
+    font-weight: 500;
+}
+
+paned > separator {
+    background-color: transparent;
+    min-width: 4px;
+    min-height: 4px;
+}
+
+paned > separator:hover {
+    background-color: #4F8CFF;
+}
+"#;

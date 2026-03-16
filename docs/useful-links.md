@@ -17,3 +17,14 @@ https://docs.rs/wgpu/latest/wgpu/
 
 ### `Image` Crate Documentations
 https://docs.rs/image/latest/image/
+
+### CSS STYLING FOR `GTK4-RS`
+https://github.com/jbenner-radham/rust-gtk4-css-styling
+
+### GTK4 Design/UI Documentations
+https://gtk-rs.org/gtk4-rs/stable/latest/book/
+https://gtk-rs.org/gtk4-rs/git/book/composite_templates.html
+https://docs.rs/gtk4-macros/latest/gtk4_macros/derive.CompositeTemplate.html
+https://docs.gtk.org/gtk4/css-properties.html
+https://developer.gnome.org/hig/
+https://gnome.pages.gitlab.gnome.org/blueprint-compiler/reference/templates.html

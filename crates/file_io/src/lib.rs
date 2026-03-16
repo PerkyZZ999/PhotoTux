@@ -837,3 +837,64 @@ mod tests {
 			.as_nanos()
 	}
 }
+
+pub fn update_flattened_region_rgba(document: &Document, output: &mut [u8], rect: common::CanvasRect) {
+    // Clear the region
+    let start_y = rect.y.max(0) as usize;
+    let end_y = (rect.y + rect.height as i32).min(document.canvas_size.height as i32).max(0) as usize;
+    let start_x = rect.x.max(0) as usize;
+    let end_x = (rect.x + rect.width as i32).min(document.canvas_size.width as i32).max(0) as usize;
+    let row_len = (end_x.saturating_sub(start_x)) * 4;
+
+    if row_len == 0 {
+        return;
+    }
+
+    for y in start_y..end_y {
+        let dst_offset = (y * document.canvas_size.width as usize + start_x) * 4;
+        output[dst_offset..dst_offset + row_len].fill(0);
+    }
+
+    for layer in &document.layers {
+        if !layer.visible {
+            continue;
+        }
+
+        let layer_opacity = layer.opacity_percent as f32 / 100.0;
+        for (coord, tile) in &layer.tiles {
+            let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
+            let tile_canvas_x = tile_origin_x as i32 + layer.offset_x;
+            let tile_canvas_y = tile_origin_y as i32 + layer.offset_y;
+
+            if tile_canvas_x + document.tile_size as i32 <= rect.x || tile_canvas_x >= rect.x + rect.width as i32 {
+                continue;
+            }
+            if tile_canvas_y + document.tile_size as i32 <= rect.y || tile_canvas_y >= rect.y + rect.height as i32 {
+                continue;
+            }
+
+            let canvas_clip_y = tile_canvas_y.max(rect.y).max(0);
+            let canvas_clip_h = (tile_canvas_y + document.tile_size as i32).min(rect.y + rect.height as i32).min(document.canvas_size.height as i32);
+            let canvas_clip_x = tile_canvas_x.max(rect.x).max(0);
+            let canvas_clip_w = (tile_canvas_x + document.tile_size as i32).min(rect.x + rect.width as i32).min(document.canvas_size.width as i32);
+
+            for canvas_y in canvas_clip_y..canvas_clip_h {
+                let local_y = (canvas_y - tile_canvas_y) as usize;
+                let canvas_y_usize = canvas_y as usize;
+                
+                for canvas_x in canvas_clip_x..canvas_clip_w {
+                    let local_x = (canvas_x - tile_canvas_x) as usize;
+                    let src_index = (local_y * document.tile_size as usize + local_x) * 4;
+                    let dst_index = (canvas_y_usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
+                    
+                    composite_pixel(
+                        &mut output[dst_index..dst_index + 4],
+                        &tile.pixels[src_index..src_index + 4],
+                        layer_opacity,
+                        layer.blend_mode,
+                    );
+                }
+            }
+        }
+    }
+}

@@ -5,7 +5,7 @@ use gtk4::prelude::*;
 use gtk4::{
     gdk, Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
     CssProvider, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
-    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, HeaderBar, Label,
+    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, HeaderBar, Image, Label,
     MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
     ResponseType, Separator,
 };
@@ -166,22 +166,27 @@ fn build_header_bar() -> HeaderBar {
     header.add_css_class("titlebar");
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);
-    let title_icon = build_remix_icon("palette-line.svg", APP_NAME, 12);
+    title_row.add_css_class("app-brand");
+    let title_icon = build_logo_icon(APP_NAME, 16);
     title_icon.add_css_class("titlebar-icon");
     title_row.append(&title_icon);
 
     let title = Label::new(Some(APP_NAME));
     title.add_css_class("titlebar-app-name");
     title_row.append(&title);
-    header.set_title_widget(Some(&title_row));
+    header.pack_start(&title_row);
 
+    let actions = GtkBox::new(Orientation::Horizontal, 6);
+    actions.add_css_class("titlebar-actions");
     let preset = Button::with_label("Essentials");
     preset.add_css_class("chrome-button");
-    header.pack_start(&preset);
+    preset.add_css_class("workspace-chip");
+    actions.append(&preset);
 
     let search = build_icon_only_button("search-line.svg", "Search", "chrome-button", 12);
     search.add_css_class("chrome-icon-button");
-    header.pack_end(&search);
+    actions.append(&search);
+    header.pack_end(&actions);
     header
 }
 
@@ -201,6 +206,7 @@ fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> 
 
     for title in ["Window", "Help"] {
         let button = Button::with_label(title);
+        button.set_has_frame(false);
         button.add_css_class("menu-button");
         bar.append(&button);
     }
@@ -210,14 +216,13 @@ fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> 
 
 fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let button = MenuButton::builder().label("Edit").build();
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
 
-    let popover = Popover::new();
-    let menu = GtkBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("panel-group-body");
+    let (popover, menu) = create_menu_popover(&button);
 
     let undo = build_icon_label_button("arrow-go-back-line.svg", "Undo");
-    undo.add_css_class("tool-chip");
+    undo.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -229,7 +234,7 @@ fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&undo);
 
     let redo = build_icon_label_button("arrow-go-forward-line.svg", "Redo");
-    redo.add_css_class("tool-chip");
+    redo.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -258,20 +263,20 @@ fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 
 fn build_image_placeholder_button() -> Button {
     let button = Button::with_label("Image");
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
     button
 }
 
 fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let button = MenuButton::builder().label("Layer").build();
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
 
-    let popover = Popover::new();
-    let menu = GtkBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("panel-group-body");
+    let (popover, menu) = create_menu_popover(&button);
 
     let add = build_icon_label_button("add-line.svg", "New Layer");
-    add.add_css_class("tool-chip");
+    add.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -283,7 +288,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&add);
 
     let duplicate = build_icon_label_button("file-copy-line.svg", "Duplicate Layer");
-    duplicate.add_css_class("tool-chip");
+    duplicate.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -295,7 +300,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&duplicate);
 
     let delete = build_icon_label_button("delete-bin-line.svg", "Delete Layer");
-    delete.add_css_class("tool-chip");
+    delete.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -307,7 +312,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&delete);
 
     let move_up = build_icon_label_button("arrow-up-line.svg", "Move Layer Up");
-    move_up.add_css_class("tool-chip");
+    move_up.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -319,7 +324,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&move_up);
 
     let move_down = build_icon_label_button("arrow-down-line.svg", "Move Layer Down");
-    move_down.add_css_class("tool-chip");
+    move_down.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -356,14 +361,13 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 
 fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let button = MenuButton::builder().label("Select").build();
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
 
-    let popover = Popover::new();
-    let menu = GtkBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("panel-group-body");
+    let (popover, menu) = create_menu_popover(&button);
 
     let clear = build_icon_label_button("close-circle-line.svg", "Clear Selection");
-    clear.add_css_class("tool-chip");
+    clear.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -375,7 +379,7 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&clear);
 
     let invert = build_icon_label_button("contrast-2-line.svg", "Invert Selection");
-    invert.add_css_class("tool-chip");
+    invert.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -404,20 +408,20 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 
 fn build_filter_placeholder_button() -> Button {
     let button = Button::with_label("Filter");
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
     button
 }
 
 fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let button = MenuButton::builder().label("View").build();
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
 
-    let popover = Popover::new();
-    let menu = GtkBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("panel-group-body");
+    let (popover, menu) = create_menu_popover(&button);
 
     let zoom_in = build_icon_label_button("zoom-in-line.svg", "Zoom In");
-    zoom_in.add_css_class("tool-chip");
+    zoom_in.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
         let popover = popover.clone();
@@ -429,7 +433,7 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&zoom_in);
 
     let zoom_out = build_icon_label_button("zoom-out-line.svg", "Zoom Out");
-    zoom_out.add_css_class("tool-chip");
+    zoom_out.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
         let popover = popover.clone();
@@ -441,7 +445,7 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     menu.append(&zoom_out);
 
     let fit = build_icon_label_button("fullscreen-line.svg", "Fit To View");
-    fit.add_css_class("tool-chip");
+    fit.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
         let popover = popover.clone();
@@ -462,14 +466,13 @@ fn build_file_menu_button(
     shell_state: Rc<ShellUiState>,
 ) -> MenuButton {
     let button = MenuButton::builder().label("File").build();
+    button.set_has_frame(false);
     button.add_css_class("menu-button");
 
-    let popover = Popover::new();
-    let menu = GtkBox::new(Orientation::Vertical, 4);
-    menu.add_css_class("panel-group-body");
+    let (popover, menu) = create_menu_popover(&button);
 
     let open_project = build_icon_label_button("folder-open-line.svg", "Open Project...");
-    open_project.add_css_class("tool-chip");
+    open_project.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
         let controller = shell_state.controller.clone();
@@ -482,7 +485,7 @@ fn build_file_menu_button(
     menu.append(&open_project);
 
     let import_image = build_icon_label_button("image-add-line.svg", "Import Image...");
-    import_image.add_css_class("tool-chip");
+    import_image.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
         let controller = shell_state.controller.clone();
@@ -495,7 +498,7 @@ fn build_file_menu_button(
     menu.append(&import_image);
 
     let save = build_icon_label_button("save-3-line.svg", "Save");
-    save.add_css_class("tool-chip");
+    save.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
         let popover = popover.clone();
@@ -507,7 +510,7 @@ fn build_file_menu_button(
     menu.append(&save);
 
     let save_as = build_icon_label_button("save-3-line.svg", "Save As...");
-    save_as.add_css_class("tool-chip");
+    save_as.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
         let popover = popover.clone();
@@ -524,7 +527,7 @@ fn build_file_menu_button(
         ("Export WebP...", "webp"),
     ] {
         let export = build_icon_label_button("export-line.svg", label);
-        export.add_css_class("tool-chip");
+        export.add_css_class("menu-dropdown-item");
         let parent = window.clone();
         let controller = shell_state.controller.clone();
         let popover = popover.clone();
@@ -702,12 +705,18 @@ fn choose_save_project_path(parent: &ApplicationWindow, controller: Rc<RefCell<d
     );
 }
 
-fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox, Picture, Label) {
+fn build_tool_options_bar(
+    controller: Rc<RefCell<dyn ShellController>>,
+) -> (GtkBox, Image, Label) {
     let bar = GtkBox::new(Orientation::Horizontal, 6);
     bar.add_css_class("tool-options-bar");
 
     let snapshot = controller.borrow().snapshot();
-    let tool_icon = build_remix_icon(shell_tool_icon(snapshot.active_tool), &snapshot.active_tool_name, 14);
+    let tool_icon = build_remix_icon(
+        shell_tool_icon(snapshot.active_tool),
+        &snapshot.active_tool_name,
+        12,
+    );
     tool_icon.add_css_class("tool-options-icon");
     bar.append(&tool_icon);
 
@@ -716,36 +725,47 @@ fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> (GtkB
     tool_label.add_css_class("tool-options-label");
     bar.append(&tool_label);
 
-    for title in ["Preset: Soft Round", "Size 24", "Hardness 80%", "Opacity 100%", "Flow 100%", "Mode Normal"] {
+    for title in [
+        "Preset: Soft Round",
+        "Size 24",
+        "Hardness 80%",
+        "Opacity 100%",
+        "Flow 100%",
+        "Mode Normal",
+    ] {
         let chip = Button::with_label(title);
         chip.add_css_class("tool-chip");
+        chip.add_css_class("tool-option-chip");
+        chip.set_has_frame(false);
         bar.append(&chip);
     }
 
     (bar, tool_icon, tool_label)
 }
 
-fn build_workspace_body(shell_state: &ShellUiState) -> Paned {
-    let outer = Paned::new(Orientation::Horizontal);
-    outer.set_wide_handle(true);
+fn build_workspace_body(shell_state: &ShellUiState) -> GtkBox {
+    let outer = GtkBox::new(Orientation::Horizontal, 0);
     outer.add_css_class("workspace-body");
-    outer.set_start_child(Some(&shell_state.tool_rail));
+    outer.append(&shell_state.tool_rail);
 
     let inner = Paned::new(Orientation::Horizontal);
     inner.set_wide_handle(true);
     inner.set_start_child(Some(&build_document_region(shell_state)));
     inner.set_end_child(Some(&build_right_sidebar(shell_state)));
     inner.set_position(1120);
+    inner.set_hexpand(true);
+    inner.set_vexpand(true);
 
-    outer.set_end_child(Some(&inner));
-    outer.set_position(60);
+    outer.append(&inner);
     outer
 }
 
-fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox, Vec<(ShellToolKind, Button)>) {
-    let rail = GtkBox::new(Orientation::Vertical, 4);
+fn build_left_tool_rail(
+    controller: Rc<RefCell<dyn ShellController>>,
+) -> (GtkBox, Vec<(ShellToolKind, Button)>) {
+    let rail = GtkBox::new(Orientation::Vertical, 3);
     rail.add_css_class("tool-rail");
-    rail.set_size_request(44, -1);
+    rail.set_size_request(36, -1);
 
     let mut buttons = Vec::new();
 
@@ -770,11 +790,14 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
     .enumerate()
     {
         if index == 4 || index == 6 {
-            rail.append(&Separator::new(Orientation::Horizontal));
+            let separator = Separator::new(Orientation::Horizontal);
+            separator.add_css_class("tool-separator");
+            rail.append(&separator);
         }
 
-        let button = build_icon_only_button(icon_name, tooltip, "tool-button", 14);
+        let button = build_icon_only_button(icon_name, tooltip, "tool-button", 18);
         button.add_css_class("tool-button");
+        button.set_size_request(24, 24);
         let tool_controller = controller.clone();
         button.connect_clicked(move |_| tool_controller.borrow_mut().select_tool(tool));
         rail.append(&button);
@@ -785,11 +808,26 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
     spacer.set_vexpand(true);
     rail.append(&spacer);
 
-    let swatches = GtkBox::new(Orientation::Vertical, 4);
+    let swatches = gtk4::Overlay::new();
+    swatches.set_size_request(24, 24);
     swatches.add_css_class("swatch-stack");
-    swatches.append(&build_color_chip("FG", "swatch-fg"));
-    swatches.append(&build_color_chip("BG", "swatch-bg"));
-    rail.append(&swatches);
+
+    let bg = build_color_chip("", "swatch-bg");
+    bg.set_tooltip_text(Some("Background Color"));
+    bg.set_halign(gtk4::Align::End);
+    bg.set_valign(gtk4::Align::End);
+    swatches.set_child(Some(&bg));
+
+    let fg = build_color_chip("", "swatch-fg");
+    fg.set_tooltip_text(Some("Foreground Color"));
+    fg.set_halign(gtk4::Align::Start);
+    fg.set_valign(gtk4::Align::Start);
+    swatches.add_overlay(&fg);
+
+    let rail_spacer = GtkBox::new(Orientation::Vertical, 4);
+    rail_spacer.set_halign(gtk4::Align::Center);
+    rail_spacer.append(&swatches);
+    rail.append(&rail_spacer);
 
     (rail, buttons)
 }
@@ -805,13 +843,23 @@ fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
 }
 
 fn build_document_tabs() -> (GtkBox, Label) {
-    let tabs = GtkBox::new(Orientation::Horizontal, 6);
+    let tabs = GtkBox::new(Orientation::Horizontal, 4);
     tabs.add_css_class("document-tabs");
 
     let active_tab = Button::with_label("");
     active_tab.add_css_class("document-tab-active");
     let active_tab_label = Label::new(None);
-    active_tab.set_child(Some(&active_tab_label));
+
+    let tab_content = GtkBox::new(Orientation::Horizontal, 6);
+    tab_content.add_css_class("document-tab-content");
+    active_tab_label.add_css_class("document-tab-title");
+    tab_content.append(&active_tab_label);
+
+    let close_label = Label::new(Some("×"));
+    close_label.add_css_class("document-tab-close");
+    tab_content.append(&close_label);
+
+    active_tab.set_child(Some(&tab_content));
     tabs.append(&active_tab);
 
     let plus_tab = Button::with_label("+");
@@ -860,9 +908,9 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
 fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     let sidebar = GtkBox::new(Orientation::Horizontal, 0);
     sidebar.add_css_class("right-sidebar");
-    sidebar.set_size_request(312, -1);
+    sidebar.set_size_request(280, -1);
 
-    let dock_icons = GtkBox::new(Orientation::Vertical, 6);
+    let dock_icons = GtkBox::new(Orientation::Vertical, 3);
     dock_icons.add_css_class("panel-icon-strip");
     for (icon_name, tooltip) in [
         ("palette-line.svg", "Color"),
@@ -870,8 +918,9 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
         ("layout-column-line.svg", "Layers"),
         ("history-line.svg", "History"),
     ] {
-        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 13);
+        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 18);
         button.add_css_class("dock-icon-button");
+        button.set_size_request(24, 24);
         dock_icons.append(&button);
     }
 
@@ -879,10 +928,27 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     dock.add_css_class("panel-dock");
     dock.set_hexpand(true);
     dock.set_vexpand(true);
-    dock.append(&shell_state.color_group);
-    dock.append(&shell_state.properties_group);
-    dock.append(&shell_state.layers_group);
-    dock.append(&shell_state.history_group);
+
+    let paned_bottom = Paned::new(Orientation::Vertical);
+    paned_bottom.set_start_child(Some(&shell_state.layers_group));
+    paned_bottom.set_end_child(Some(&shell_state.history_group));
+    paned_bottom.set_position(200);
+    paned_bottom.set_wide_handle(true);
+
+    let paned_middle = Paned::new(Orientation::Vertical);
+    paned_middle.set_start_child(Some(&shell_state.properties_group));
+    paned_middle.set_end_child(Some(&paned_bottom));
+    paned_middle.set_position(150);
+    paned_middle.set_wide_handle(true);
+
+    let paned_top = Paned::new(Orientation::Vertical);
+    paned_top.set_start_child(Some(&shell_state.color_group));
+    paned_top.set_end_child(Some(&paned_middle));
+    paned_top.set_position(150);
+    paned_top.set_wide_handle(true);
+    paned_top.set_vexpand(true);
+
+    dock.append(&paned_top);
 
     sidebar.append(&dock_icons);
     sidebar.append(&dock);
@@ -890,22 +956,36 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
 }
 
 fn build_status_bar() -> (GtkBox, Label, Label, Label, Label) {
-    let bar = GtkBox::new(Orientation::Horizontal, 12);
+    let bar = GtkBox::new(Orientation::Horizontal, 0);
     bar.add_css_class("status-bar");
+
+    let left = GtkBox::new(Orientation::Horizontal, 16);
+    left.add_css_class("status-left");
+
+    let right = GtkBox::new(Orientation::Horizontal, 16);
+    right.add_css_class("status-right");
+    right.set_halign(Align::End);
+    right.set_hexpand(true);
+
     let doc = build_status_label("");
     let zoom = build_status_label("Zoom: 100%");
     let cursor = build_status_label("Cursor: 0,0");
     let mode = build_status_label("RGB/8");
-    bar.append(&doc);
-    bar.append(&zoom);
-    bar.append(&cursor);
-    bar.append(&mode);
+
+    left.append(&doc);
+    left.append(&cursor);
+    right.append(&zoom);
+    right.append(&mode);
+
+    bar.append(&left);
+    bar.append(&right);
     (bar, doc, zoom, cursor, mode)
 }
 
-fn build_panel_group(tabs: &[&str], body: &GtkBox) -> GtkBox {
+fn build_panel_group(tabs: &[&str], body: &impl gtk4::prelude::IsA<gtk4::Widget>) -> GtkBox {
     let group = GtkBox::new(Orientation::Vertical, 0);
     group.add_css_class("panel-group");
+    group.set_vexpand(true);
 
     let header = GtkBox::new(Orientation::Horizontal, 2);
     header.add_css_class("panel-group-header");
@@ -942,7 +1022,7 @@ struct ShellUiState {
     canvas_state: Rc<RefCell<CanvasHostState>>,
     automation_shortcuts_enabled: bool,
     tool_options_bar: GtkBox,
-    tool_options_icon: Picture,
+    tool_options_icon: Image,
     tool_options_label: Label,
     canvas_picture: Picture,
     tool_rail: GtkBox,
@@ -1268,7 +1348,7 @@ impl ShellUiState {
         if snapshot_changed {
             self.tool_options_label.set_label(&snapshot.active_tool_name);
             self.tool_options_icon
-                .set_filename(Some(remix_icon_path(shell_tool_icon(snapshot.active_tool))));
+                .set_from_file(Some(remix_icon_path(shell_tool_icon(snapshot.active_tool))));
             self.refresh_tool_buttons(&snapshot);
             self.refresh_color_panel(&snapshot);
             self.refresh_properties_panel(&snapshot);
@@ -1475,6 +1555,7 @@ impl ShellUiState {
         clear_box_children(&self.layers_body);
 
         let actions = GtkBox::new(Orientation::Horizontal, 4);
+        actions.add_css_class("layers-toolbar");
         for (label, action) in [
             ("+ Layer", LayerAction::Add),
             ("Duplicate", LayerAction::Duplicate),
@@ -1484,6 +1565,7 @@ impl ShellUiState {
         ] {
             let button = Button::with_label(label);
             button.add_css_class("tool-chip");
+            button.add_css_class("layer-action-chip");
             let controller = self.controller.clone();
             button.connect_clicked(move |_| match action {
                 LayerAction::Add => controller.borrow_mut().add_layer(),
@@ -1516,11 +1598,10 @@ impl ShellUiState {
             row.append(&visibility);
 
             let select = Button::with_label(&format!("{}  ({}%)", layer.name, layer.opacity_percent));
-            select.add_css_class(if layer.is_active {
-                "document-tab-active"
-            } else {
-                "tool-chip"
-            });
+            select.add_css_class("layer-select-button");
+            if layer.is_active {
+                select.add_css_class("layer-select-button-active");
+            }
             {
                 let controller = self.controller.clone();
                 let index = layer.index;
@@ -1536,6 +1617,7 @@ impl ShellUiState {
         clear_box_children(&self.history_body);
 
         let actions = GtkBox::new(Orientation::Horizontal, 6);
+        actions.add_css_class("history-toolbar");
         let undo = Button::with_label("Undo");
         undo.add_css_class("tool-chip");
         undo.set_sensitive(snapshot.can_undo);
@@ -1555,11 +1637,26 @@ impl ShellUiState {
         actions.append(&redo);
         self.history_body.append(&actions);
 
-        for entry in &snapshot.history_entries {
+        let active_index = snapshot.history_entries.len().saturating_sub(1);
+        for (index, entry) in snapshot.history_entries.iter().enumerate() {
+            let row = GtkBox::new(Orientation::Horizontal, 8);
+            row.add_css_class(if index == active_index {
+                "history-item-active"
+            } else {
+                "history-item"
+            });
+
+            let icon = Label::new(Some("•"));
+            icon.add_css_class("history-icon");
+            row.append(&icon);
+
             let label = Label::new(Some(entry));
             label.set_xalign(0.0);
-            label.add_css_class("panel-row");
-            self.history_body.append(&label);
+            label.set_hexpand(true);
+            label.add_css_class("history-name");
+            row.append(&label);
+
+            self.history_body.append(&row);
         }
     }
 }
@@ -1570,22 +1667,34 @@ fn remix_icon_path(icon_name: &str) -> PathBuf {
         .join(icon_name)
 }
 
-fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Picture {
-    let picture = Picture::for_filename(remix_icon_path(icon_name));
-    picture.set_size_request(size, size);
-    picture.set_can_shrink(true);
-    picture.set_hexpand(false);
-    picture.set_vexpand(false);
-    picture.set_halign(Align::Center);
-    picture.set_valign(Align::Center);
-    picture.set_alternative_text(Some(alt_text));
-    picture.add_css_class("remix-icon");
-    picture
+fn logo_icon_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/logo/Logo_01.png")
+}
+
+fn build_logo_icon(alt_text: &str, size: i32) -> Image {
+    let image = Image::from_file(logo_icon_path());
+    image.set_pixel_size(size);
+    image.set_halign(Align::Center);
+    image.set_valign(Align::Center);
+    image.set_tooltip_text(Some(alt_text));
+    image
+}
+
+fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {
+    let image = Image::from_file(remix_icon_path(icon_name));
+    image.set_pixel_size(size);
+    image.set_halign(Align::Center);
+    image.set_valign(Align::Center);
+    image.set_tooltip_text(Some(alt_text));
+    image.add_css_class("remix-icon");
+    image
 }
 
 fn build_icon_only_button(icon_name: &str, tooltip: &str, css_class: &str, size: i32) -> Button {
     let button = Button::new();
     button.add_css_class(css_class);
+    button.set_has_frame(false);
     button.set_tooltip_text(Some(tooltip));
 
     let icon = build_remix_icon(icon_name, tooltip, size);
@@ -1595,17 +1704,43 @@ fn build_icon_only_button(icon_name: &str, tooltip: &str, css_class: &str, size:
 
 fn build_icon_label_button(icon_name: &str, label: &str) -> Button {
     let button = Button::new();
+    button.set_has_frame(false);
+    button.set_hexpand(true);
+    button.set_halign(Align::Fill);
     button.set_tooltip_text(Some(label));
 
-    let content = GtkBox::new(Orientation::Horizontal, 6);
-    content.append(&build_remix_icon(icon_name, label, 14));
+    let content = GtkBox::new(Orientation::Horizontal, 5);
+    content.append(&build_remix_icon(icon_name, label, 12));
+    content.set_hexpand(true);
 
     let text = Label::new(Some(label));
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
     text.add_css_class("icon-label-text");
     content.append(&text);
 
     button.set_child(Some(&content));
     button
+}
+
+fn create_menu_popover(button: &MenuButton) -> (Popover, GtkBox) {
+    let popover = Popover::new();
+    popover.set_has_arrow(false);
+    popover.add_css_class("menu-dropdown");
+    popover.set_position(gtk4::PositionType::Bottom);
+
+    let anchor = button.clone();
+    popover.connect_show(move |popover| {
+        let button_width = anchor.width().max(1);
+        let visible_width = popover.child().map(|child| child.width()).unwrap_or(220).max(220);
+        let offset_x = ((visible_width - button_width) / 2).max(0);
+        popover.set_offset(offset_x, 0);
+    });
+
+    let menu = GtkBox::new(Orientation::Vertical, 0);
+    menu.add_css_class("menu-dropdown-body");
+
+    (popover, menu)
 }
 
 fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
@@ -1803,10 +1938,12 @@ impl CanvasHostState {
             self.dirty = true;
         }
 
-        let logical_width = self.picture.width().max(1) as u32;
-        let logical_height = self.picture.height().max(1) as u32;
+        let logical_width = self.picture.width().max(0) as u32;
+        let logical_height = self.picture.height().max(0) as u32;
 
-        if logical_width == 0 || logical_height == 0 {
+        // If the layout isn't fully calculated by GTK yet (often sizes like 0 or 1 on boot), 
+        // wait before trying to fit the canvas view, otherwise it starts massively zoomed out.
+        if logical_width <= 1 || logical_height <= 1 {
             return;
         }
 
@@ -1959,8 +2096,11 @@ impl CanvasHostState {
     }
 
     fn fit_to_view(&mut self) {
-        let logical_width = self.picture.width().max(1) as u32;
-        let logical_height = self.picture.height().max(1) as u32;
+        let logical_width = self.picture.width().max(0) as u32;
+        let logical_height = self.picture.height().max(0) as u32;
+        if logical_width <= 1 || logical_height <= 1 {
+            return;
+        }
         self.viewport_state = ViewportState::fit_canvas(
             self.canvas_size,
             ViewportSize::new(logical_width as f32, logical_height as f32),
@@ -1991,121 +2131,259 @@ impl CanvasHostState {
 
 const THEME_CSS: &str = r#"
 .app-root {
-    background: #1B1D21;
-    color: #E8ECF3;
-    font-family: "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    font-family: "Inter", "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
     font-size: 11px;
 }
 
 .titlebar {
-    min-height: 28px;
-    background: #202329;
-    color: #E8ECF3;
-    border-bottom: 1px solid #313741;
+    min-height: 30px;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border-bottom: 1px solid #3a3a3a;
+}
+
+.app-brand {
+    padding: 0 12px;
+    min-height: 30px;
+    border-right: 1px solid #3a3a3a;
+}
+
+.titlebar-actions {
+    padding-right: 8px;
 }
 
 .titlebar-app-name {
     font-weight: 600;
+    font-size: 11px;
+    color: #e0e0e0;
 }
 
 .titlebar-icon,
 .remix-icon {
     min-width: 12px;
     min-height: 12px;
-    max-width: 16px;
-    max-height: 16px;
+}
+
+.titlebar-icon {
+    color: #3b8beb;
 }
 
 .chrome-button,
 .menu-button,
 .tool-chip,
 .tool-button,
-.document-tab-active,
 .document-tab-add,
 .panel-tab,
 .dock-icon-button,
 .color-chip {
-    background: #252930;
-    color: #E8ECF3;
-    border-radius: 4px;
-    border: 1px solid #3A414D;
-    padding: 4px 8px;
+    background: transparent;
+    color: #e0e0e0;
+    border-radius: 3px;
+    border: none;
+    padding: 2px 6px;
+    transition: all 100ms ease-in-out;
+}
+
+.document-tab-active {
+    background: #383838;
+    color: #e0e0e0;
+    border-radius: 3px 3px 0 0;
+    border: 1px solid #4a4a4a;
+    border-bottom-color: #383838;
+    padding: 2px 8px;
+    font-weight: 600;
+    transition: all 100ms ease-in-out;
 }
 
 .chrome-button:hover,
-.menu-button:hover,
 .tool-chip:hover,
 .tool-button:hover,
 .panel-tab:hover,
-.document-tab-active:hover,
 .document-tab-add:hover,
 .dock-icon-button:hover {
-    background: #2A2F37;
+    background: #383838;
+    border: 1px solid #4a4a4a;
+}
+
+.tool-chip {
+    background: transparent;
+    color: #999999;
+    padding: 2px 7px;
+}
+
+.tool-chip:hover {
+    color: #e0e0e0;
+}
+
+.workspace-chip {
+    min-height: 20px;
+    padding: 0 8px;
+    background: #232323;
+    border-color: #3a3a3a;
+    color: #999999;
+}
+
+.menu-button:active,
+.tool-chip:active,
+.tool-button:active {
+    background: #232323;
 }
 
 .menu-bar {
     min-height: 24px;
-    padding: 2px 6px;
-    background: #202329;
-    border-bottom: 1px solid #313741;
+    padding: 0 6px;
+    background: #232323;
+    border-bottom: 1px solid #3a3a3a;
 }
 
 .menu-button {
     background: transparent;
     border: none;
     border-radius: 3px;
-    padding: 3px 8px;
+    min-width: 0;
+    padding: 2px 6px;
+    color: #999999;
+    box-shadow: none;
+    outline: none;
+}
+
+menubutton.menu-button {
+    padding: 0;
+    margin: 0;
+}
+
+menubutton.menu-button > button.toggle {
+    background: transparent;
+    background-image: none;
+    border: none;
+    border-radius: 3px;
+    min-width: 0;
+    min-height: 0;
+    padding: 2px 6px;
+    color: #999999;
+    box-shadow: none;
+    outline: none;
+    -gtk-icon-shadow: none;
+}
+
+.menu-button:hover,
+.menu-button:active,
+.menu-button:checked,
+.menu-button:focus,
+.menu-button:focus-visible {
+    background: #383838;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    color: #e0e0e0;
+}
+
+menubutton.menu-button > button.toggle:hover,
+menubutton.menu-button > button.toggle:active,
+menubutton.menu-button > button.toggle:checked,
+menubutton.menu-button > button.toggle:focus,
+menubutton.menu-button > button.toggle:focus-visible {
+    background: #383838;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    color: #e0e0e0;
+    -gtk-icon-shadow: none;
 }
 
 .tool-options-bar {
-    min-height: 36px;
-    padding: 4px 6px;
-    background: #202329;
-    border-bottom: 1px solid #313741;
+    min-height: 34px;
+    padding: 0 12px;
+    background: #232323;
+    border-bottom: 1px solid #3a3a3a;
 }
 
 .tool-options-label {
-    margin: 0 8px 0 2px;
+    margin: 0 6px 0 1px;
     font-weight: 600;
+    color: #e0e0e0;
+}
+
+.tool-option-chip {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    color: #8f8f8f;
+    padding: 0 10px;
+}
+
+.tool-option-chip:hover {
+    background: rgba(255,255,255,0.04);
+    border: none;
+    color: #e0e0e0;
 }
 
 .tool-options-icon {
     margin-left: 2px;
 }
 
-.tool-chip {
-    padding: 4px 10px;
-}
-
 .workspace-body {
-    background: #14161A;
+    background: #1a1a1a;
 }
 
 .tool-rail {
-    padding: 8px 6px;
-    background: #202329;
-    border-right: 1px solid #313741;
+    padding: 6px 0;
+    background: #2a2a2a;
+    border-right: 1px solid #4a4a4a;
 }
 
 .tool-button {
-    min-width: 28px;
-    min-height: 28px;
+    min-width: 24px;
+    min-height: 24px;
     padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: #a8a8a8;
+}
+
+.tool-button:hover {
+    background: #343434;
+    border-color: #4a4a4a;
+    color: #e0e0e0;
 }
 
 .tool-button-active {
-    background: #3B79F1;
-    border-color: #4F8CFF;
+    background: #3f3f3f;
+    border: 1px solid #565656;
+    border-left: 2px solid #3b8beb;
+    color: #e0e0e0;
+}
+
+.tool-separator {
+    margin: 7px 7px;
+    min-width: 18px;
+    opacity: 1;
+}
+
+.tool-separator.horizontal {
+    color: #4a4a4a;
 }
 
 .swatch-stack {
     margin-top: 8px;
+    margin-bottom: 6px;
 }
 
 .color-chip {
-    min-width: 30px;
-    min-height: 30px;
+    min-width: 14px;
+    min-height: 14px;
     padding: 0;
+    border-radius: 2px;
+    border: 2px solid #3f3f3f;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.45);
+}
+
+.color-chip:hover {
+    border-color: #3b8beb;
 }
 
 .swatch-fg {
@@ -2119,130 +2397,297 @@ const THEME_CSS: &str = r#"
 }
 
 .document-region {
-    background: #14161A;
+    background: #1a1a1a;
 }
 
 .document-tabs {
-    min-height: 28px;
-    padding: 4px 8px 0 8px;
-    background: #202329;
-    border-bottom: 1px solid #313741;
+    min-height: 26px;
+    padding: 4px 6px 0 6px;
+    background: #232323;
+    border-bottom: 1px solid #3a3a3a;
 }
 
-.document-tab-active,
-.document-tab-add {
-    background: #2A2F37;
+.document-tab-content {
+}
+
+.document-tab-title {
+    color: #e0e0e0;
+}
+
+.document-tab-close {
+    color: #666666;
+    font-weight: 500;
 }
 
 .document-workspace {
-    background: #14161A;
-    padding: 0 8px 8px 8px;
+    background: #1a1a1a;
+    padding: 0;
 }
 
 .ruler-corner,
 .ruler-horizontal,
 .ruler-vertical {
-    background: #202329;
-    color: #8A94A3;
-    border: 1px solid #313741;
-    font-size: 10px;
+    background: #232323;
+    color: #666666;
+    border: 1px solid #3a3a3a;
+    font-size: 9px; /* font.size.xs */
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
 .ruler-horizontal {
-    min-height: 24px;
-    padding: 4px 8px;
+    min-height: 20px;
+    padding: 2px 8px;
 }
 
 .ruler-vertical {
-    padding: 8px 4px;
+    min-width: 20px;
+    padding: 8px 2px;
 }
 
 .canvas-frame {
-    background: #101216;
-    border: 1px solid #3A414D;
+    background: #535353;
+    border: 1px solid #3a3a3a;
     margin-left: 0;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.35);
 }
 
 .right-sidebar {
-    background: #202329;
-    border-left: 1px solid #313741;
+    background: #232323;
+    border-left: 1px solid #3a3a3a;
 }
 
 .panel-icon-strip {
     min-width: 36px;
-    padding: 8px 4px;
-    background: #1D2026;
-    border-right: 1px solid #313741;
+    padding: 6px 0;
+    background: #2a2a2a;
+    border-right: 1px solid #4a4a4a;
 }
 
 .dock-icon-button {
     min-width: 24px;
     min-height: 24px;
     padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: #a8a8a8;
+}
+
+.dock-icon-button:hover {
+    background: #343434;
+    border-color: #4a4a4a;
+    color: #e0e0e0;
 }
 
 .chrome-icon-button,
 .layer-visibility-button {
-    min-width: 24px;
-    min-height: 24px;
+    min-width: 18px;
+    min-height: 18px;
     padding: 0;
+    background: transparent;
+    border: none;
+    color: #999999;
+}
+
+.chrome-icon-button:hover,
+.layer-visibility-button:hover {
+    color: #e0e0e0;
+    background: rgba(255,255,255,0.05);
+    border-radius: 4px;
 }
 
 .panel-dock {
-    padding: 8px;
-    background: #252930;
+    padding: 0;
+    background: #232323;
 }
 
 .panel-group {
-    border: 1px solid #3A414D;
-    background: #252930;
+    border: 0;
+    border-bottom: 1px solid #3a3a3a;
+    background: #232323;
+    border-radius: 0;
+    margin-bottom: 0;
 }
 
 .panel-group-header {
-    padding: 4px;
-    background: #2C3139;
-    border-bottom: 1px solid #313741;
+    padding: 8px 12px;
+    background: #232323;
+    border-bottom: 1px solid #3a3a3a;
+    border-radius: 0;
 }
 
 .panel-tab {
     background: transparent;
-    border: none;
-    padding: 3px 8px;
+    border: 1px solid transparent;
+    padding: 0 0 6px 0;
     font-size: 10px;
+    font-weight: 500;
+    color: #666666;
+    border-bottom: 2px solid transparent;
+}
+
+.panel-tab:hover {
+    color: #999999;
 }
 
 .panel-tab-active {
-    background: #252930;
-    border: 1px solid #3A414D;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: 2px solid #3b8beb;
+    color: #e0e0e0;
+    font-weight: 600;
+    border-radius: 0;
+    margin-bottom: 0;
 }
 
 .panel-group-body {
-    padding: 6px;
+    padding: 8px 12px 12px;
+}
+
+popover.menu-dropdown contents {
+    background: #2c2c2c;
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    padding: 4px 0;
+}
+
+.menu-dropdown-body {
+    min-width: 220px;
+}
+
+.menu-dropdown-item {
+    min-height: 28px;
+    padding: 5px 12px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #999999;
+}
+
+.menu-dropdown-item:hover {
+    background: #3b8beb;
+    color: #ffffff;
+}
+
+.menu-dropdown-item:disabled {
+    color: #666666;
+}
+
+.icon-label-text {
+    font-size: 11px;
+    font-weight: 400;
 }
 
 .panel-row {
-    color: #B3BCC8;
-    padding: 3px 2px;
+    color: #999999;
+    padding: 3px 0;
+    border-radius: 0;
+}
+
+.panel-row:hover {
+    background: transparent;
+    color: #e0e0e0;
+}
+
+.layers-toolbar,
+.history-toolbar {
+    padding: 6px 0 8px 0;
+}
+
+.layer-action-chip {
+    min-height: 22px;
+    padding: 0 8px;
 }
 
 .layer-row,
 .layer-row-active {
-    padding: 2px 0;
+    padding: 6px 8px;
+    border-radius: 0;
+    margin-bottom: 0;
+    border-left: 3px solid transparent;
+}
+
+.layer-row:hover {
+    background: #2c2c2c;
 }
 
 .layer-row-active {
-    background: rgba(79, 140, 255, 0.10);
+    background: #383838;
+    border-left-color: #3b8beb;
+    color: #e0e0e0;
+}
+
+.layer-select-button {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #e0e0e0;
+    padding: 0;
+}
+
+.layer-select-button:hover {
+    background: transparent;
+    border-color: transparent;
+}
+
+.layer-select-button-active {
+    color: #e0e0e0;
+}
+
+.history-item,
+.history-item-active {
+    padding: 6px 0;
+    border-radius: 0;
+}
+
+.history-item:hover {
+    background: #2c2c2c;
+}
+
+.history-item-active {
+    background: #383838;
+}
+
+.history-icon {
+    color: #666666;
+    min-width: 12px;
+}
+
+.history-name {
+    color: #999999;
+    font-size: 11px;
+}
+
+.history-item-active .history-name {
+    color: #e0e0e0;
 }
 
 .status-bar {
-    min-height: 20px;
-    padding: 3px 8px;
-    background: #202329;
-    border-top: 1px solid #313741;
+    min-height: 22px;
+    padding: 0 12px;
+    background: #1a1a1a;
+    border-top: 1px solid #3a3a3a;
+}
+
+.status-left,
+.status-right {
+    min-height: 22px;
 }
 
 .status-label {
-    color: #B3BCC8;
+    color: #666666;
     font-size: 10px;
+    font-weight: 400;
+}
+
+paned > separator {
+    background-color: transparent;
+    min-width: 4px;
+    min-height: 4px;
+}
+
+paned > separator:hover {
+    background-color: #4a4a4a;
 }
 "#;
+

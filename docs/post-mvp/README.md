@@ -12,12 +12,14 @@ These plans are not committed scope yet. They are decision-ready option sets tha
 4. `tasks/psd-file-format-expansion-tasks.md`
 5. `plans/shell-usability-and-native-workflows-plan.md`
 6. `tasks/shell-usability-and-native-workflows-tasks.md`
-7. `plans/release-and-distribution-plan.md`
-8. `tasks/release-and-distribution-tasks.md`
-9. `plans/painting-and-input-expressiveness-plan.md`
-10. `tasks/painting-and-input-expressiveness-tasks.md`
-11. `plans/text-and-design-tools-plan.md`
-12. `tasks/text-and-design-tools-tasks.md`
+7. `plans/gtk-ui-template-migration-plan.md`
+8. `tasks/gtk-ui-template-migration-tasks.md`
+9. `plans/release-and-distribution-plan.md`
+10. `tasks/release-and-distribution-tasks.md`
+11. `plans/painting-and-input-expressiveness-plan.md`
+12. `tasks/painting-and-input-expressiveness-tasks.md`
+13. `plans/text-and-design-tools-plan.md`
+14. `tasks/text-and-design-tools-tasks.md`
 
 ## Suggested Priority Order
 
@@ -26,9 +28,10 @@ If the goal is maximum practical value for design work in the shortest time, use
 1. editing workflow upgrades
 2. PSD import subset
 3. shell usability and native workflow polish
-4. release and distribution hardening
-5. painting and input expressiveness
-6. text and design tools
+4. GTK UI template migration
+5. release and distribution hardening
+6. painting and input expressiveness
+7. text and design tools
 
 ## Plan Set
 
@@ -89,7 +92,26 @@ Why it matters:
 
 - MVP works, but a lot of daily-use friction still lives in shell and workflow polish rather than raster correctness
 
-### 4. Release and Distribution Hardening
+### 4. GTK UI Template Migration
+
+See `plans/gtk-ui-template-migration-plan.md`.
+
+Implementation tasks:
+
+- `tasks/gtk-ui-template-migration-tasks.md`
+
+Focus:
+
+- selective `.ui` adoption for stable shell surfaces
+- clearer separation between static widget structure and runtime wiring
+- lower boilerplate in dialogs and stable panels
+- maintainable shell composition rules
+
+Why it matters:
+
+- this is a maintainability refactor track, not a feature track, and is most valuable once shell surfaces stop changing rapidly
+
+### 5. Release and Distribution Hardening
 
 See `plans/release-and-distribution-plan.md`.
 
@@ -108,7 +130,7 @@ Why it matters:
 
 - once feature direction is clear, shipping quality and repeatability become the next trust multiplier
 
-### 5. Painting and Input Expressiveness
+### 6. Painting and Input Expressiveness
 
 See `plans/painting-and-input-expressiveness-plan.md`.
 
@@ -127,7 +149,7 @@ Why it matters:
 
 - this track is useful if the next target user is more illustration-oriented than layout/compositing-oriented
 
-### 6. Text and Design Tools
+### 7. Text and Design Tools
 
 See `plans/text-and-design-tools-plan.md`.
 
@@ -152,6 +174,7 @@ Choose the next track based on the dominant goal:
 - Better everyday compositing workflow: start with editing workflow upgrades.
 - Better interoperability with external tools: start with PSD import.
 - Better daily usability on Linux: start with shell and native workflow polish.
+- Better long-term shell maintainability without changing product scope: start with GTK UI template migration.
 - Better readiness for broader testing or release: start with release and distribution hardening.
 - Better illustration feel: start with painting and input expressiveness.
 - Better poster and UI design capability: start with text and design tools.

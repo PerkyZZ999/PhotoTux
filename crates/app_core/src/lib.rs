@@ -51,6 +51,7 @@ struct PhotoTuxController {
     pending_document_load_job: Option<u64>,
     pending_export_job: Option<u64>,
     jobs: JobSystem,
+    cached_canvas_raster: Option<Vec<u8>>,
     transform_session: Option<TransformSession>,
     interaction: Option<CanvasInteraction>,
 }
@@ -134,6 +135,7 @@ enum JobRequest {
         kind: SaveKind,
         cleanup_recovery_path: Option<PathBuf>,
     },
+    #[allow(dead_code)]
     LoadRecovery {
         job_id: u64,
         recovery_path: PathBuf,
@@ -477,11 +479,12 @@ impl PhotoTuxController {
             pending_document_load_job: None,
             pending_export_job: None,
             jobs: JobSystem::new(),
+            cached_canvas_raster: None,
             transform_session: None,
             interaction: None,
         };
         controller.refresh_recovery_path();
-        controller.enqueue_recovery_load_if_present();
+        // controller.enqueue_recovery_load_if_present(); // Disabled by user request
         controller
     }
 
@@ -527,7 +530,27 @@ impl PhotoTuxController {
     ) -> Option<BrushStrokeRecord> {
         let layer_index = self.document.active_layer_index();
         let settings = self.current_brush_settings(mode);
+        
+        if self.cached_canvas_raster.is_none() {
+            self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
+        }
+
         let record = BrushTool::apply_stroke(&mut self.document, layer_index, points, settings, mode)?;
+        
+        if let Some(ref mut cached) = self.cached_canvas_raster {
+            let layer = &self.document.layers[layer_index];
+            for change in &record.changes {
+                let (tx, ty) = self.document.tile_origin(change.coord);
+                let rect = common::CanvasRect {
+                    x: tx as i32 + layer.offset_x,
+                    y: ty as i32 + layer.offset_y,
+                    width: self.document.tile_size,
+                    height: self.document.tile_size,
+                };
+                file_io::update_flattened_region_rgba(&self.document, cached, rect);
+            }
+        }
+
         self.bump_canvas_revision();
         Some(record)
     }
@@ -593,6 +616,7 @@ impl PhotoTuxController {
         self.recovery_path = Some(recovery_path_for_project_path(&self.primary_document_path()));
     }
 
+    #[allow(dead_code)]
     fn enqueue_recovery_load_if_present(&mut self) {
         let Some(recovery_path) = self.recovery_path.clone() else {
             return;
@@ -619,6 +643,7 @@ impl PhotoTuxController {
         self.dirty_since_primary_save = true;
         self.dirty_since_autosave = true;
         self.last_change_at = Some(now);
+        self.cached_canvas_raster = None; // Invalidate cached render
         if self.pending_primary_save_job.is_none() {
             self.status_message = "Modified".to_string();
         }
@@ -1068,6 +1093,13 @@ impl ShellController for PhotoTuxController {
         if self.transform_session.is_some() {
             self.preview_canvas_raster()
         } else {
+            if let Some(ref cached) = self.cached_canvas_raster {
+                return CanvasRaster {
+                    size: self.document.canvas_size,
+                    pixels: cached.clone(),
+                };
+            }
+            // Fallback for non-brush cases where cache was invalidated but not yet rebuilt
             CanvasRaster {
                 size: self.document.canvas_size,
                 pixels: flatten_document_rgba(&self.document),
@@ -1457,7 +1489,9 @@ impl ShellController for PhotoTuxController {
                 let aggregate =
                     self.apply_active_layer_stroke_segment(mode, &[(canvas_x as f32, canvas_y as f32)]);
                 if aggregate.is_some() {
-                    self.mark_document_dirty();
+                    self.dirty_since_primary_save = true;
+                    self.dirty_since_autosave = true;
+                    self.last_change_at = Some(std::time::Instant::now());
                 }
                 self.interaction = Some(CanvasInteraction::Brush {
                     mode,
@@ -1491,12 +1525,31 @@ impl ShellController for PhotoTuxController {
                         session.translate_y = start_offset_y + delta_y;
                     }
                 } else {
+                    let layer_index = self.document.active_layer_index();
+                    let old_bounds = self.document.layer_canvas_bounds(layer_index);
+
                     let _ = self.document.set_layer_offset(
-                        self.document.active_layer_index(),
+                        layer_index,
                         start_offset_x + delta_x,
                         start_offset_y + delta_y,
                     );
-                    self.mark_document_dirty();
+                    
+                    let new_bounds = self.document.layer_canvas_bounds(layer_index);
+
+                    if self.cached_canvas_raster.is_none() {
+                        self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
+                    } else if let Some(ref mut cached) = self.cached_canvas_raster {
+                        if let Some(rect) = old_bounds {
+                            file_io::update_flattened_region_rgba(&self.document, cached, rect);
+                        }
+                        if let Some(rect) = new_bounds {
+                            file_io::update_flattened_region_rgba(&self.document, cached, rect);
+                        }
+                    }
+
+                    self.dirty_since_primary_save = true;
+                    self.dirty_since_autosave = true;
+                    self.last_change_at = Some(std::time::Instant::now());
                 }
                 self.bump_canvas_revision();
                 Some(CanvasInteraction::Move {
@@ -1520,7 +1573,9 @@ impl ShellController for PhotoTuxController {
                 } else {
                     self.document.clear_selection();
                 }
-                self.mark_document_dirty();
+                self.dirty_since_primary_save = true;
+                self.dirty_since_autosave = true;
+                self.last_change_at = Some(std::time::Instant::now());
                 Some(CanvasInteraction::Marquee {
                     before,
                     before_inverted,
@@ -1547,7 +1602,9 @@ impl ShellController for PhotoTuxController {
                         } else {
                             aggregate = Some(segment);
                         }
-                        self.mark_document_dirty();
+                        self.dirty_since_primary_save = true;
+                        self.dirty_since_autosave = true;
+                        self.last_change_at = Some(std::time::Instant::now());
                     }
                 }
 

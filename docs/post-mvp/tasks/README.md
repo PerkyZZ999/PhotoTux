@@ -7,6 +7,7 @@ Each file is intended to translate a plan into staged, dependency-aware implemen
 ## Contents
 
 - `editing-workflow-upgrade-tasks.md`
+- `gtk-ui-template-migration-tasks.md`
 - `psd-file-format-expansion-tasks.md`
 - `shell-usability-and-native-workflows-tasks.md`
 - `release-and-distribution-tasks.md`

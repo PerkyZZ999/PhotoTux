@@ -7,6 +7,7 @@ These are strategy and scope documents, not execution checklists.
 ## Contents
 
 - `editing-workflow-upgrade-plan.md`
+- `gtk-ui-template-migration-plan.md`
 - `psd-file-format-expansion-plan.md`
 - `shell-usability-and-native-workflows-plan.md`
 - `release-and-distribution-plan.md`
