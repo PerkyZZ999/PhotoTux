@@ -32,6 +32,10 @@ This guide covers:
 
 This guide does not yet implement automated test cases inside the repository. It prepares the environment so those tests can be added later with much less friction.
 
+Related document:
+
+- `kwin-mcp-test-checklist.md`
+
 ## Preconditions
 
 Before you start, confirm that the machine you want to use for GUI automation satisfies these conditions:

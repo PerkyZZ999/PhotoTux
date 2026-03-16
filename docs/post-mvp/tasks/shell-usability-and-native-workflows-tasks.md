@@ -15,7 +15,7 @@ This task list turns the shell-usability plan into an implementation sequence fo
 
 ### SHELL01 - Replace quick-save-only behavior with full project save flow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: saving no longer depends on implicit current-directory behavior
 - Includes:
   - save-as routing
@@ -26,9 +26,15 @@ This task list turns the shell-usability plan into an implementation sequence fo
 - Done when:
   - project save behavior is complete enough for normal use
 
+Progress notes:
+- `app_core` now distinguishes between save to an existing project path and explicit save-as, instead of silently deriving a first-save target from the working directory
+- `ui_shell` now exposes `Save As...` through the File menu and routes unsaved `Save` and `Ctrl+S` interactions through a native GTK save dialog
+- GTK native save flows now enable overwrite confirmation and normalize the saved extension to `.ptx`
+- the active document tab now reflects dirty state directly, which closes the loop between unsaved edits and save behavior
+
 ### SHELL02 - Add open document flow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: document loading is a first-class shell action
 - Includes:
   - native file picker integration
@@ -39,9 +45,15 @@ This task list turns the shell-usability plan into an implementation sequence fo
 - Done when:
   - users can open existing documents through normal shell workflows
 
+Progress notes:
+- the File menu now routes project open through a native GTK file picker restricted to `.ptx` documents
+- project loading runs through the existing user-visible job system path in `app_core`, not on the UI thread
+- controller status text now reflects open success and failure states cleanly enough for normal use
+- recent-path handling is still deferred
+
 ### SHELL03 - Add explicit export workflow
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: flattened export becomes a real user-facing command set
 - Includes:
   - export-format selection
@@ -52,9 +64,14 @@ This task list turns the shell-usability plan into an implementation sequence fo
 - Done when:
   - export no longer depends on internal helpers only
 
+Progress notes:
+- the File menu now exposes explicit PNG, JPEG, and WebP export commands with native GTK save dialogs
+- export commands suggest format-appropriate filenames, enforce matching file extensions, and enable overwrite confirmation
+- export continues to run through the user-visible job system path with concise success and failure status text in the shell
+
 ### SHELL04 - Replace placeholder menu bar with real command routing
 
-- [ ] Status: not started
+- [-] Status: partially completed
 - Outcome: menus reflect actual editor capabilities
 - Includes:
   - File/Edit/Layer/Select/View menu routing
@@ -63,6 +80,12 @@ This task list turns the shell-usability plan into an implementation sequence fo
 - Depends on: SHELL01, SHELL02, SHELL03
 - Done when:
   - the menu bar is no longer decorative
+
+Progress notes:
+- the File menu is now controller-backed for open, import, save, save-as, and export flows
+- Edit, Layer, Select, and View now open real popover menus that route into existing controller or canvas commands instead of remaining fully decorative
+- menu-item sensitivity now updates from live controller state when those menus open, including undo/redo availability, layer move/delete affordances, and selection-dependent actions
+- Image, Filter, Window, and Help are still placeholders, and a dedicated consistency sweep for menu labels versus shortcut hints is still pending
 
 ### SHELL05 - Improve recovery UX beyond passive status text
 

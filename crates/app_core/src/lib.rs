@@ -1,7 +1,7 @@
 use anyhow::Context;
 use std::collections::VecDeque;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 use common::{CanvasRaster, CanvasRect};
 use doc_model::{BlendMode, Document};
 use file_io::{
-    flatten_document_rgba, load_document_from_path, recovery_path_for_project_path,
-    remove_file_if_exists, save_document_to_path, PROJECT_FILE_EXTENSION,
+    export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
+    import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
+    recovery_path_for_project_path, remove_file_if_exists, save_document_to_path,
+    PROJECT_FILE_EXTENSION,
 };
 use history_engine::HistoryStack;
 use tool_system::{
@@ -46,6 +48,8 @@ struct PhotoTuxController {
     pending_primary_save_job: Option<u64>,
     pending_autosave_job: Option<u64>,
     pending_recovery_load_job: Option<u64>,
+    pending_document_load_job: Option<u64>,
+    pending_export_job: Option<u64>,
     jobs: JobSystem,
     transform_session: Option<TransformSession>,
     interaction: Option<CanvasInteraction>,
@@ -108,6 +112,19 @@ enum SaveKind {
     Recovery,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentLoadKind {
+    Project,
+    RasterImport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RasterFileFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
 #[derive(Debug)]
 enum JobRequest {
     SaveDocument {
@@ -122,6 +139,17 @@ enum JobRequest {
         recovery_path: PathBuf,
         document_path: Option<PathBuf>,
         document_title: String,
+    },
+    LoadDocument {
+        job_id: u64,
+        path: PathBuf,
+        kind: DocumentLoadKind,
+    },
+    ExportDocument {
+        job_id: u64,
+        path: PathBuf,
+        document: Document,
+        format: RasterFileFormat,
     },
 }
 
@@ -150,6 +178,45 @@ enum JobResult {
         recovery_path: PathBuf,
         error: String,
     },
+    DocumentLoaded {
+        job_id: u64,
+        path: PathBuf,
+        kind: DocumentLoadKind,
+        document: Document,
+    },
+    DocumentLoadFailed {
+        job_id: u64,
+        path: PathBuf,
+        kind: DocumentLoadKind,
+        error: String,
+    },
+    ExportCompleted {
+        job_id: u64,
+        path: PathBuf,
+    },
+    ExportFailed {
+        job_id: u64,
+        path: PathBuf,
+        format: RasterFileFormat,
+        error: String,
+    },
+}
+
+fn project_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case(PROJECT_FILE_EXTENSION))
+        .unwrap_or(false)
+}
+
+fn raster_format_from_path(path: &Path) -> Option<RasterFileFormat> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some(RasterFileFormat::Png),
+        "jpg" | "jpeg" => Some(RasterFileFormat::Jpeg),
+        "webp" => Some(RasterFileFormat::Webp),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -289,6 +356,62 @@ fn worker_main(
                     error: error.to_string(),
                 },
             },
+            JobRequest::LoadDocument { job_id, path, kind } => {
+                let result = match kind {
+                    DocumentLoadKind::Project => load_document_from_path(&path)
+                        .with_context(|| format!("failed to open project from {}", path.display())),
+                    DocumentLoadKind::RasterImport => match raster_format_from_path(&path) {
+                        Some(RasterFileFormat::Png) => import_png_from_path(&path),
+                        Some(RasterFileFormat::Jpeg) => import_jpeg_from_path(&path),
+                        Some(RasterFileFormat::Webp) => import_webp_from_path(&path),
+                        None => Err(anyhow::anyhow!(
+                            "unsupported import format for {}",
+                            path.display()
+                        )),
+                    },
+                };
+
+                match result {
+                    Ok(document) => JobResult::DocumentLoaded {
+                        job_id,
+                        path,
+                        kind,
+                        document,
+                    },
+                    Err(error) => JobResult::DocumentLoadFailed {
+                        job_id,
+                        path,
+                        kind,
+                        error: error.to_string(),
+                    },
+                }
+            }
+            JobRequest::ExportDocument {
+                job_id,
+                path,
+                document,
+                format,
+            } => {
+                let result = match format {
+                    RasterFileFormat::Png => export_png_to_path(&path, &document),
+                    RasterFileFormat::Jpeg => export_jpeg_to_path(&path, &document),
+                    RasterFileFormat::Webp => export_webp_to_path(&path, &document),
+                }
+                .with_context(|| format!("failed to export document to {}", path.display()));
+
+                match result {
+                    Ok(()) => JobResult::ExportCompleted {
+                        job_id,
+                        path,
+                    },
+                    Err(error) => JobResult::ExportFailed {
+                        job_id,
+                        path,
+                        format,
+                        error: error.to_string(),
+                    },
+                }
+            },
         };
 
         if result_sender.send(result).is_err() {
@@ -351,6 +474,8 @@ impl PhotoTuxController {
             pending_primary_save_job: None,
             pending_autosave_job: None,
             pending_recovery_load_job: None,
+            pending_document_load_job: None,
+            pending_export_job: None,
             jobs: JobSystem::new(),
             transform_session: None,
             interaction: None,
@@ -503,6 +628,69 @@ impl PhotoTuxController {
         self.mark_document_dirty_at(Instant::now());
     }
 
+    fn has_pending_user_visible_file_job(&self) -> bool {
+        self.pending_primary_save_job.is_some()
+            || self.pending_recovery_load_job.is_some()
+            || self.pending_document_load_job.is_some()
+            || self.pending_export_job.is_some()
+    }
+
+    fn reset_history_to(&mut self, label: impl Into<String>) {
+        self.history = HistoryStack::default();
+        self.history.push(EditorHistoryEntry {
+            label: label.into(),
+            operation: None,
+        });
+    }
+
+    fn recompute_next_layer_number(&mut self) {
+        let highest_explicit_layer = self
+            .document
+            .layers
+            .iter()
+            .filter_map(|layer| {
+                layer
+                    .name
+                    .strip_prefix("Layer ")
+                    .and_then(|suffix| suffix.parse::<usize>().ok())
+            })
+            .max()
+            .unwrap_or(self.document.layer_count());
+
+        self.next_layer_number = highest_explicit_layer
+            .saturating_add(1)
+            .max(self.document.layer_count().saturating_add(1));
+    }
+
+    fn replace_document_after_load(
+        &mut self,
+        document: Document,
+        document_title: String,
+        document_path: Option<PathBuf>,
+        working_directory: PathBuf,
+        dirty_since_primary_save: bool,
+        dirty_since_autosave: bool,
+        last_change_at: Option<Instant>,
+        history_label: &str,
+        status_message: String,
+    ) {
+        self.document = document;
+        self.document_title = document_title;
+        self.document_path = document_path;
+        self.working_directory = working_directory;
+        self.transform_session = None;
+        self.interaction = None;
+        self.active_tool = ShellToolKind::Brush;
+        self.refresh_recovery_path();
+        self.dirty_since_primary_save = dirty_since_primary_save;
+        self.dirty_since_autosave = dirty_since_autosave;
+        self.last_change_at = last_change_at;
+        self.recompute_next_layer_number();
+        self.reset_history_to(history_label);
+        self.bump_canvas_revision();
+        self.status_message = status_message;
+    }
+
     fn enqueue_primary_save(&mut self, path: PathBuf) {
         if self.pending_primary_save_job.is_some() {
             return;
@@ -615,6 +803,94 @@ impl PhotoTuxController {
                     self.status_message = format!("Recovery load failed: {}", error);
                 }
             }
+            JobResult::DocumentLoaded {
+                job_id,
+                path,
+                kind,
+                document,
+            } => {
+                if self.pending_document_load_job == Some(job_id) {
+                    self.pending_document_load_job = None;
+                    let working_directory = path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| self.working_directory.clone());
+
+                    match kind {
+                        DocumentLoadKind::Project => {
+                            let document_title = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("untitled.ptx")
+                                .to_string();
+                            self.replace_document_after_load(
+                                document,
+                                document_title,
+                                Some(path.clone()),
+                                working_directory,
+                                false,
+                                false,
+                                None,
+                                "Open Document",
+                                format!("Opened {}", path.display()),
+                            );
+                        }
+                        DocumentLoadKind::RasterImport => {
+                            let stem = path
+                                .file_stem()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("imported");
+                            self.replace_document_after_load(
+                                document,
+                                format!("{}.{}", stem, PROJECT_FILE_EXTENSION),
+                                None,
+                                working_directory,
+                                true,
+                                true,
+                                Some(Instant::now()),
+                                "Import Image",
+                                format!("Imported {}", path.display()),
+                            );
+                        }
+                    }
+                }
+            }
+            JobResult::DocumentLoadFailed {
+                job_id,
+                path,
+                kind,
+                error,
+            } => {
+                if self.pending_document_load_job == Some(job_id) {
+                    self.pending_document_load_job = None;
+                    tracing::error!(%error, path = %path.display(), ?kind, "document load failed");
+                    self.status_message = match kind {
+                        DocumentLoadKind::Project => format!("Open failed: {}", error),
+                        DocumentLoadKind::RasterImport => format!("Import failed: {}", error),
+                    };
+                }
+            }
+            JobResult::ExportCompleted {
+                job_id,
+                path,
+            } => {
+                if self.pending_export_job == Some(job_id) {
+                    self.pending_export_job = None;
+                    self.status_message = format!("Exported {}", path.display());
+                }
+            }
+            JobResult::ExportFailed {
+                job_id,
+                path,
+                format,
+                error,
+            } => {
+                if self.pending_export_job == Some(job_id) {
+                    self.pending_export_job = None;
+                    tracing::error!(%error, path = %path.display(), ?format, "document export failed");
+                    self.status_message = format!("Export failed: {}", error);
+                }
+            }
         }
     }
 
@@ -625,6 +901,7 @@ impl PhotoTuxController {
 
         if self.pending_primary_save_job.is_none()
             && self.pending_recovery_load_job.is_none()
+            && self.pending_document_load_job.is_none()
             && self.dirty_since_autosave
             && self.pending_autosave_job.is_none()
             && self
@@ -751,6 +1028,8 @@ impl ShellController for PhotoTuxController {
         let active_layer = self.document.active_layer();
         ShellSnapshot {
             document_title: self.document_title.clone(),
+            project_path: self.document_path.clone(),
+            dirty: self.dirty_since_primary_save,
             status_message: self.status_message.clone(),
             canvas_size: self.document.canvas_size,
             canvas_revision: self.canvas_revision,
@@ -1036,8 +1315,94 @@ impl ShellController for PhotoTuxController {
     }
 
     fn save_document(&mut self) {
-        let target_path = self.primary_document_path();
+        let Some(target_path) = self.document_path.clone() else {
+            self.status_message = "Save As required before the first project save".to_string();
+            return;
+        };
+
         self.enqueue_primary_save(target_path);
+    }
+
+    fn save_document_as(&mut self, path: PathBuf) {
+        if self.has_pending_user_visible_file_job() {
+            self.status_message = "Another file operation is already in progress".to_string();
+            return;
+        }
+
+        if !project_file_path(&path) {
+            self.status_message = format!(
+                "Save failed: expected .{} project path",
+                PROJECT_FILE_EXTENSION
+            );
+            return;
+        }
+
+        self.enqueue_primary_save(path);
+    }
+
+    fn open_document(&mut self, path: PathBuf) {
+        if self.has_pending_user_visible_file_job() {
+            self.status_message = "Another file operation is already in progress".to_string();
+            return;
+        }
+
+        if !project_file_path(&path) {
+            self.status_message = format!("Open failed: expected .{} project file", PROJECT_FILE_EXTENSION);
+            return;
+        }
+
+        self.status_message = format!("Opening {}", path.display());
+        self.pending_document_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::LoadDocument {
+                job_id,
+                path,
+                kind: DocumentLoadKind::Project,
+            }
+        }));
+    }
+
+    fn import_image(&mut self, path: PathBuf) {
+        if self.has_pending_user_visible_file_job() {
+            self.status_message = "Another file operation is already in progress".to_string();
+            return;
+        }
+
+        if raster_format_from_path(&path).is_none() {
+            self.status_message = "Import failed: unsupported image format".to_string();
+            return;
+        }
+
+        self.status_message = format!("Importing {}", path.display());
+        self.pending_document_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::LoadDocument {
+                job_id,
+                path,
+                kind: DocumentLoadKind::RasterImport,
+            }
+        }));
+    }
+
+    fn export_document(&mut self, path: PathBuf) {
+        if self.has_pending_user_visible_file_job() {
+            self.status_message = "Another file operation is already in progress".to_string();
+            return;
+        }
+
+        let Some(format) = raster_format_from_path(&path) else {
+            self.status_message = "Export failed: unsupported image format".to_string();
+            return;
+        };
+
+        let document = self.document.clone();
+        self.status_message = format!("Exporting {}", path.display());
+        self.pending_export_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::ExportDocument {
+                job_id,
+                path,
+                document,
+                format,
+            }
+        }));
     }
 
     fn poll_background_tasks(&mut self) {
@@ -1270,8 +1635,8 @@ mod tests {
     use super::{PhotoTuxController, AUTOSAVE_IDLE_INTERVAL};
     use common::CanvasRect;
     use file_io::{
-        flatten_document_rgba, load_document_from_path, recovery_path_for_project_path,
-        save_document_to_path,
+        flatten_document_rgba, load_document_from_path,
+        recovery_path_for_project_path, save_document_to_path,
     };
     use std::fs;
     use std::thread;
@@ -1331,6 +1696,8 @@ mod tests {
             if controller.pending_primary_save_job.is_none()
                 && controller.pending_autosave_job.is_none()
                 && controller.pending_recovery_load_job.is_none()
+                && controller.pending_document_load_job.is_none()
+                && controller.pending_export_job.is_none()
             {
                 return;
             }
@@ -1420,6 +1787,40 @@ mod tests {
     }
 
     #[test]
+    fn save_document_without_existing_path_requires_save_as() {
+        let mut controller = PhotoTuxController::new();
+
+        controller.save_document();
+
+        assert!(controller.document_path.is_none());
+        assert!(controller.status_message.contains("Save As required"));
+        assert!(controller.pending_primary_save_job.is_none());
+    }
+
+    #[test]
+    fn save_document_as_persists_to_selected_project_path() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-save-as-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary save-as directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.add_layer();
+        let project_path = working_directory.join("custom-name.ptx");
+
+        controller.save_document_as(project_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        assert_eq!(controller.document_path.as_ref(), Some(&project_path));
+        assert_eq!(controller.document_title, "custom-name.ptx");
+        assert!(!controller.dirty_since_primary_save);
+        assert!(!controller.dirty_since_autosave);
+        assert!(controller.status_message.contains("Saved"));
+        assert!(project_path.exists());
+
+        fs::remove_file(&project_path).expect("saved project file should be removed");
+        fs::remove_dir(&working_directory).expect("temporary save-as directory should be removed");
+    }
+
+    #[test]
     fn canvas_raster_matches_flattened_document_for_representative_scene() {
         let mut controller = PhotoTuxController::new();
         controller.document = build_representative_controller_document();
@@ -1444,13 +1845,13 @@ mod tests {
         let painted = controller.canvas_raster();
         assert_ne!(before.pixels, painted.pixels);
 
-        controller.save_document();
+        let saved_path = working_directory.join("untitled.ptx");
+        controller.save_document_as(saved_path.clone());
         wait_for_background_jobs(&mut controller);
         controller.undo();
 
         assert_eq!(controller.canvas_raster().pixels, before.pixels);
 
-        let saved_path = working_directory.join("untitled.ptx");
         if saved_path.exists() {
             fs::remove_file(&saved_path).expect("saved project file should be removed");
         }
@@ -1498,6 +1899,63 @@ mod tests {
 
         fs::remove_file(&recovery_path).expect("recovery file should be removed");
         fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
+    }
+
+    #[test]
+    fn open_document_loads_saved_project_into_controller_state() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-open-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary open directory should exist");
+
+        let document = build_representative_controller_document();
+        let project_path = working_directory.join("scene.ptx");
+        save_document_to_path(&project_path, &document).expect("project should save for reopen test");
+
+        let mut controller = PhotoTuxController::new();
+        controller.add_layer();
+        controller.open_document(project_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        assert_eq!(controller.document.canvas_size, document.canvas_size);
+        assert_eq!(controller.document.layers.len(), document.layers.len());
+        assert_eq!(controller.document_path.as_ref(), Some(&project_path));
+        assert!(!controller.dirty_since_primary_save);
+        assert!(!controller.dirty_since_autosave);
+        assert!(controller.status_message.contains("Opened"));
+        assert_eq!(controller.snapshot().history_entries, vec!["Open Document".to_string()]);
+
+        fs::remove_file(&project_path).expect("project file should be removed");
+        fs::remove_dir(&working_directory).expect("temporary open directory should be removed");
+    }
+
+    #[test]
+    fn export_and_import_commands_roundtrip_through_background_jobs() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-io-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary io directory should exist");
+
+        let mut export_controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        export_controller.document = build_representative_controller_document();
+        let export_path = working_directory.join("scene.png");
+
+        export_controller.export_document(export_path.clone());
+        wait_for_background_jobs(&mut export_controller);
+
+        assert!(export_path.exists());
+        assert!(export_controller.status_message.contains("Exported"));
+
+        let mut import_controller = PhotoTuxController::new();
+        import_controller.import_image(export_path.clone());
+        wait_for_background_jobs(&mut import_controller);
+
+        assert_eq!(import_controller.document.canvas_size, export_controller.document.canvas_size);
+        assert_eq!(import_controller.document.layer_count(), 1);
+        assert!(import_controller.document_path.is_none());
+        assert!(import_controller.dirty_since_primary_save);
+        assert!(import_controller.dirty_since_autosave);
+        assert!(import_controller.status_message.contains("Imported"));
+        assert_eq!(import_controller.snapshot().history_entries, vec!["Import Image".to_string()]);
+
+        fs::remove_file(&export_path).expect("exported png should be removed");
+        fs::remove_dir(&working_directory).expect("temporary io directory should be removed");
     }
 
     #[test]

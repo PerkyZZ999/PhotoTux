@@ -3,12 +3,16 @@ use common::{CanvasRaster, CanvasRect, CanvasSize, APP_NAME};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    gdk, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, EventControllerKey,
-    EventControllerScroll, EventControllerScrollFlags, GestureDrag, HeaderBar, Label, Orientation,
-    Paned, Picture, Separator,
+    gdk, Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
+    CssProvider, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
+    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, HeaderBar, Label,
+    MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
+    ResponseType, Separator,
 };
 use render_wgpu::{CanvasOverlayRect, OffscreenCanvasRenderer, ViewportSize, ViewportState};
 use std::cell::RefCell;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -49,6 +53,8 @@ impl ShellToolKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSnapshot {
     pub document_title: String,
+    pub project_path: Option<PathBuf>,
+    pub dirty: bool,
     pub status_message: String,
     pub canvas_size: CanvasSize,
     pub canvas_revision: u64,
@@ -98,6 +104,10 @@ pub trait ShellController {
     fn undo(&mut self);
     fn redo(&mut self);
     fn save_document(&mut self);
+    fn save_document_as(&mut self, path: PathBuf);
+    fn open_document(&mut self, path: PathBuf);
+    fn import_image(&mut self, path: PathBuf);
+    fn export_document(&mut self, path: PathBuf);
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
@@ -119,31 +129,33 @@ pub fn run(controller: Rc<RefCell<dyn ShellController>>) -> Result<()> {
 fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellController>>) {
     install_theme();
 
+    let shell_state = ShellUiState::new(controller.clone());
+
     let window = ApplicationWindow::builder()
         .application(application)
         .title(APP_NAME)
         .default_width(1600)
         .default_height(900)
         .build();
+    window.set_decorated(false);
     window.add_css_class("app-window");
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class("app-root");
     root.append(&build_header_bar());
-    root.append(&build_menu_bar());
-    root.append(&build_tool_options_bar(controller.clone()));
-
-    let shell_state = ShellUiState::new(controller.clone());
+    root.append(&build_menu_bar(&window, shell_state.clone()));
+    root.append(&shell_state.tool_options_bar);
     let workspace = build_workspace_body(&shell_state);
     root.append(&workspace);
     root.append(&shell_state.status_bar);
 
     window.set_child(Some(&root));
+    shell_state.attach_window(window.clone());
     wire_window_shortcuts(&window, shell_state.clone());
     window.present();
 
     shell_state.refresh();
-    glib::timeout_add_local(Duration::from_millis(150), move || {
+    glib::timeout_add_local(Duration::from_millis(33), move || {
         shell_state.refresh();
         ControlFlow::Continue
     });
@@ -153,25 +165,41 @@ fn build_header_bar() -> HeaderBar {
     let header = HeaderBar::new();
     header.add_css_class("titlebar");
 
+    let title_row = GtkBox::new(Orientation::Horizontal, 6);
+    let title_icon = build_remix_icon("palette-line.svg", APP_NAME, 12);
+    title_icon.add_css_class("titlebar-icon");
+    title_row.append(&title_icon);
+
     let title = Label::new(Some(APP_NAME));
     title.add_css_class("titlebar-app-name");
-    header.set_title_widget(Some(&title));
+    title_row.append(&title);
+    header.set_title_widget(Some(&title_row));
 
     let preset = Button::with_label("Essentials");
     preset.add_css_class("chrome-button");
     header.pack_start(&preset);
 
-    let search = Button::with_label("Search");
-    search.add_css_class("chrome-button");
+    let search = build_icon_only_button("search-line.svg", "Search", "chrome-button", 12);
+    search.add_css_class("chrome-icon-button");
     header.pack_end(&search);
     header
 }
 
-fn build_menu_bar() -> GtkBox {
+fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> GtkBox {
     let bar = GtkBox::new(Orientation::Horizontal, 2);
     bar.add_css_class("menu-bar");
 
-    for title in ["File", "Edit", "Image", "Layer", "Select", "Filter", "View", "Window", "Help"] {
+    let file_button = build_file_menu_button(window, shell_state.clone());
+    bar.append(&file_button);
+
+    bar.append(&build_edit_menu_button(shell_state.clone()));
+    bar.append(&build_image_placeholder_button());
+    bar.append(&build_layer_menu_button(shell_state.clone()));
+    bar.append(&build_select_menu_button(shell_state.clone()));
+    bar.append(&build_filter_placeholder_button());
+    bar.append(&build_view_menu_button(shell_state));
+
+    for title in ["Window", "Help"] {
         let button = Button::with_label(title);
         button.add_css_class("menu-button");
         bar.append(&button);
@@ -180,11 +208,510 @@ fn build_menu_bar() -> GtkBox {
     bar
 }
 
-fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> GtkBox {
+fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
+    let button = MenuButton::builder().label("Edit").build();
+    button.add_css_class("menu-button");
+
+    let popover = Popover::new();
+    let menu = GtkBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("panel-group-body");
+
+    let undo = build_icon_label_button("arrow-go-back-line.svg", "Undo");
+    undo.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        undo.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().undo();
+        });
+    }
+    menu.append(&undo);
+
+    let redo = build_icon_label_button("arrow-go-forward-line.svg", "Redo");
+    redo.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        redo.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().redo();
+        });
+    }
+    menu.append(&redo);
+
+    {
+        let shell_state = shell_state.clone();
+        let undo = undo.clone();
+        let redo = redo.clone();
+        popover.connect_show(move |_| {
+            let snapshot = shell_state.controller.borrow().snapshot();
+            undo.set_sensitive(snapshot.can_undo);
+            redo.set_sensitive(snapshot.can_redo);
+        });
+    }
+
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
+
+fn build_image_placeholder_button() -> Button {
+    let button = Button::with_label("Image");
+    button.add_css_class("menu-button");
+    button
+}
+
+fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
+    let button = MenuButton::builder().label("Layer").build();
+    button.add_css_class("menu-button");
+
+    let popover = Popover::new();
+    let menu = GtkBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("panel-group-body");
+
+    let add = build_icon_label_button("add-line.svg", "New Layer");
+    add.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        add.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().add_layer();
+        });
+    }
+    menu.append(&add);
+
+    let duplicate = build_icon_label_button("file-copy-line.svg", "Duplicate Layer");
+    duplicate.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        duplicate.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().duplicate_active_layer();
+        });
+    }
+    menu.append(&duplicate);
+
+    let delete = build_icon_label_button("delete-bin-line.svg", "Delete Layer");
+    delete.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        delete.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().delete_active_layer();
+        });
+    }
+    menu.append(&delete);
+
+    let move_up = build_icon_label_button("arrow-up-line.svg", "Move Layer Up");
+    move_up.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        move_up.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().move_active_layer_up();
+        });
+    }
+    menu.append(&move_up);
+
+    let move_down = build_icon_label_button("arrow-down-line.svg", "Move Layer Down");
+    move_down.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        move_down.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().move_active_layer_down();
+        });
+    }
+    menu.append(&move_down);
+
+    {
+        let shell_state = shell_state.clone();
+        let duplicate = duplicate.clone();
+        let delete = delete.clone();
+        let move_up = move_up.clone();
+        let move_down = move_down.clone();
+        popover.connect_show(move |_| {
+            let snapshot = shell_state.controller.borrow().snapshot();
+            let layer_count = snapshot.layers.len();
+            let active_index = snapshot.layers.iter().position(|layer| layer.is_active).unwrap_or(0);
+            let has_multiple_layers = layer_count > 1;
+
+            duplicate.set_sensitive(layer_count > 0);
+            delete.set_sensitive(has_multiple_layers);
+            move_up.set_sensitive(has_multiple_layers && active_index + 1 < layer_count);
+            move_down.set_sensitive(has_multiple_layers && active_index > 0);
+        });
+    }
+
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
+
+fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
+    let button = MenuButton::builder().label("Select").build();
+    button.add_css_class("menu-button");
+
+    let popover = Popover::new();
+    let menu = GtkBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("panel-group-body");
+
+    let clear = build_icon_label_button("close-circle-line.svg", "Clear Selection");
+    clear.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        clear.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().clear_selection();
+        });
+    }
+    menu.append(&clear);
+
+    let invert = build_icon_label_button("contrast-2-line.svg", "Invert Selection");
+    invert.add_css_class("tool-chip");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        invert.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().invert_selection();
+        });
+    }
+    menu.append(&invert);
+
+    {
+        let shell_state = shell_state.clone();
+        let clear = clear.clone();
+        let invert = invert.clone();
+        popover.connect_show(move |_| {
+            let has_selection = shell_state.controller.borrow().snapshot().selection_rect.is_some();
+            clear.set_sensitive(has_selection);
+            invert.set_sensitive(has_selection);
+        });
+    }
+
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
+
+fn build_filter_placeholder_button() -> Button {
+    let button = Button::with_label("Filter");
+    button.add_css_class("menu-button");
+    button
+}
+
+fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
+    let button = MenuButton::builder().label("View").build();
+    button.add_css_class("menu-button");
+
+    let popover = Popover::new();
+    let menu = GtkBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("panel-group-body");
+
+    let zoom_in = build_icon_label_button("zoom-in-line.svg", "Zoom In");
+    zoom_in.add_css_class("tool-chip");
+    {
+        let shell_state = shell_state.clone();
+        let popover = popover.clone();
+        zoom_in.connect_clicked(move |_| {
+            popover.popdown();
+            shell_state.canvas_state.borrow_mut().zoom_in();
+        });
+    }
+    menu.append(&zoom_in);
+
+    let zoom_out = build_icon_label_button("zoom-out-line.svg", "Zoom Out");
+    zoom_out.add_css_class("tool-chip");
+    {
+        let shell_state = shell_state.clone();
+        let popover = popover.clone();
+        zoom_out.connect_clicked(move |_| {
+            popover.popdown();
+            shell_state.canvas_state.borrow_mut().zoom_out();
+        });
+    }
+    menu.append(&zoom_out);
+
+    let fit = build_icon_label_button("fullscreen-line.svg", "Fit To View");
+    fit.add_css_class("tool-chip");
+    {
+        let shell_state = shell_state.clone();
+        let popover = popover.clone();
+        fit.connect_clicked(move |_| {
+            popover.popdown();
+            shell_state.canvas_state.borrow_mut().fit_to_view();
+        });
+    }
+    menu.append(&fit);
+
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
+
+fn build_file_menu_button(
+    window: &ApplicationWindow,
+    shell_state: Rc<ShellUiState>,
+) -> MenuButton {
+    let button = MenuButton::builder().label("File").build();
+    button.add_css_class("menu-button");
+
+    let popover = Popover::new();
+    let menu = GtkBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("panel-group-body");
+
+    let open_project = build_icon_label_button("folder-open-line.svg", "Open Project...");
+    open_project.add_css_class("tool-chip");
+    {
+        let parent = window.clone();
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        open_project.connect_clicked(move |_| {
+            popover.popdown();
+            choose_open_project(&parent, controller.clone());
+        });
+    }
+    menu.append(&open_project);
+
+    let import_image = build_icon_label_button("image-add-line.svg", "Import Image...");
+    import_image.add_css_class("tool-chip");
+    {
+        let parent = window.clone();
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        import_image.connect_clicked(move |_| {
+            popover.popdown();
+            choose_import_image(&parent, controller.clone());
+        });
+    }
+    menu.append(&import_image);
+
+    let save = build_icon_label_button("save-3-line.svg", "Save");
+    save.add_css_class("tool-chip");
+    {
+        let shell_state = shell_state.clone();
+        let popover = popover.clone();
+        save.connect_clicked(move |_| {
+            popover.popdown();
+            shell_state.request_project_save();
+        });
+    }
+    menu.append(&save);
+
+    let save_as = build_icon_label_button("save-3-line.svg", "Save As...");
+    save_as.add_css_class("tool-chip");
+    {
+        let shell_state = shell_state.clone();
+        let popover = popover.clone();
+        save_as.connect_clicked(move |_| {
+            popover.popdown();
+            shell_state.request_project_save_as();
+        });
+    }
+    menu.append(&save_as);
+
+    for (label, extension) in [
+        ("Export PNG...", "png"),
+        ("Export JPEG...", "jpg"),
+        ("Export WebP...", "webp"),
+    ] {
+        let export = build_icon_label_button("export-line.svg", label);
+        export.add_css_class("tool-chip");
+        let parent = window.clone();
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        export.connect_clicked(move |_| {
+            popover.popdown();
+            choose_export_path(&parent, controller.clone(), extension);
+        });
+        menu.append(&export);
+    }
+
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
+
+fn build_extension_filter(name: &str, patterns: &[&str]) -> FileFilter {
+    let filter = FileFilter::new();
+    filter.set_name(Some(name));
+    for pattern in patterns {
+        filter.add_pattern(pattern);
+    }
+    filter
+}
+
+fn ensure_extension(path: &Path, extension: &str) -> PathBuf {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some(existing) if existing.eq_ignore_ascii_case(extension) => path.to_path_buf(),
+        _ => path.with_extension(extension),
+    }
+}
+
+fn suggested_export_name(document_title: &str, extension: &str) -> String {
+    let stem = document_title
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(document_title);
+    format!("{}.{}", stem, extension)
+}
+
+fn choose_path<F>(
+    parent: &ApplicationWindow,
+    title: &str,
+    action: FileChooserAction,
+    accept_label: &str,
+    suggested_name: Option<&str>,
+    filters: &[FileFilter],
+    on_accept: F,
+) where
+    F: Fn(PathBuf) + 'static,
+{
+    let dialog = FileChooserNative::new(
+        Some(title),
+        Some(parent),
+        action,
+        Some(accept_label),
+        Some("Cancel"),
+    );
+    dialog.set_modal(true);
+    if let Some(name) = suggested_name {
+        dialog.set_current_name(name);
+    }
+    for filter in filters {
+        dialog.add_filter(filter);
+    }
+
+    let on_accept: Rc<dyn Fn(PathBuf)> = Rc::new(on_accept);
+    let parent = parent.clone();
+
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Accept {
+            if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                if action == FileChooserAction::Save && path.exists() {
+                    confirm_overwrite(&parent, path, on_accept.clone());
+                } else {
+                    on_accept(path);
+                }
+            }
+        }
+        dialog.destroy();
+    });
+
+    dialog.show();
+}
+
+fn confirm_overwrite(parent: &ApplicationWindow, path: PathBuf, on_accept: Rc<dyn Fn(PathBuf)>) {
+    let dialog = MessageDialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .message_type(MessageType::Question)
+        .buttons(ButtonsType::None)
+        .text("Replace existing file?")
+        .secondary_text(format!("{} already exists. Do you want to replace it?", path.display()))
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Replace", ResponseType::Accept);
+
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Accept {
+            on_accept(path.clone());
+        }
+        dialog.destroy();
+    });
+
+    dialog.show();
+}
+
+fn choose_open_project(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+    choose_path(
+        parent,
+        "Open Project",
+        FileChooserAction::Open,
+        "Open",
+        None,
+        &[build_extension_filter("PhotoTux Project", &["*.ptx"])],
+        move |path| controller.borrow_mut().open_document(path),
+    );
+}
+
+fn choose_import_image(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+    choose_path(
+        parent,
+        "Import Image",
+        FileChooserAction::Open,
+        "Import",
+        None,
+        &[build_extension_filter(
+            "Supported Images",
+            &["*.png", "*.jpg", "*.jpeg", "*.webp"],
+        )],
+        move |path| controller.borrow_mut().import_image(path),
+    );
+}
+
+fn choose_export_path(
+    parent: &ApplicationWindow,
+    controller: Rc<RefCell<dyn ShellController>>,
+    extension: &'static str,
+) {
+    let suggested_name = suggested_export_name(&controller.borrow().snapshot().document_title, extension);
+    choose_path(
+        parent,
+        "Export Image",
+        FileChooserAction::Save,
+        "Export",
+        Some(&suggested_name),
+        &[build_extension_filter(
+            &format!("{}.{}", extension.to_ascii_uppercase(), extension),
+            &[&format!("*.{}", extension)],
+        )],
+        move |path| controller
+            .borrow_mut()
+            .export_document(ensure_extension(&path, extension)),
+    );
+}
+
+fn choose_save_project_path(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+    let snapshot = controller.borrow().snapshot();
+    let suggested_name = snapshot
+        .project_path
+        .as_ref()
+        .and_then(|path| path.file_name().and_then(|name| name.to_str()))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| suggested_export_name(&snapshot.document_title, "ptx"));
+
+    choose_path(
+        parent,
+        "Save Project As",
+        FileChooserAction::Save,
+        "Save",
+        Some(&suggested_name),
+        &[build_extension_filter("PhotoTux Project", &["*.ptx"])],
+        move |path| controller
+            .borrow_mut()
+            .save_document_as(ensure_extension(&path, "ptx")),
+    );
+}
+
+fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox, Picture, Label) {
     let bar = GtkBox::new(Orientation::Horizontal, 6);
     bar.add_css_class("tool-options-bar");
 
-    let tool_name = controller.borrow().snapshot().active_tool_name;
+    let snapshot = controller.borrow().snapshot();
+    let tool_icon = build_remix_icon(shell_tool_icon(snapshot.active_tool), &snapshot.active_tool_name, 14);
+    tool_icon.add_css_class("tool-options-icon");
+    bar.append(&tool_icon);
+
+    let tool_name = snapshot.active_tool_name;
     let tool_label = Label::new(Some(&tool_name));
     tool_label.add_css_class("tool-options-label");
     bar.append(&tool_label);
@@ -195,7 +722,7 @@ fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> GtkBo
         bar.append(&chip);
     }
 
-    bar
+    (bar, tool_icon, tool_label)
 }
 
 fn build_workspace_body(shell_state: &ShellUiState) -> Paned {
@@ -222,14 +749,22 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
 
     let mut buttons = Vec::new();
 
-    for (index, (tool, label)) in [
-        (ShellToolKind::Move, "Move"),
-        (ShellToolKind::RectangularMarquee, "Marquee"),
-        (ShellToolKind::Transform, "Transform"),
-        (ShellToolKind::Brush, "Brush"),
-        (ShellToolKind::Eraser, "Eraser"),
-        (ShellToolKind::Hand, "Hand"),
-        (ShellToolKind::Zoom, "Zoom"),
+    for (index, (tool, icon_name, tooltip)) in [
+        (ShellToolKind::Move, "drag-move-line.svg", ShellToolKind::Move.label()),
+        (
+            ShellToolKind::RectangularMarquee,
+            "focus-3-line.svg",
+            ShellToolKind::RectangularMarquee.label(),
+        ),
+        (
+            ShellToolKind::Transform,
+            "expand-diagonal-2-line.svg",
+            ShellToolKind::Transform.label(),
+        ),
+        (ShellToolKind::Brush, "brush-2-line.svg", ShellToolKind::Brush.label()),
+        (ShellToolKind::Eraser, "eraser-line.svg", ShellToolKind::Eraser.label()),
+        (ShellToolKind::Hand, "hand.svg", ShellToolKind::Hand.label()),
+        (ShellToolKind::Zoom, "zoom-in-line.svg", ShellToolKind::Zoom.label()),
     ]
     .into_iter()
     .enumerate()
@@ -238,7 +773,7 @@ fn build_left_tool_rail(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox
             rail.append(&Separator::new(Orientation::Horizontal));
         }
 
-        let button = Button::with_label(label);
+        let button = build_icon_only_button(icon_name, tooltip, "tool-button", 14);
         button.add_css_class("tool-button");
         let tool_controller = controller.clone();
         button.connect_clicked(move |_| tool_controller.borrow_mut().select_tool(tool));
@@ -329,8 +864,13 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
 
     let dock_icons = GtkBox::new(Orientation::Vertical, 6);
     dock_icons.add_css_class("panel-icon-strip");
-    for icon in ["Clr", "Prop", "Lyr", "His"] {
-        let button = Button::with_label(icon);
+    for (icon_name, tooltip) in [
+        ("palette-line.svg", "Color"),
+        ("settings-4-line.svg", "Properties"),
+        ("layout-column-line.svg", "Layers"),
+        ("history-line.svg", "History"),
+    ] {
+        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 13);
         button.add_css_class("dock-icon-button");
         dock_icons.append(&button);
     }
@@ -338,6 +878,7 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     let dock = GtkBox::new(Orientation::Vertical, 8);
     dock.add_css_class("panel-dock");
     dock.set_hexpand(true);
+    dock.set_vexpand(true);
     dock.append(&shell_state.color_group);
     dock.append(&shell_state.properties_group);
     dock.append(&shell_state.layers_group);
@@ -397,7 +938,12 @@ fn build_status_label(text: &str) -> Label {
 
 struct ShellUiState {
     controller: Rc<RefCell<dyn ShellController>>,
+    window: RefCell<Option<ApplicationWindow>>,
     canvas_state: Rc<RefCell<CanvasHostState>>,
+    automation_shortcuts_enabled: bool,
+    tool_options_bar: GtkBox,
+    tool_options_icon: Picture,
+    tool_options_label: Label,
     canvas_picture: Picture,
     tool_rail: GtkBox,
     tool_buttons: Vec<(ShellToolKind, Button)>,
@@ -416,13 +962,18 @@ struct ShellUiState {
     status_zoom: Label,
     status_cursor: Label,
     status_mode: Label,
+    last_snapshot: RefCell<Option<ShellSnapshot>>,
+    last_zoom_percent: RefCell<u32>,
 }
 
 impl ShellUiState {
     fn new(controller: Rc<RefCell<dyn ShellController>>) -> Rc<Self> {
+        let (tool_options_bar, tool_options_icon, tool_options_label) =
+            build_tool_options_bar(controller.clone());
         let (tool_rail, tool_buttons) = build_left_tool_rail(controller.clone());
         let (document_tabs, document_tab_label) = build_document_tabs();
         let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
+        let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
 
         let color_body = GtkBox::new(Orientation::Vertical, 6);
         color_body.add_css_class("panel-group-body");
@@ -438,13 +989,20 @@ impl ShellUiState {
 
         let history_body = GtkBox::new(Orientation::Vertical, 4);
         history_body.add_css_class("panel-group-body");
+        history_body.set_vexpand(true);
         let history_group = build_panel_group(&["History"], &history_body);
+        history_group.set_vexpand(true);
 
         let (status_bar, status_doc, status_zoom, status_cursor, status_mode) = build_status_bar();
 
         Rc::new(Self {
             controller,
+            window: RefCell::new(None),
             canvas_state,
+            automation_shortcuts_enabled,
+            tool_options_bar,
+            tool_options_icon,
+            tool_options_label,
             canvas_picture,
             tool_rail,
             tool_buttons,
@@ -463,6 +1021,8 @@ impl ShellUiState {
             status_zoom,
             status_cursor,
             status_mode,
+            last_snapshot: RefCell::new(None),
+            last_zoom_percent: RefCell::new(0),
         })
     }
 
@@ -471,7 +1031,93 @@ impl ShellUiState {
         let is_shift = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
         let key_char = key.to_unicode().map(|character| character.to_ascii_lowercase());
 
+        if self.automation_shortcuts_enabled && is_control && is_shift {
+            if matches!(key, gdk::Key::F1) {
+                self.controller.borrow_mut().add_layer();
+                return true;
+            }
+            if matches!(key, gdk::Key::F2) {
+                self.controller.borrow_mut().duplicate_active_layer();
+                return true;
+            }
+            if matches!(key, gdk::Key::F3) {
+                self.controller.borrow_mut().delete_active_layer();
+                return true;
+            }
+            if matches!(key, gdk::Key::F4) {
+                if let Some(index) = self.active_layer_index() {
+                    self.controller.borrow_mut().toggle_layer_visibility(index);
+                    return true;
+                }
+            }
+            if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
+                self.controller.borrow_mut().previous_active_layer_blend_mode();
+                return true;
+            }
+            if matches!(key, gdk::Key::F6 | gdk::Key::bracketright) {
+                self.controller.borrow_mut().next_active_layer_blend_mode();
+                return true;
+            }
+            if matches!(key, gdk::Key::F7 | gdk::Key::minus | gdk::Key::KP_Subtract) {
+                self.controller.borrow_mut().decrease_active_layer_opacity();
+                return true;
+            }
+            if matches!(key, gdk::Key::F8 | gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add) {
+                self.controller.borrow_mut().increase_active_layer_opacity();
+                return true;
+            }
+            if matches!(key, gdk::Key::F9 | gdk::Key::Up) {
+                self.controller.borrow_mut().move_active_layer_up();
+                return true;
+            }
+            if matches!(key, gdk::Key::F10 | gdk::Key::Down) {
+                self.controller.borrow_mut().move_active_layer_down();
+                return true;
+            }
+            if matches!(key, gdk::Key::F11) {
+                self.controller.borrow_mut().begin_transform();
+                return true;
+            }
+            if matches!(key, gdk::Key::Page_Up | gdk::Key::KP_Page_Up) {
+                self.controller.borrow_mut().scale_transform_up();
+                return true;
+            }
+            if matches!(key, gdk::Key::Page_Down | gdk::Key::KP_Page_Down) {
+                self.controller.borrow_mut().scale_transform_down();
+                return true;
+            }
+
+            match key_char {
+                Some('x') => {
+                    self.controller.borrow_mut().swap_colors();
+                    return true;
+                }
+                Some('r') => {
+                    self.controller.borrow_mut().reset_colors();
+                    return true;
+                }
+                Some(digit @ '1'..='9') => {
+                    let layer_index = (digit as u8 - b'1') as usize;
+                    let layer_count = self.controller.borrow().snapshot().layers.len();
+                    if layer_index < layer_count {
+                        self.controller.borrow_mut().select_layer(layer_index);
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if is_control {
+            if matches!(key, gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add) {
+                self.canvas_state.borrow_mut().zoom_in();
+                return true;
+            }
+            if matches!(key, gdk::Key::minus | gdk::Key::KP_Subtract) {
+                self.canvas_state.borrow_mut().zoom_out();
+                return true;
+            }
+
             match key_char {
                 Some('z') if is_shift => {
                     self.controller.borrow_mut().redo();
@@ -486,7 +1132,7 @@ impl ShellUiState {
                     return true;
                 }
                 Some('s') => {
-                    self.controller.borrow_mut().save_document();
+                    self.request_project_save();
                     return true;
                 }
                 Some('d') => {
@@ -548,16 +1194,69 @@ impl ShellUiState {
         true
     }
 
+    fn active_layer_index(&self) -> Option<usize> {
+        self.controller
+            .borrow()
+            .snapshot()
+            .layers
+            .iter()
+            .position(|layer| layer.is_active)
+    }
+
+    fn attach_window(&self, window: ApplicationWindow) {
+        self.window.replace(Some(window));
+    }
+
+    fn request_project_save(&self) {
+        let snapshot = self.controller.borrow().snapshot();
+        if snapshot.project_path.is_some() {
+            self.controller.borrow_mut().save_document();
+            return;
+        }
+
+        if let Some(window) = self.window.borrow().as_ref() {
+            choose_save_project_path(window, self.controller.clone());
+        } else {
+            self.controller.borrow_mut().save_document();
+        }
+    }
+
+    fn request_project_save_as(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            choose_save_project_path(window, self.controller.clone());
+        } else {
+            let snapshot = self.controller.borrow().snapshot();
+            if let Some(path) = snapshot.project_path {
+                self.controller.borrow_mut().save_document_as(path);
+            } else {
+                self.controller.borrow_mut().save_document();
+            }
+        }
+    }
+
     fn refresh(&self) {
         self.controller.borrow_mut().poll_background_tasks();
         let snapshot = self.controller.borrow().snapshot();
-        self.document_tab_label
-            .set_label(&format!("{}   100%   RGB/8", snapshot.document_title));
+        let zoom_percent = self.canvas_state.borrow().zoom_percent();
+        let snapshot_changed = self.last_snapshot.borrow().as_ref() != Some(&snapshot);
+        let zoom_changed = *self.last_zoom_percent.borrow() != zoom_percent;
+
+        if !snapshot_changed && !zoom_changed {
+            return;
+        }
+
+        let dirty_marker = if snapshot.dirty { "*" } else { "" };
+        self.document_tab_label.set_label(&format!(
+            "{}{}   {}%   RGB/8",
+            snapshot.document_title,
+            dirty_marker,
+            zoom_percent
+        ));
         self.status_doc.set_label(&format!(
             "Doc: {} x {}",
             snapshot.canvas_size.width, snapshot.canvas_size.height
         ));
-        self.status_zoom.set_label("Zoom: 100%");
+        self.status_zoom.set_label(&format!("Zoom: {}%", zoom_percent));
         self.status_cursor.set_label("Cursor: 0,0");
         if snapshot.status_message.is_empty() {
             self.status_mode.set_label("RGB/8");
@@ -566,11 +1265,19 @@ impl ShellUiState {
                 .set_label(&format!("RGB/8  {}", snapshot.status_message));
         }
 
-        self.refresh_tool_buttons(&snapshot);
-        self.refresh_color_panel(&snapshot);
-        self.refresh_properties_panel(&snapshot);
-        self.refresh_layers_panel(&snapshot);
-        self.refresh_history_panel(&snapshot);
+        if snapshot_changed {
+            self.tool_options_label.set_label(&snapshot.active_tool_name);
+            self.tool_options_icon
+                .set_filename(Some(remix_icon_path(shell_tool_icon(snapshot.active_tool))));
+            self.refresh_tool_buttons(&snapshot);
+            self.refresh_color_panel(&snapshot);
+            self.refresh_properties_panel(&snapshot);
+            self.refresh_layers_panel(&snapshot);
+            self.refresh_history_panel(&snapshot);
+            self.last_snapshot.replace(Some(snapshot));
+        }
+
+        self.last_zoom_percent.replace(zoom_percent);
     }
 
     fn refresh_tool_buttons(&self, snapshot: &ShellSnapshot) {
@@ -793,8 +1500,14 @@ impl ShellUiState {
             let row = GtkBox::new(Orientation::Horizontal, 4);
             row.add_css_class(if layer.is_active { "layer-row-active" } else { "layer-row" });
 
-            let visibility = Button::with_label(if layer.visible { "Eye" } else { "Off" });
-            visibility.add_css_class("menu-button");
+            let visibility_icon = if layer.visible {
+                "eye-line.svg"
+            } else {
+                "eye-off-line.svg"
+            };
+            let visibility =
+                build_icon_only_button(visibility_icon, "Toggle Visibility", "menu-button", 12);
+            visibility.add_css_class("layer-visibility-button");
             {
                 let controller = self.controller.clone();
                 let index = layer.index;
@@ -851,6 +1564,62 @@ impl ShellUiState {
     }
 }
 
+fn remix_icon_path(icon_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/icons/remixicon")
+        .join(icon_name)
+}
+
+fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Picture {
+    let picture = Picture::for_filename(remix_icon_path(icon_name));
+    picture.set_size_request(size, size);
+    picture.set_can_shrink(true);
+    picture.set_hexpand(false);
+    picture.set_vexpand(false);
+    picture.set_halign(Align::Center);
+    picture.set_valign(Align::Center);
+    picture.set_alternative_text(Some(alt_text));
+    picture.add_css_class("remix-icon");
+    picture
+}
+
+fn build_icon_only_button(icon_name: &str, tooltip: &str, css_class: &str, size: i32) -> Button {
+    let button = Button::new();
+    button.add_css_class(css_class);
+    button.set_tooltip_text(Some(tooltip));
+
+    let icon = build_remix_icon(icon_name, tooltip, size);
+    button.set_child(Some(&icon));
+    button
+}
+
+fn build_icon_label_button(icon_name: &str, label: &str) -> Button {
+    let button = Button::new();
+    button.set_tooltip_text(Some(label));
+
+    let content = GtkBox::new(Orientation::Horizontal, 6);
+    content.append(&build_remix_icon(icon_name, label, 14));
+
+    let text = Label::new(Some(label));
+    text.add_css_class("icon-label-text");
+    content.append(&text);
+
+    button.set_child(Some(&content));
+    button
+}
+
+fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
+    match tool {
+        ShellToolKind::Move => "drag-move-line.svg",
+        ShellToolKind::RectangularMarquee => "focus-3-line.svg",
+        ShellToolKind::Transform => "expand-diagonal-2-line.svg",
+        ShellToolKind::Brush => "brush-2-line.svg",
+        ShellToolKind::Eraser => "eraser-line.svg",
+        ShellToolKind::Hand => "hand.svg",
+        ShellToolKind::Zoom => "zoom-in-line.svg",
+    }
+}
+
 #[derive(Clone, Copy)]
 enum LayerAction {
     Add,
@@ -891,6 +1660,7 @@ fn install_theme() {
 
 fn wire_window_shortcuts(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) {
     let key_controller = EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
     key_controller.connect_key_pressed(move |_, key, _, modifiers| {
         if shell_state.handle_shortcut(key, modifiers) {
             glib::Propagation::Stop
@@ -1040,12 +1810,16 @@ impl CanvasHostState {
             return;
         }
 
-        if !self.viewport_fitted || self.last_logical_size != (logical_width, logical_height) {
+        if !self.viewport_fitted {
             self.viewport_state = ViewportState::fit_canvas(
                 self.canvas_size,
                 ViewportSize::new(logical_width as f32, logical_height as f32),
             );
             self.viewport_fitted = true;
+            self.last_logical_size = (logical_width, logical_height);
+            self.dirty = true;
+        } else if self.last_logical_size != (logical_width, logical_height) {
+            self.adjust_viewport_for_resize(logical_width, logical_height);
             self.last_logical_size = (logical_width, logical_height);
             self.dirty = true;
         }
@@ -1146,6 +1920,7 @@ impl CanvasHostState {
                     let (canvas_x, canvas_y) = self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
                     self.controller.borrow_mut().update_canvas_interaction(canvas_x, canvas_y);
                     self.dirty = true;
+                    self.tick();
                 }
             }
             _ => {}
@@ -1157,12 +1932,14 @@ impl CanvasHostState {
         self.drag_start_screen = None;
         self.controller.borrow_mut().end_canvas_interaction();
         self.dirty = true;
+        self.tick();
     }
 
     fn zoom(&mut self, delta_y: f64, focal_x: f32, focal_y: f32) {
         let zoom_factor = if delta_y < 0.0 { 1.1 } else { 1.0 / 1.1 };
         self.viewport_state.zoom_towards(zoom_factor, focal_x, focal_y);
         self.dirty = true;
+        self.tick();
     }
 
     fn zoom_in(&mut self) {
@@ -1170,6 +1947,7 @@ impl CanvasHostState {
         let height = self.picture.height().max(1) as f32;
         self.viewport_state.zoom_towards(1.1, width * 0.5, height * 0.5);
         self.dirty = true;
+        self.tick();
     }
 
     fn zoom_out(&mut self) {
@@ -1177,6 +1955,7 @@ impl CanvasHostState {
         let height = self.picture.height().max(1) as f32;
         self.viewport_state.zoom_towards(1.0 / 1.1, width * 0.5, height * 0.5);
         self.dirty = true;
+        self.tick();
     }
 
     fn fit_to_view(&mut self) {
@@ -1189,6 +1968,18 @@ impl CanvasHostState {
         self.viewport_fitted = true;
         self.last_logical_size = (logical_width, logical_height);
         self.dirty = true;
+        self.tick();
+    }
+
+    fn adjust_viewport_for_resize(&mut self, logical_width: u32, logical_height: u32) {
+        let delta_x = logical_width as f32 - self.last_logical_size.0 as f32;
+        let delta_y = logical_height as f32 - self.last_logical_size.1 as f32;
+        self.viewport_state.pan_x += delta_x * 0.5;
+        self.viewport_state.pan_y += delta_y * 0.5;
+    }
+
+    fn zoom_percent(&self) -> u32 {
+        (self.viewport_state.zoom * 100.0).round().max(1.0) as u32
     }
 
     fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> (i32, i32) {
@@ -1215,6 +2006,14 @@ const THEME_CSS: &str = r#"
 
 .titlebar-app-name {
     font-weight: 600;
+}
+
+.titlebar-icon,
+.remix-icon {
+    min-width: 12px;
+    min-height: 12px;
+    max-width: 16px;
+    max-height: 16px;
 }
 
 .chrome-button,
@@ -1270,6 +2069,10 @@ const THEME_CSS: &str = r#"
     font-weight: 600;
 }
 
+.tool-options-icon {
+    margin-left: 2px;
+}
+
 .tool-chip {
     padding: 4px 10px;
 }
@@ -1285,7 +2088,8 @@ const THEME_CSS: &str = r#"
 }
 
 .tool-button {
-    min-height: 30px;
+    min-width: 28px;
+    min-height: 28px;
     padding: 0;
 }
 
@@ -1372,7 +2176,15 @@ const THEME_CSS: &str = r#"
 }
 
 .dock-icon-button {
-    min-height: 28px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+}
+
+.chrome-icon-button,
+.layer-visibility-button {
+    min-width: 24px;
+    min-height: 24px;
     padding: 0;
 }
 

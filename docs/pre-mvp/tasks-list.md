@@ -233,6 +233,7 @@ Progress notes:
 - the shell now follows the documented dark pro layout direction from the design docs with denser chrome and panel framing
 - the document region includes a tab strip, ruler framing, and a live renderer-backed canvas surface
 - the right side is structured as grouped panel sections with a Photoshop-style fixed dock instead of generic placeholders
+- the shell chrome now uses a vendored Remix Icon subset for the tool rail, dock strip, search affordance, file actions, and visibility controls, matching the icon-first direction in the UI layout spec
 
 ### T11 - Implement the Layers, Properties, Color, and History panels
 
@@ -415,6 +416,7 @@ Progress notes:
 - manual save, autosave, and startup recovery load now run off the UI path and return results through the session/controller boundary before shell state is refreshed
 - `ui_shell` now polls background job completions during its normal refresh cycle and surfaces controller status text in the status bar without moving document ownership into the shell
 - the current worker path is ready to absorb future import/export and thumbnail jobs as those shell commands are expanded
+- shell refresh now uses cached snapshots and live zoom tracking instead of rebuilding panel widgets on every timer tick, which removes the noticeable lag from tool-state updates while keeping background job polling lightweight
 
 ### T20 - Validate and stabilize the MVP workflow
 

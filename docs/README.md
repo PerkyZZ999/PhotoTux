@@ -26,6 +26,7 @@ Design-specific references:
 Testing and automation references:
 
 - `kwin-mcp-testing-guide.md`
+- `kwin-mcp-test-checklist.md`
 
 Post-MVP planning references:
 
@@ -59,6 +60,7 @@ Post-MVP planning references:
 - `development-workflow.md`: Day-to-day engineering workflow, milestone discipline, and definition of done.
 - `testing-strategy.md`: What to test, when to test it, and how to avoid regressions in a raster editor.
 - `kwin-mcp-testing-guide.md`: Host setup, VS Code MCP configuration, and staged adoption plan for KWin-based desktop automation.
+- `kwin-mcp-test-checklist.md`: GUI test checklist for the current PhotoTux MVP feature set using KWin-based automation.
 - `roadmap.md`: Milestone-level delivery plan from feasibility to MVP and beyond.
 - `pre-mvp/tasks-list.md`: End-to-end implementation tasks required to reach MVP.
 
