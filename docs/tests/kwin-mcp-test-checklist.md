@@ -70,6 +70,21 @@ Use this order:
 
 ## Current Test Run Notes
 
+### 2026-03-16 - KWin MCP Follow-up Attempt Blocked By Host Environment
+
+Attempted so far:
+
+- tried to start a fresh isolated KWin MCP session for post-shell-polish validation using the built PhotoTux binary from a clean temporary working directory
+
+Blocked by environment:
+
+- session startup failed immediately with `org.freedesktop.DBus.Error.ServiceUnknown` for `org.kde.KWin`
+- because the isolated session never started, no new dialog, focus, scaling, or file-workflow validation could be performed in this environment
+
+Implication:
+
+- keep `SHELL10` open until the same validation is rerun on a KDE Plasma Wayland host where KWin MCP can successfully start and own a virtual session
+
 ### 2026-03-15 - Initial KWin MCP Pass
 
 Completed so far:

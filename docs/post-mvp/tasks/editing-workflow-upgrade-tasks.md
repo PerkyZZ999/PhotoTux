@@ -17,7 +17,7 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 
 ### EW01 - Define mask ownership model in the document layer
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: masks have a stable data model before editing behavior is added
 - Includes:
   - decide whether masks are embedded per layer or referenced as a parallel raster payload
@@ -27,9 +27,15 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 - Done when:
   - mask structure is documented and represented in `doc_model` without shell-owned state
 
+Progress notes:
+- masks are now modeled as optional per-layer embedded alpha-mask payloads in `doc_model`, which keeps mask ownership document-local instead of creating shell-owned parallel state
+- mask state now includes explicit enable/disable behavior plus a document-owned active edit target (`LayerPixels` versus `LayerMask`) so later editing workflows can switch targets without introducing widget-owned source of truth
+- `.ptx` persistence now records the active edit target and per-layer mask metadata plus alpha tile payloads, giving the format a stable roundtrip representation before mask-aware flattening is introduced in `EW02`
+- regression coverage now exercises mask creation/removal, edit-target constraints, duplicate-layer mask cloning semantics, and project/manifest roundtrips for masked layers
+
 ### EW02 - Add mask persistence and flatten support
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: masks affect real output rather than shell-only previews
 - Includes:
   - mask-aware flattening in `file_io`
@@ -39,9 +45,15 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 - Done when:
   - masked documents save, reopen, and export without visual drift
 
+Progress notes:
+- `file_io` flattening and incremental region recomposition now apply enabled per-layer mask alpha before blend-mode composition, so masked layers affect both full exports and app-core cached viewport refreshes through the same source of truth
+- disabled masks are ignored during composition, while missing mask tiles default to fully visible content, matching the embedded-mask ownership model established in `EW01`
+- save/load and manifest roundtrip coverage now includes masked scenes whose flattened output must stay stable across `.ptx` persistence
+- controller-level parity coverage in `app_core` now verifies that a masked document produces identical viewport and exported composite pixels, which closes the release-blocking viewport-versus-export risk for this task
+
 ### EW03 - Add mask editing workflows
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: users can create and edit layer masks using the existing painting model
 - Includes:
   - add/delete/enable/disable mask commands
@@ -52,9 +64,15 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 - Done when:
   - a user can non-destructively hide and reveal content with a layer mask
 
+Progress notes:
+- `app_core` now owns explicit layer-mask commands for add, delete, enable, disable, and edit-target switching, which keeps mask workflow state document-driven instead of shell-owned while still exposing it through the shell controller surface.
+- `tool_system::BrushTool` now records whether a stroke touched layer pixels or layer-mask tiles, so mask hide and reveal strokes use the same undoable stroke model as normal paint and erase instead of a one-off controller path.
+- mask stroke routing respects layer offsets when computing touched tiles and dab placement, fixing brush and mask painting so moved layers still edit under the cursor rather than in pre-offset tile space.
+- controller-level regression coverage now exercises mask command snapshots plus mask hide/reveal interactions with undo and redo, while `tool_system` coverage protects mask tile history roundtrips directly.
+
 ### EW04 - Add shell support for masks
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: masks are usable in the layer workflow rather than only via internal APIs
 - Includes:
   - mask affordances in the layers/properties panels
@@ -64,9 +82,16 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 - Done when:
   - the shell clearly exposes whether the user is editing a layer or its mask
 
+Progress notes:
+- the `ui_shell` snapshot now exposes active edit-target state plus per-layer mask presence, enabled state, and whether the active layer is currently in mask-editing mode.
+- the Layer menu now surfaces add, delete, enable or disable, and edit-target actions for masks through controller commands instead of requiring internal APIs.
+- the Properties and Layers panels now show mask state directly and include quick actions for adding a mask, toggling it on or off, deleting it, and switching between editing layer pixels versus the mask.
+- shell status text now calls out mask-editing mode explicitly, including the current hide-versus-reveal behavior for brush and eraser so the active editing target stays visible during interaction.
+- the shell now gives each layer row explicit `L` and `M` target chips plus a dedicated mask-state banner in Properties, making mask edit mode and disabled-mask state visible without relying only on status text.
+
 ### EW05 - Define group node document structure
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: group support has a stable persistence and ordering model
 - Includes:
   - group node representation in `doc_model`
@@ -75,6 +100,12 @@ It covers masks, groups, lasso selection, transform upgrades, and guides/snappin
 - Depends on: none
 - Done when:
   - group structure exists headlessly and can be reasoned about independently of the shell
+
+Progress notes:
+- `doc_model` now owns a serializable headless layer hierarchy made of `LayerHierarchyNode` and `LayerGroup`, keeping group structure document-local instead of introducing shell-owned nesting metadata.
+- the initial group model uses dedicated group IDs, stored visibility, and stored opacity so structural group state can be defined before compositing semantics are wired into flattening and persistence.
+- hierarchy validation now enforces that every document layer is referenced exactly once and that group IDs are unique, which establishes clear parent-child constraints before controller and shell editing commands exist.
+- regression coverage now verifies group creation order and hierarchy validation, while existing flat-layer operations continue to rebuild the plain hierarchy when no groups are present so current editing workflows stay stable ahead of `EW06` and `EW07`.
 
 ### EW06 - Add group flatten, save, and load support
 

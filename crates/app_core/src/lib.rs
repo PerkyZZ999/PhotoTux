@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{CanvasRaster, CanvasRect};
-use doc_model::{BlendMode, Document};
+use doc_model::{BlendMode, Document, LayerEditTarget, RasterMask};
 use file_io::{
     export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
     import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
@@ -17,7 +17,7 @@ use file_io::{
 };
 use history_engine::HistoryStack;
 use tool_system::{
-    BrushSettings, BrushStrokeRecord, BrushTool, BrushToolMode, MoveLayerRecord,
+    BrushChange, BrushStrokeRecord, BrushSettings, BrushTool, BrushToolMode, MoveLayerRecord,
     RectangularMarqueeTool, RectangularSelectionRecord, SimpleTransformTool, LayerTransformRecord,
 };
 use ui_shell::{LayerPanelItem, ShellController, ShellSnapshot, ShellToolKind};
@@ -38,6 +38,7 @@ struct PhotoTuxController {
     document_title: String,
     document_path: Option<PathBuf>,
     recovery_path: Option<PathBuf>,
+    recovery_offer_pending: bool,
     working_directory: PathBuf,
     next_layer_number: usize,
     active_tool: ShellToolKind,
@@ -99,6 +100,45 @@ enum EditorOperation {
     TransformLayer(LayerTransformRecord),
     MoveLayer(MoveLayerRecord),
     Selection(RectangularSelectionRecord),
+    MaskState(MaskStateRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaskStateRecord {
+    layer_id: common::LayerId,
+    before_mask: Option<RasterMask>,
+    after_mask: Option<RasterMask>,
+    before_target: LayerEditTarget,
+    after_target: LayerEditTarget,
+}
+
+impl MaskStateRecord {
+    fn undo(&self, document: &mut Document) {
+        Self::apply_state(document, self.layer_id, self.before_mask.clone(), self.before_target);
+    }
+
+    fn redo(&self, document: &mut Document) {
+        Self::apply_state(document, self.layer_id, self.after_mask.clone(), self.after_target);
+    }
+
+    fn apply_state(
+        document: &mut Document,
+        layer_id: common::LayerId,
+        mask: Option<RasterMask>,
+        target: LayerEditTarget,
+    ) {
+        let Some(layer_index) = document.layer_index_by_id(layer_id) else {
+            return;
+        };
+        if let Some(layer) = document.layer_mut(layer_index) {
+            layer.mask = mask;
+            if let Some(mask) = layer.mask.as_mut() {
+                mask.dirty_tiles = mask.tiles.keys().copied().collect();
+            }
+        }
+        let _ = document.set_active_layer(layer_index);
+        let _ = document.set_active_edit_target(target);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +506,7 @@ impl PhotoTuxController {
             document_title: "untitled.ptx".to_string(),
             document_path: None,
             recovery_path: None,
+            recovery_offer_pending: false,
             working_directory,
             next_layer_number: 4,
             active_tool: ShellToolKind::Brush,
@@ -484,7 +525,11 @@ impl PhotoTuxController {
             interaction: None,
         };
         controller.refresh_recovery_path();
-        // controller.enqueue_recovery_load_if_present(); // Disabled by user request
+        controller.recovery_offer_pending = controller
+            .recovery_path
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         controller
     }
 
@@ -530,17 +575,18 @@ impl PhotoTuxController {
     ) -> Option<BrushStrokeRecord> {
         let layer_index = self.document.active_layer_index();
         let settings = self.current_brush_settings(mode);
+        let target = self.document.active_edit_target();
         
         if self.cached_canvas_raster.is_none() {
             self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
         }
 
-        let record = BrushTool::apply_stroke(&mut self.document, layer_index, points, settings, mode)?;
+        let record = BrushTool::apply_stroke(&mut self.document, layer_index, points, settings, mode, target)?;
         
         if let Some(ref mut cached) = self.cached_canvas_raster {
             let layer = &self.document.layers[layer_index];
             for change in &record.changes {
-                let (tx, ty) = self.document.tile_origin(change.coord);
+                let (tx, ty) = self.document.tile_origin(change.coord());
                 let rect = common::CanvasRect {
                     x: tx as i32 + layer.offset_x,
                     y: ty as i32 + layer.offset_y,
@@ -562,13 +608,55 @@ impl PhotoTuxController {
             if let Some(existing) = aggregate
                 .changes
                 .iter_mut()
-                .find(|existing| existing.layer_id == change.layer_id && existing.coord == change.coord)
+                .find(|existing| existing.layer_id() == change.layer_id() && existing.coord() == change.coord())
             {
-                existing.after = change.after;
+                match (existing, change) {
+                    (
+                        BrushChange::Pixels { after, .. },
+                        BrushChange::Pixels { after: next_after, .. },
+                    ) => {
+                        *after = next_after;
+                    }
+                    (
+                        BrushChange::Mask { after, .. },
+                        BrushChange::Mask { after: next_after, .. },
+                    ) => {
+                        *after = next_after;
+                    }
+                    (_, change) => aggregate.changes.push(change),
+                }
             } else {
                 aggregate.changes.push(change);
             }
         }
+    }
+
+    fn active_edit_target_name(&self) -> &'static str {
+        match self.document.active_edit_target() {
+            LayerEditTarget::LayerPixels => "Layer Pixels",
+            LayerEditTarget::LayerMask => "Layer Mask",
+        }
+    }
+
+    fn push_mask_state_operation(
+        &mut self,
+        label: impl Into<String>,
+        layer_id: common::LayerId,
+        before_mask: Option<RasterMask>,
+        after_mask: Option<RasterMask>,
+        before_target: LayerEditTarget,
+        after_target: LayerEditTarget,
+    ) {
+        self.push_operation(
+            label,
+            EditorOperation::MaskState(MaskStateRecord {
+                layer_id,
+                before_mask,
+                after_mask,
+                before_target,
+                after_target,
+            }),
+        );
     }
 
     fn layer_items(&self) -> Vec<LayerPanelItem> {
@@ -582,6 +670,10 @@ impl PhotoTuxController {
                 name: layer.name.clone(),
                 visible: layer.visible,
                 opacity_percent: layer.opacity_percent,
+                has_mask: layer.mask.is_some(),
+                mask_enabled: layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
+                mask_target_active: index == self.document.active_layer_index()
+                    && self.document.active_edit_target() == LayerEditTarget::LayerMask,
                 is_active: index == self.document.active_layer_index(),
             })
             .collect()
@@ -707,6 +799,7 @@ impl PhotoTuxController {
         self.interaction = None;
         self.active_tool = ShellToolKind::Brush;
         self.refresh_recovery_path();
+        self.recovery_offer_pending = false;
         self.dirty_since_primary_save = dirty_since_primary_save;
         self.dirty_since_autosave = dirty_since_autosave;
         self.last_change_at = last_change_at;
@@ -769,6 +862,7 @@ impl PhotoTuxController {
                             self.document_title = file_name.to_string();
                         }
                         self.refresh_recovery_path();
+                        self.recovery_offer_pending = false;
                         self.dirty_since_primary_save = false;
                         self.dirty_since_autosave = false;
                         self.last_change_at = None;
@@ -805,6 +899,7 @@ impl PhotoTuxController {
             } => {
                 if self.pending_recovery_load_job == Some(job_id) {
                     self.pending_recovery_load_job = None;
+                    self.recovery_offer_pending = false;
                     self.document = document;
                     self.document_path = document_path;
                     self.document_title = document_title;
@@ -824,6 +919,7 @@ impl PhotoTuxController {
             } => {
                 if self.pending_recovery_load_job == Some(job_id) {
                     self.pending_recovery_load_job = None;
+                    self.recovery_offer_pending = false;
                     tracing::error!(%error, path = %recovery_path.display(), "recovery load failed");
                     self.status_message = format!("Recovery load failed: {}", error);
                 }
@@ -1055,6 +1151,8 @@ impl ShellController for PhotoTuxController {
             document_title: self.document_title.clone(),
             project_path: self.document_path.clone(),
             dirty: self.dirty_since_primary_save,
+            recovery_offer_pending: self.recovery_offer_pending,
+            recovery_path: self.recovery_path.clone(),
             status_message: self.status_message.clone(),
             canvas_size: self.document.canvas_size,
             canvas_revision: self.canvas_revision,
@@ -1065,6 +1163,9 @@ impl ShellController for PhotoTuxController {
             active_layer_opacity_percent: active_layer.opacity_percent,
             active_layer_visible: active_layer.visible,
             active_layer_blend_mode: format!("{:?}", active_layer.blend_mode),
+            active_layer_has_mask: active_layer.mask.is_some(),
+            active_layer_mask_enabled: active_layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
+            active_edit_target_name: self.active_edit_target_name().to_string(),
             active_layer_bounds: self.active_layer_bounds(),
             transform_preview_rect: self.transform_preview_rect(),
             transform_active: self.transform_session.is_some(),
@@ -1133,6 +1234,99 @@ impl ShellController for PhotoTuxController {
             self.bump_canvas_revision();
             self.mark_document_dirty();
             self.push_history(format!("Delete Layer {}", active_name));
+        }
+    }
+
+    fn add_active_layer_mask(&mut self) {
+        let layer_index = self.document.active_layer_index();
+        let layer_id = self.document.active_layer().id;
+        let before_target = self.document.active_edit_target();
+        let before_mask = self.document.layer_mask(layer_index).cloned();
+        if !self.document.add_layer_mask(layer_index) {
+            return;
+        }
+        let _ = self.document.set_active_edit_target(LayerEditTarget::LayerMask);
+        let after_target = self.document.active_edit_target();
+        let after_mask = self.document.layer_mask(layer_index).cloned();
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_mask_state_operation(
+            format!("Add Layer Mask {}", self.active_layer_name()),
+            layer_id,
+            before_mask,
+            after_mask,
+            before_target,
+            after_target,
+        );
+    }
+
+    fn remove_active_layer_mask(&mut self) {
+        let layer_index = self.document.active_layer_index();
+        let layer_id = self.document.active_layer().id;
+        let before_target = self.document.active_edit_target();
+        let before_mask = self.document.layer_mask(layer_index).cloned();
+        if !self.document.remove_layer_mask(layer_index) {
+            return;
+        }
+        let after_target = self.document.active_edit_target();
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_mask_state_operation(
+            format!("Delete Layer Mask {}", self.active_layer_name()),
+            layer_id,
+            before_mask,
+            None,
+            before_target,
+            after_target,
+        );
+    }
+
+    fn toggle_active_layer_mask_enabled(&mut self) {
+        let layer_index = self.document.active_layer_index();
+        let layer_id = self.document.active_layer().id;
+        let Some(mask) = self.document.layer_mask(layer_index) else {
+            return;
+        };
+        let before_mask = Some(mask.clone());
+        let enabled = !mask.enabled;
+        let before_target = self.document.active_edit_target();
+        if !self.document.set_layer_mask_enabled(layer_index, enabled) {
+            return;
+        }
+        let after_mask = self.document.layer_mask(layer_index).cloned();
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_mask_state_operation(
+            format!(
+                "{} Layer Mask {}",
+                if enabled { "Enable" } else { "Disable" },
+                self.active_layer_name()
+            ),
+            layer_id,
+            before_mask,
+            after_mask,
+            before_target,
+            before_target,
+        );
+    }
+
+    fn edit_active_layer_pixels(&mut self) {
+        if self.document.active_edit_target() == LayerEditTarget::LayerPixels {
+            return;
+        }
+        if self.document.set_active_edit_target(LayerEditTarget::LayerPixels) {
+            self.mark_document_dirty();
+            self.status_message = format!("Editing layer pixels for {}", self.active_layer_name());
+        }
+    }
+
+    fn edit_active_layer_mask(&mut self) {
+        if self.document.active_edit_target() == LayerEditTarget::LayerMask {
+            return;
+        }
+        if self.document.set_active_edit_target(LayerEditTarget::LayerMask) {
+            self.mark_document_dirty();
+            self.status_message = format!("Editing layer mask for {}", self.active_layer_name());
         }
     }
 
@@ -1312,6 +1506,11 @@ impl ShellController for PhotoTuxController {
                     record.undo(&mut self.document);
                     self.mark_document_dirty();
                 }
+                EditorOperation::MaskState(record) => {
+                    record.undo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
             }
         }
     }
@@ -1342,6 +1541,11 @@ impl ShellController for PhotoTuxController {
                     record.redo(&mut self.document);
                     self.mark_document_dirty();
                 }
+                EditorOperation::MaskState(record) => {
+                    record.redo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
             }
         }
     }
@@ -1370,6 +1574,55 @@ impl ShellController for PhotoTuxController {
         }
 
         self.enqueue_primary_save(path);
+    }
+
+    fn load_recovery_document(&mut self) {
+        let Some(recovery_path) = self.recovery_path.clone() else {
+            self.recovery_offer_pending = false;
+            self.status_message = "No recovery file available".to_string();
+            return;
+        };
+
+        if self.pending_recovery_load_job.is_some() {
+            return;
+        }
+
+        if !recovery_path.exists() {
+            self.recovery_offer_pending = false;
+            self.status_message = "Recovery file no longer exists".to_string();
+            return;
+        }
+
+        self.recovery_offer_pending = false;
+        self.status_message = format!("Loading recovery from {}", recovery_path.display());
+        let document_path = self.document_path.clone();
+        let document_title = self.document_title.clone();
+        self.pending_recovery_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::LoadRecovery {
+                job_id,
+                recovery_path,
+                document_path,
+                document_title,
+            }
+        }));
+    }
+
+    fn discard_recovery_document(&mut self) {
+        self.recovery_offer_pending = false;
+
+        let Some(recovery_path) = self.recovery_path.clone() else {
+            return;
+        };
+
+        match remove_file_if_exists(&recovery_path) {
+            Ok(()) => {
+                self.status_message = format!("Discarded recovery file {}", recovery_path.display());
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %recovery_path.display(), "failed to discard recovery file");
+                self.status_message = format!("Failed to discard recovery file: {}", error);
+            }
+        }
     }
 
     fn open_document(&mut self, path: PathBuf) {
@@ -1675,9 +1928,11 @@ impl ShellController for PhotoTuxController {
             }
             Some(CanvasInteraction::Brush { mode, aggregate, .. }) => {
                 if let Some(record) = aggregate {
-                    let label = match mode {
-                        BrushToolMode::Paint => "Brush Stroke",
-                        BrushToolMode::Erase => "Erase Stroke",
+                    let label = match (record.target, mode) {
+                        (LayerEditTarget::LayerPixels, BrushToolMode::Paint) => "Brush Stroke",
+                        (LayerEditTarget::LayerPixels, BrushToolMode::Erase) => "Erase Stroke",
+                        (LayerEditTarget::LayerMask, BrushToolMode::Paint) => "Mask Hide Stroke",
+                        (LayerEditTarget::LayerMask, BrushToolMode::Erase) => "Mask Reveal Stroke",
                     };
                     self.push_operation(label, EditorOperation::BrushStroke(record));
                 }
@@ -1715,6 +1970,33 @@ mod tests {
         tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&rgba);
     }
 
+    fn set_mask_alpha(document: &mut doc_model::Document, layer_index: usize, x: u32, y: u32, alpha: u8) {
+        let tile_size = document.tile_size as usize;
+        let tile_size_u32 = document.tile_size;
+        let coord = document
+            .tile_coord_for_pixel(x, y)
+            .expect("mask pixel should lie inside representative controller scene");
+        let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+        let local_x = (x - tile_origin_x) as usize;
+        let local_y = (y - tile_origin_y) as usize;
+        let pixel_index = local_y * tile_size + local_x;
+        let mask = document
+            .layer_mask_mut(layer_index)
+            .expect("mask should exist for masked controller scene");
+        let tile = mask.ensure_tile(coord, tile_size_u32);
+        tile.alpha[pixel_index] = alpha;
+    }
+
+    fn flattened_pixel(raster: &common::CanvasRaster, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * raster.size.width + x) * 4) as usize;
+        [
+            raster.pixels[index],
+            raster.pixels[index + 1],
+            raster.pixels[index + 2],
+            raster.pixels[index + 3],
+        ]
+    }
+
     fn build_representative_controller_document() -> doc_model::Document {
         let mut document = doc_model::Document::new(64, 64);
         document.rename_layer(0, "Background");
@@ -1741,6 +2023,27 @@ mod tests {
         for y in 4..18 {
             for x in 24..40 {
                 set_pixel(&mut document, lighten_index, x, y, [80, 220, 200, 255]);
+            }
+        }
+
+        document
+    }
+
+    fn build_masked_controller_document() -> doc_model::Document {
+        let mut document = build_representative_controller_document();
+        let masked_index = document.active_layer_index();
+        assert!(document.add_layer_mask(masked_index));
+
+        for y in 4..18 {
+            for x in 24..40 {
+                let alpha = if x < 30 {
+                    0
+                } else if x < 35 {
+                    128
+                } else {
+                    255
+                };
+                set_mask_alpha(&mut document, masked_index, x, y, alpha);
             }
         }
 
@@ -1889,6 +2192,17 @@ mod tests {
     }
 
     #[test]
+    fn canvas_raster_matches_flattened_document_for_masked_scene() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_masked_controller_document();
+
+        let viewport_pixels = controller.canvas_raster().pixels;
+        let exported_pixels = flatten_document_rgba(&controller.document);
+
+        assert_eq!(viewport_pixels, exported_pixels);
+    }
+
+    #[test]
     fn save_does_not_block_undo_of_previous_edit() {
         let working_directory = std::env::temp_dir().join(format!("phototux-save-undo-{}", std::process::id()));
         fs::create_dir_all(&working_directory).expect("temporary save+undo directory should exist");
@@ -1937,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_load_replaces_document_state() {
+    fn startup_recovery_offer_requires_explicit_load() {
         let working_directory = std::env::temp_dir().join(format!("phototux-recovery-{}", std::process::id()));
         fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
 
@@ -1949,12 +2263,44 @@ mod tests {
         let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
         wait_for_background_jobs(&mut controller);
 
+        assert!(controller.recovery_offer_pending);
+        assert_eq!(controller.document.canvas_size.width, 1920);
+        assert_eq!(controller.document.canvas_size.height, 1080);
+
+        controller.load_recovery_document();
+        wait_for_background_jobs(&mut controller);
+
         assert_eq!(controller.document.canvas_size.width, 320);
         assert_eq!(controller.document.canvas_size.height, 240);
         assert_eq!(controller.document.layers.len(), 2);
+        assert!(!controller.recovery_offer_pending);
         assert!(controller.snapshot().history_entries.iter().any(|entry| entry.contains("Recovered Autosave")));
 
         fs::remove_file(&recovery_path).expect("recovery file should be removed");
+        fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
+    }
+
+    #[test]
+    fn discard_recovery_offer_removes_recovery_file() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-recovery-discard-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
+
+        let mut recovered_document = doc_model::Document::new(320, 240);
+        recovered_document.add_layer("Recovered Layer");
+        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        save_document_to_path(&recovery_path, &recovered_document).expect("recovery document should save");
+
+        let mut controller = PhotoTuxController::new_with_working_directory(working_directory.clone());
+        wait_for_background_jobs(&mut controller);
+
+        assert!(controller.recovery_offer_pending);
+        assert!(recovery_path.exists());
+
+        controller.discard_recovery_document();
+
+        assert!(!controller.recovery_offer_pending);
+        assert!(!recovery_path.exists());
+
         fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
     }
 
@@ -2065,6 +2411,62 @@ mod tests {
             .history_entries
             .iter()
             .any(|entry| entry.contains("Brush Stroke")));
+    }
+
+    #[test]
+    fn mask_commands_update_snapshot_and_history() {
+        let mut controller = PhotoTuxController::new();
+        assert!(!controller.snapshot().active_layer_has_mask);
+
+        controller.add_active_layer_mask();
+        let with_mask = controller.snapshot();
+        assert!(with_mask.active_layer_has_mask);
+        assert!(with_mask.active_layer_mask_enabled);
+        assert_eq!(with_mask.active_edit_target_name, "Layer Mask");
+        assert!(with_mask
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Add Layer Mask")));
+
+        controller.toggle_active_layer_mask_enabled();
+        assert!(!controller.snapshot().active_layer_mask_enabled);
+
+        controller.edit_active_layer_pixels();
+        assert_eq!(controller.snapshot().active_edit_target_name, "Layer Pixels");
+
+        controller.remove_active_layer_mask();
+        assert!(!controller.snapshot().active_layer_has_mask);
+    }
+
+    #[test]
+    fn mask_brush_interaction_updates_canvas_and_undo_redo() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_masked_controller_document();
+        controller.edit_active_layer_mask();
+        let sample_x = 44;
+        let sample_y = 16;
+        let before = controller.canvas_raster();
+        let before_pixel = flattened_pixel(&before, sample_x, sample_y);
+
+        controller.select_tool(ShellToolKind::Brush);
+        controller.begin_canvas_interaction(sample_x as i32, sample_y as i32);
+        controller.update_canvas_interaction(sample_x as i32 + 4, sample_y as i32 + 2);
+        controller.end_canvas_interaction();
+
+        let hidden = controller.canvas_raster();
+        let hidden_pixel = flattened_pixel(&hidden, sample_x, sample_y);
+        assert_ne!(hidden_pixel, before_pixel);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Mask Hide Stroke")));
+
+        controller.undo();
+        assert_eq!(flattened_pixel(&controller.canvas_raster(), sample_x, sample_y), before_pixel);
+
+        controller.redo();
+        assert_eq!(flattened_pixel(&controller.canvas_raster(), sample_x, sample_y), hidden_pixel);
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use common::{CanvasRect, LayerId};
-use doc_model::{Document, LayerStateSnapshot, RasterTile, RectSelection, TileCoord};
-use image_ops::{apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped, BrushDab};
+use doc_model::{Document, LayerEditTarget, LayerStateSnapshot, MaskTile, RasterTile, RectSelection, TileCoord};
+use image_ops::{
+    apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped,
+    apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped, BrushDab,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,18 +38,27 @@ impl BrushSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileChange {
-    pub layer_id: LayerId,
-    pub coord: TileCoord,
-    pub before: Option<RasterTile>,
-    pub after: Option<RasterTile>,
+pub enum BrushChange {
+    Pixels {
+        layer_id: LayerId,
+        coord: TileCoord,
+        before: Option<RasterTile>,
+        after: Option<RasterTile>,
+    },
+    Mask {
+        layer_id: LayerId,
+        coord: TileCoord,
+        before: Option<MaskTile>,
+        after: Option<MaskTile>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrushStrokeRecord {
     pub layer_id: LayerId,
+    pub target: LayerEditTarget,
     pub dab_count: usize,
-    pub changes: Vec<TileChange>,
+    pub changes: Vec<BrushChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,13 +92,61 @@ impl MoveLayerRecord {
 impl BrushStrokeRecord {
     pub fn undo(&self, document: &mut Document) {
         for change in &self.changes {
-            let _ = document.apply_tile_snapshot(change.layer_id, change.coord, change.before.clone());
+            match change {
+                BrushChange::Pixels {
+                    layer_id,
+                    coord,
+                    before,
+                    ..
+                } => {
+                    let _ = document.apply_tile_snapshot(*layer_id, *coord, before.clone());
+                }
+                BrushChange::Mask {
+                    layer_id,
+                    coord,
+                    before,
+                    ..
+                } => {
+                    let _ = document.apply_mask_tile_snapshot(*layer_id, *coord, before.clone());
+                }
+            }
         }
     }
 
     pub fn redo(&self, document: &mut Document) {
         for change in &self.changes {
-            let _ = document.apply_tile_snapshot(change.layer_id, change.coord, change.after.clone());
+            match change {
+                BrushChange::Pixels {
+                    layer_id,
+                    coord,
+                    after,
+                    ..
+                } => {
+                    let _ = document.apply_tile_snapshot(*layer_id, *coord, after.clone());
+                }
+                BrushChange::Mask {
+                    layer_id,
+                    coord,
+                    after,
+                    ..
+                } => {
+                    let _ = document.apply_mask_tile_snapshot(*layer_id, *coord, after.clone());
+                }
+            }
+        }
+    }
+}
+
+impl BrushChange {
+    pub fn layer_id(&self) -> LayerId {
+        match self {
+            Self::Pixels { layer_id, .. } | Self::Mask { layer_id, .. } => *layer_id,
+        }
+    }
+
+    pub fn coord(&self) -> TileCoord {
+        match self {
+            Self::Pixels { coord, .. } | Self::Mask { coord, .. } => *coord,
         }
     }
 }
@@ -113,76 +173,159 @@ impl BrushTool {
         points: &[(f32, f32)],
         settings: BrushSettings,
         mode: BrushToolMode,
+        target: LayerEditTarget,
     ) -> Option<BrushStrokeRecord> {
         if points.is_empty() || settings.radius <= 0.0 {
             return None;
         }
 
         let layer_id = document.layer(layer_index)?.id;
+    let (layer_offset_x, layer_offset_y) = document.layer_offset(layer_index)?;
         let tile_size = document.tile_size;
         let dab = settings.to_dab();
         let dab_positions = interpolate_dab_positions(points, settings.spacing.max(1.0));
         let clip_rect = document.selection();
         let clip_inverted = document.selection_inverted();
-        let mut changes = Vec::<TileChange>::new();
+        let mut changes = Vec::<BrushChange>::new();
 
         for &(dab_x, dab_y) in &dab_positions {
-            let touched_coords = document.tile_coords_in_radius(dab_x, dab_y, settings.radius);
+            let local_dab_x = dab_x - layer_offset_x as f32;
+            let local_dab_y = dab_y - layer_offset_y as f32;
+            let touched_coords = document.tile_coords_in_radius(local_dab_x, local_dab_y, settings.radius);
 
             for coord in touched_coords {
-                if changes.iter().all(|change| !(change.layer_id == layer_id && change.coord == coord)) {
-                    changes.push(TileChange {
-                        layer_id,
-                        coord,
-                        before: document.tile_snapshot(layer_index, coord),
-                        after: None,
-                    });
-                }
-
                 let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
-                let changed = {
-                    let tile = document.layer_mut(layer_index)?.ensure_tile(coord, tile_size);
-                    match mode {
-                        BrushToolMode::Paint => apply_round_brush_dab_clipped(
-                            &mut tile.pixels,
-                            tile_size,
-                            tile_origin_x,
-                            tile_origin_y,
-                            dab_x,
-                            dab_y,
-                            dab,
-                            clip_rect,
-                            clip_inverted,
-                        ),
-                        BrushToolMode::Erase => apply_round_eraser_dab_clipped(
-                            &mut tile.pixels,
-                            tile_size,
-                            tile_origin_x,
-                            tile_origin_y,
-                            dab_x,
-                            dab_y,
-                            dab,
-                            clip_rect,
-                            clip_inverted,
-                        ),
-                    }
-                };
+                let canvas_tile_origin_x = tile_origin_x as i32 + layer_offset_x;
+                let canvas_tile_origin_y = tile_origin_y as i32 + layer_offset_y;
+                match target {
+                    LayerEditTarget::LayerPixels => {
+                        if changes
+                            .iter()
+                            .all(|change| !(change.layer_id() == layer_id && change.coord() == coord))
+                        {
+                            changes.push(BrushChange::Pixels {
+                                layer_id,
+                                coord,
+                                before: document.tile_snapshot(layer_index, coord),
+                                after: None,
+                            });
+                        }
 
-                if !changed {
-                    if document.layer(layer_index)?.tiles.get(&coord).is_some_and(|tile| tile.pixels.iter().all(|value| *value == 0))
-                    {
-                        document.layer_mut(layer_index)?.tiles.remove(&coord);
+                        let changed = {
+                            let tile = document.layer_mut(layer_index)?.ensure_tile(coord, tile_size);
+                            match mode {
+                                BrushToolMode::Paint => apply_round_brush_dab_clipped(
+                                    &mut tile.pixels,
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    dab_x,
+                                    dab_y,
+                                    dab,
+                                    clip_rect,
+                                    clip_inverted,
+                                ),
+                                BrushToolMode::Erase => apply_round_eraser_dab_clipped(
+                                    &mut tile.pixels,
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    dab_x,
+                                    dab_y,
+                                    dab,
+                                    clip_rect,
+                                    clip_inverted,
+                                ),
+                            }
+                        };
+
+                        if !changed
+                            && document.layer(layer_index)?.tiles.get(&coord).is_some_and(|tile| {
+                                tile.pixels.iter().all(|value| *value == 0)
+                            })
+                        {
+                            document.layer_mut(layer_index)?.tiles.remove(&coord);
+                        }
                     }
-                    continue;
+                    LayerEditTarget::LayerMask => {
+                        if document.layer_mask(layer_index).is_none() {
+                            continue;
+                        }
+
+                        if changes
+                            .iter()
+                            .all(|change| !(change.layer_id() == layer_id && change.coord() == coord))
+                        {
+                            changes.push(BrushChange::Mask {
+                                layer_id,
+                                coord,
+                                before: document.mask_tile_snapshot(layer_index, coord),
+                                after: None,
+                            });
+                        }
+
+                        let changed = {
+                            let tile = document.ensure_mask_tile_for_pixel(
+                                layer_index,
+                                coord.x * tile_size,
+                                coord.y * tile_size,
+                            )?;
+                            match mode {
+                                BrushToolMode::Paint => apply_round_mask_hide_dab_clipped(
+                                    &mut tile.alpha,
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    dab_x,
+                                    dab_y,
+                                    dab,
+                                    clip_rect,
+                                    clip_inverted,
+                                ),
+                                BrushToolMode::Erase => apply_round_mask_reveal_dab_clipped(
+                                    &mut tile.alpha,
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    dab_x,
+                                    dab_y,
+                                    dab,
+                                    clip_rect,
+                                    clip_inverted,
+                                ),
+                            }
+                        };
+
+                        if document
+                            .mask_tile_snapshot(layer_index, coord)
+                            .is_some_and(|tile| tile.alpha.iter().all(|value| *value == 255))
+                        {
+                            let _ = document.apply_mask_tile_snapshot(layer_id, coord, None);
+                        }
+
+                        if !changed {
+                            continue;
+                        }
+                    }
                 }
             }
         }
 
         changes.retain(|change| {
             let after = document
-                .layer_index_by_id(change.layer_id)
-                .and_then(|idx| document.tile_snapshot(idx, change.coord));
-            change.before != after
+                .layer_index_by_id(change.layer_id())
+                .and_then(|idx| match change {
+                    BrushChange::Pixels { coord, .. } => document.tile_snapshot(idx, *coord).map(BrushChangeSnapshot::Pixels),
+                    BrushChange::Mask { coord, .. } => document.mask_tile_snapshot(idx, *coord).map(BrushChangeSnapshot::Mask),
+                });
+
+            match (change, after) {
+                (BrushChange::Pixels { before, .. }, Some(BrushChangeSnapshot::Pixels(after))) => *before != Some(after),
+                (BrushChange::Pixels { before, .. }, None) => before.is_some(),
+                (BrushChange::Mask { before, .. }, Some(BrushChangeSnapshot::Mask(after))) => *before != Some(after),
+                (BrushChange::Mask { before, .. }, None) => before.is_some(),
+                _ => false,
+            }
         });
 
         if changes.is_empty() {
@@ -190,18 +333,31 @@ impl BrushTool {
         }
 
         for change in &mut changes {
-            let Some(layer_index) = document.layer_index_by_id(change.layer_id) else {
+            let Some(layer_index) = document.layer_index_by_id(change.layer_id()) else {
                 continue;
             };
-            change.after = document.tile_snapshot(layer_index, change.coord);
+            match change {
+                BrushChange::Pixels { coord, after, .. } => {
+                    *after = document.tile_snapshot(layer_index, *coord);
+                }
+                BrushChange::Mask { coord, after, .. } => {
+                    *after = document.mask_tile_snapshot(layer_index, *coord);
+                }
+            }
         }
 
         Some(BrushStrokeRecord {
             layer_id,
+            target,
             dab_count: dab_positions.len(),
             changes,
         })
     }
+}
+
+enum BrushChangeSnapshot {
+    Pixels(RasterTile),
+    Mask(MaskTile),
 }
 
 impl MoveTool {
@@ -481,6 +637,7 @@ fn layer_state_from_pixels(
         offset_x,
         offset_y,
         tiles,
+        mask: None,
     }
 }
 
@@ -515,7 +672,7 @@ mod tests {
         SimpleTransformTool,
     };
     use common::CanvasRect;
-    use doc_model::{Document, TileCoord};
+    use doc_model::{Document, LayerEditTarget, TileCoord};
     use history_engine::HistoryStack;
 
     fn brush_settings() -> BrushSettings {
@@ -554,6 +711,7 @@ mod tests {
             &[(10.0, 10.0), (30.0, 10.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("stroke should produce a history record");
 
@@ -572,6 +730,7 @@ mod tests {
             &[(40.0, 40.0), (80.0, 40.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("stroke should modify the layer");
 
@@ -592,6 +751,7 @@ mod tests {
             &[(64.0, 64.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("paint stroke should apply");
 
@@ -617,6 +777,7 @@ mod tests {
             &[(64.0, 64.0)],
             brush_settings(),
             BrushToolMode::Erase,
+            LayerEditTarget::LayerPixels,
         )
         .expect("eraser stroke should apply");
 
@@ -641,6 +802,7 @@ mod tests {
             &[(24.0, 24.0), (72.0, 24.0), (96.0, 48.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("stroke should create a history record");
 
@@ -718,6 +880,7 @@ mod tests {
             &[(64.0, 64.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("selected brush stroke should produce a record");
 
@@ -736,6 +899,7 @@ mod tests {
             &[(64.0, 64.0)],
             brush_settings(),
             BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
         )
         .expect("paint stroke should apply");
         document.set_selection(CanvasRect::new(60, 56, 16, 16));
@@ -747,11 +911,70 @@ mod tests {
             &[(64.0, 64.0)],
             brush_settings(),
             BrushToolMode::Erase,
+            LayerEditTarget::LayerPixels,
         )
         .expect("inverted eraser stroke should apply");
 
         let center_alpha = pixel_alpha(&document, 0, 64, 64);
         assert_eq!(center_alpha, 255);
+    }
+
+    #[test]
+    fn mask_stroke_updates_alpha_and_roundtrips_through_history() {
+        let mut document = Document::new(128, 128);
+        assert!(document.add_layer_mask(0));
+
+        let hide = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(32.0, 32.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerMask,
+        )
+        .expect("mask hide stroke should create a record");
+
+        assert_eq!(hide.target, LayerEditTarget::LayerMask);
+        let coord = document.tile_coord_for_pixel(32, 32).expect("mask stroke should map to tile");
+        let tile = document
+            .layer_mask(0)
+            .expect("mask exists")
+            .tiles
+            .get(&coord)
+            .expect("mask tile exists");
+        let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+        let local_x = (32 - tile_origin_x) as usize;
+        let local_y = (32 - tile_origin_y) as usize;
+        let mask_index = local_y * document.tile_size as usize + local_x;
+        assert!(tile.alpha[mask_index] < 255);
+
+        hide.undo(&mut document);
+        assert!(document.layer_mask(0).expect("mask exists").tiles.is_empty());
+
+        hide.redo(&mut document);
+        assert!(!document.layer_mask(0).expect("mask exists").tiles.is_empty());
+
+        let reveal = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(32.0, 32.0)],
+            brush_settings(),
+            BrushToolMode::Erase,
+            LayerEditTarget::LayerMask,
+        )
+        .expect("mask reveal stroke should create a record");
+
+        reveal.undo(&mut document);
+        assert!(!document.layer_mask(0).expect("mask exists").tiles.is_empty());
+
+        reveal.redo(&mut document);
+        let revealed_tile = document
+            .layer_mask(0)
+            .expect("mask exists")
+            .tiles
+            .get(&coord)
+            .expect("mask tile exists after reveal");
+        assert_eq!(revealed_tile.alpha[mask_index], 255);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use anyhow::Context;
 use color_math::{blend_rgba_over, BlendModeMath};
 use common::{CanvasSize, LayerId};
-use doc_model::{BlendMode, Document, RasterLayer, RasterTile, TileCoord};
+use doc_model::{
+	BlendMode, Document, LayerEditTarget, LayerHierarchyNode, MaskTile, RasterLayer, RasterTile,
+	TileCoord,
+};
 use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -30,6 +33,7 @@ pub fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
 pub struct ProjectManifest {
 	pub format_version: u32,
 	pub canvas_size: CanvasSize,
+	pub active_edit_target: LayerEditTarget,
 	pub layers: Vec<ManifestLayerRecord>,
 }
 
@@ -44,15 +48,21 @@ impl From<&Document> for ProjectManifest {
 				visible: layer.visible,
 				opacity_percent: layer.opacity_percent,
 				blend_mode: layer.blend_mode,
+				mask_enabled: layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
 				offset_x: layer.offset_x,
 				offset_y: layer.offset_y,
 				payload_path: format!("layers/{}.png", layer.id.0),
+				mask_payload_path: layer
+					.mask
+					.as_ref()
+					.map(|_| format!("masks/{}.alpha", layer.id.0)),
 			})
 			.collect();
 
 		Self {
 			format_version: CURRENT_PROJECT_FORMAT_VERSION,
 			canvas_size: document.canvas_size,
+			active_edit_target: document.active_edit_target,
 			layers,
 		}
 	}
@@ -65,9 +75,11 @@ pub struct ManifestLayerRecord {
 	pub visible: bool,
 	pub opacity_percent: u8,
 	pub blend_mode: BlendMode,
+	pub mask_enabled: bool,
 	pub offset_x: i32,
 	pub offset_y: i32,
 	pub payload_path: String,
+	pub mask_payload_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,12 +92,19 @@ pub struct ProjectFile {
 pub struct LayerPayload {
 	pub id: LayerId,
 	pub tiles: Vec<TilePayload>,
+	pub mask_tiles: Option<Vec<MaskTilePayload>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TilePayload {
 	pub coord: TileCoord,
 	pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaskTilePayload {
+	pub coord: TileCoord,
+	pub alpha: Vec<u8>,
 }
 
 impl From<&Document> for ProjectFile {
@@ -103,6 +122,16 @@ impl From<&Document> for ProjectFile {
 						pixels: tile.pixels.clone(),
 					})
 					.collect(),
+				mask_tiles: layer.mask.as_ref().map(|mask| {
+					mask
+						.tiles
+						.iter()
+						.map(|(coord, tile)| MaskTilePayload {
+							coord: *coord,
+							alpha: tile.alpha.clone(),
+						})
+						.collect()
+				}),
 			})
 			.collect();
 
@@ -140,12 +169,28 @@ impl TryFrom<ProjectFile> for Document {
 				});
 			}
 
+			let mask = payload.mask_tiles.as_ref().map(|mask_tiles| {
+				let mut tiles = std::collections::HashMap::new();
+				for tile in mask_tiles {
+					tiles.insert(tile.coord, MaskTile {
+						alpha: tile.alpha.clone(),
+					});
+				}
+
+				doc_model::RasterMask {
+					enabled: manifest_layer.mask_enabled,
+					tiles,
+					dirty_tiles: std::collections::HashSet::new(),
+				}
+			});
+
 			restored_layers.push(RasterLayer {
 				id: manifest_layer.id,
 				name: manifest_layer.name,
 				visible: manifest_layer.visible,
 				opacity_percent: manifest_layer.opacity_percent,
 				blend_mode: manifest_layer.blend_mode,
+				mask,
 				offset_x: manifest_layer.offset_x,
 				offset_y: manifest_layer.offset_y,
 				tiles,
@@ -156,8 +201,13 @@ impl TryFrom<ProjectFile> for Document {
 		Ok(Document {
 			id: common::DocumentId::new(),
 			canvas_size: manifest.canvas_size,
+			layer_hierarchy: restored_layers
+				.iter()
+				.map(|layer| LayerHierarchyNode::Layer(layer.id))
+				.collect(),
 			layers: restored_layers,
 			active_layer_index: 0,
+			active_edit_target: manifest.active_edit_target,
 			tile_size: common::DEFAULT_TILE_SIZE,
 			selection: None,
 			selection_inverted: false,
@@ -289,6 +339,11 @@ pub fn flatten_document_rgba(document: &Document) -> Vec<u8> {
 
 		let layer_opacity = layer.opacity_percent as f32 / 100.0;
 		for (coord, tile) in &layer.tiles {
+			let mask_tile = layer
+				.mask
+				.as_ref()
+				.filter(|mask| mask.enabled)
+				.and_then(|mask| mask.tiles.get(coord));
 			let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
 			for local_y in 0..document.tile_size as usize {
 				let canvas_y = tile_origin_y as i32 + layer.offset_y + local_y as i32;
@@ -309,11 +364,15 @@ pub fn flatten_document_rgba(document: &Document) -> Vec<u8> {
 					}
 
 					let src_index = (local_y * document.tile_size as usize + local_x) * 4;
+					let mask_alpha = mask_tile
+						.map(|tile| tile.alpha[local_y * document.tile_size as usize + local_x])
+						.unwrap_or(255);
 					let dst_index =
 						(canvas_y as usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
-					composite_pixel(
+					composite_masked_pixel(
 						&mut output[dst_index..dst_index + 4],
 						&tile.pixels[src_index..src_index + 4],
+						mask_alpha,
 						layer_opacity,
 						layer.blend_mode,
 					);
@@ -340,6 +399,31 @@ fn flatten_document_rgb(document: &Document, background_rgb: [u8; 3]) -> Vec<u8>
 	flattened_rgb
 }
 
+fn composite_masked_pixel(
+	destination: &mut [u8],
+	source: &[u8],
+	mask_alpha: u8,
+	layer_opacity: f32,
+	blend_mode: BlendMode,
+) {
+	if source[3] == 0 || mask_alpha == 0 {
+		return;
+	}
+
+	if mask_alpha == 255 {
+		composite_pixel(destination, source, layer_opacity, blend_mode);
+		return;
+	}
+
+	let effective_alpha = ((source[3] as u16 * mask_alpha as u16 + 127) / 255) as u8;
+	if effective_alpha == 0 {
+		return;
+	}
+
+	let masked_source = [source[0], source[1], source[2], effective_alpha];
+	composite_pixel(destination, &masked_source, layer_opacity, blend_mode);
+}
+
 fn composite_pixel(destination: &mut [u8], source: &[u8], layer_opacity: f32, blend_mode: BlendMode) {
 	let result = blend_rgba_over(
 		[destination[0], destination[1], destination[2], destination[3]],
@@ -362,10 +446,12 @@ mod tests {
 	use super::{
 		export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
 		import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
-		recovery_path_for_project_path, save_document_to_path, ProjectFile, ProjectManifest,
+		recovery_path_for_project_path, save_document_to_path, update_flattened_region_rgba,
+		ProjectFile, ProjectManifest,
 		CURRENT_PROJECT_FORMAT_VERSION,
 	};
-	use doc_model::{BlendMode, Document};
+	use color_math::{blend_rgba_over, BlendModeMath};
+	use doc_model::{BlendMode, Document, TileCoord};
 	use std::fs;
 	use std::path::PathBuf;
 	use std::time::{SystemTime, UNIX_EPOCH};
@@ -383,6 +469,23 @@ mod tests {
 		let local_y = (y - tile_origin_y) as usize;
 		let pixel_index = (local_y * tile_size + local_x) * 4;
 		tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(&rgba);
+	}
+
+	fn set_mask_alpha(document: &mut Document, layer_index: usize, x: u32, y: u32, alpha: u8) {
+		let tile_size = document.tile_size as usize;
+		let tile_size_u32 = document.tile_size;
+		let coord = document
+			.tile_coord_for_pixel(x, y)
+			.expect("mask pixel should land inside canvas");
+		let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+		let local_x = (x - tile_origin_x) as usize;
+		let local_y = (y - tile_origin_y) as usize;
+		let pixel_index = local_y * tile_size + local_x;
+		let mask = document
+			.layer_mask_mut(layer_index)
+			.expect("mask should exist for masked scene");
+		let tile = mask.ensure_tile(coord, tile_size_u32);
+		tile.alpha[pixel_index] = alpha;
 	}
 
 	fn build_representative_scene() -> Document {
@@ -472,6 +575,41 @@ mod tests {
 		document
 	}
 
+	fn build_masked_scene() -> Document {
+		let mut document = Document::new(32, 32);
+		document.rename_layer(0, "Background");
+
+		for y in 0..32 {
+			for x in 0..32 {
+				set_pixel(&mut document, 0, x, y, [30, 50, 80, 255]);
+			}
+		}
+
+		document.add_layer("Masked Paint");
+		let masked_index = document.active_layer_index();
+		for y in 6..26 {
+			for x in 6..26 {
+				set_pixel(&mut document, masked_index, x, y, [220, 120, 60, 255]);
+			}
+		}
+		assert!(document.add_layer_mask(masked_index));
+
+		for y in 6..26 {
+			for x in 6..26 {
+				let alpha = if x < 12 {
+					0
+				} else if x < 18 {
+					128
+				} else {
+					255
+				};
+				set_mask_alpha(&mut document, masked_index, x, y, alpha);
+			}
+		}
+
+		document
+	}
+
 	#[test]
 	fn project_manifest_uses_current_version() {
 		let document = Document::new(1920, 1080);
@@ -479,6 +617,7 @@ mod tests {
 
 		assert_eq!(manifest.format_version, CURRENT_PROJECT_FORMAT_VERSION);
 		assert_eq!(manifest.canvas_size.width, 1920);
+		assert_eq!(manifest.active_edit_target, doc_model::LayerEditTarget::LayerPixels);
 		assert_eq!(manifest.layers.len(), 1);
 	}
 
@@ -486,13 +625,18 @@ mod tests {
 	fn project_manifest_roundtrips_through_json() {
 		let mut document = Document::new(800, 600);
 		document.add_layer("Paint");
+		assert!(document.add_layer_mask(1));
+		assert!(document.set_layer_mask_enabled(1, false));
 
 		let manifest = ProjectManifest::from(&document);
 		let json = serde_json::to_string_pretty(&manifest).expect("manifest should serialize");
 		let restored: ProjectManifest = serde_json::from_str(&json).expect("manifest should deserialize");
 
 		assert_eq!(restored.layers.len(), 2);
+		assert_eq!(restored.active_edit_target, doc_model::LayerEditTarget::LayerPixels);
 		assert_eq!(restored.layers[1].name, "Paint");
+		assert!(!restored.layers[1].mask_enabled);
+		assert!(restored.layers[1].mask_payload_path.is_some());
 		assert_eq!(restored.layers[1].offset_x, 0);
 		assert!(restored.layers[1].payload_path.starts_with("layers/"));
 		assert!(restored.layers[1].payload_path.ends_with(".png"));
@@ -506,6 +650,13 @@ mod tests {
 			.expect("tile should be created");
 		tile.pixels[0] = 255;
 		tile.pixels[3] = 255;
+		assert!(document.add_layer_mask(0));
+		let tile_size = document.tile_size as usize;
+		let mask_tile_size = document.tile_size;
+		let mask = document.layer_mask_mut(0).expect("mask should exist");
+		let mask_tile = mask.ensure_tile(TileCoord::new(0, 0), mask_tile_size);
+		mask_tile.alpha[11 * tile_size + 42] = 128;
+		assert!(document.set_active_edit_target(doc_model::LayerEditTarget::LayerMask));
 
 		let project_file = ProjectFile::from(&document);
 		let restored = Document::try_from(project_file).expect("project file should restore document");
@@ -513,6 +664,12 @@ mod tests {
 		assert_eq!(restored.canvas_size.width, 512);
 		assert_eq!(restored.layers.len(), 1);
 		assert_eq!(restored.layers[0].tiles.len(), 1);
+		assert_eq!(restored.active_edit_target, doc_model::LayerEditTarget::LayerMask);
+		assert!(restored.layer_mask(0).is_some());
+		assert_eq!(
+			restored.layer_mask(0).expect("mask exists").tiles[&TileCoord::new(0, 0)].alpha[11 * tile_size + 42],
+			128
+		);
 	}
 
 	#[test]
@@ -722,6 +879,7 @@ mod tests {
 		document.add_layer("Highlights");
 		let top_index = document.active_layer_index();
 		document.set_layer_opacity(top_index, 75);
+		assert!(document.add_layer_mask(top_index));
 		let tile = document
 			.ensure_tile_for_pixel(top_index, 2, 2)
 			.expect("top layer tile should exist");
@@ -739,6 +897,7 @@ mod tests {
 		assert_eq!(restored.layers[1].opacity_percent, 75);
 		assert_eq!(restored.layers[1].offset_x, 0);
 		assert_eq!(restored.layers[1].tiles.len(), 1);
+		assert!(restored.layer_mask(1).is_some());
 	}
 
 	#[test]
@@ -755,6 +914,85 @@ mod tests {
 		let flattened = flatten_document_rgba(&document);
 		let shifted_index = (2 * 6 + 3) * 4;
 		assert_eq!(&flattened[shifted_index..shifted_index + 4], &[220, 50, 50, 255]);
+	}
+
+	#[test]
+	fn flatten_document_applies_enabled_layer_masks() {
+		let mut document = Document::new(4, 2);
+		for y in 0..2 {
+			for x in 0..4 {
+				set_pixel(&mut document, 0, x, y, [20, 40, 60, 255]);
+			}
+		}
+
+		document.add_layer("Masked");
+		let layer_index = document.active_layer_index();
+		for y in 0..2 {
+			for x in 0..4 {
+				set_pixel(&mut document, layer_index, x, y, [200, 100, 50, 255]);
+			}
+		}
+		assert!(document.add_layer_mask(layer_index));
+		set_mask_alpha(&mut document, layer_index, 0, 0, 0);
+		set_mask_alpha(&mut document, layer_index, 1, 0, 128);
+
+		let flattened = flatten_document_rgba(&document);
+		assert_eq!(&flattened[0..4], &[20, 40, 60, 255]);
+
+		let expected_half = blend_rgba_over(
+			[20, 40, 60, 255],
+			[200, 100, 50, 128],
+			1.0,
+			BlendModeMath::Normal,
+		);
+		assert_eq!(&flattened[4..8], &expected_half);
+		assert_eq!(&flattened[8..12], &[200, 100, 50, 255]);
+	}
+
+	#[test]
+	fn flatten_document_ignores_disabled_layer_masks() {
+		let mut document = Document::new(2, 1);
+		set_pixel(&mut document, 0, 0, 0, [20, 40, 60, 255]);
+		document.add_layer("Masked");
+		let layer_index = document.active_layer_index();
+		set_pixel(&mut document, layer_index, 0, 0, [200, 100, 50, 255]);
+		assert!(document.add_layer_mask(layer_index));
+		set_mask_alpha(&mut document, layer_index, 0, 0, 0);
+		assert!(document.set_layer_mask_enabled(layer_index, false));
+
+		let flattened = flatten_document_rgba(&document);
+		assert_eq!(&flattened[0..4], &[200, 100, 50, 255]);
+	}
+
+	#[test]
+	fn masked_scene_roundtrip_preserves_flattened_output() {
+		let document = build_masked_scene();
+		let expected = flatten_document_rgba(&document);
+
+		let path = temporary_project_path();
+		save_document_to_path(&path, &document).expect("masked scene should save");
+		let restored = load_document_from_path(&path).expect("masked scene should load");
+		fs::remove_file(&path).expect("temporary project file should be removed");
+
+		assert_eq!(flatten_document_rgba(&restored), expected);
+	}
+
+	#[test]
+	fn update_flattened_region_matches_full_flatten_for_masked_scene() {
+		let document = build_masked_scene();
+		let expected = flatten_document_rgba(&document);
+		let mut partial = expected.clone();
+		let rect = common::CanvasRect::new(6, 6, 20, 20);
+
+		for y in rect.y as usize..(rect.y + rect.height as i32) as usize {
+			for x in rect.x as usize..(rect.x + rect.width as i32) as usize {
+				let index = (y * document.canvas_size.width as usize + x) * 4;
+				partial[index..index + 4].copy_from_slice(&[1, 2, 3, 4]);
+			}
+		}
+
+		update_flattened_region_rgba(&document, &mut partial, rect);
+		assert_eq!(partial, expected);
 	}
 
 	#[test]
@@ -862,6 +1100,11 @@ pub fn update_flattened_region_rgba(document: &Document, output: &mut [u8], rect
 
         let layer_opacity = layer.opacity_percent as f32 / 100.0;
         for (coord, tile) in &layer.tiles {
+			let mask_tile = layer
+				.mask
+				.as_ref()
+				.filter(|mask| mask.enabled)
+				.and_then(|mask| mask.tiles.get(coord));
             let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
             let tile_canvas_x = tile_origin_x as i32 + layer.offset_x;
             let tile_canvas_y = tile_origin_y as i32 + layer.offset_y;
@@ -885,11 +1128,15 @@ pub fn update_flattened_region_rgba(document: &Document, output: &mut [u8], rect
                 for canvas_x in canvas_clip_x..canvas_clip_w {
                     let local_x = (canvas_x - tile_canvas_x) as usize;
                     let src_index = (local_y * document.tile_size as usize + local_x) * 4;
+					let mask_alpha = mask_tile
+						.map(|tile| tile.alpha[local_y * document.tile_size as usize + local_x])
+						.unwrap_or(255);
                     let dst_index = (canvas_y_usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
                     
-                    composite_pixel(
+					composite_masked_pixel(
                         &mut output[dst_index..dst_index + 4],
                         &tile.pixels[src_index..src_index + 4],
+						mask_alpha,
                         layer_opacity,
                         layer.blend_mode,
                     );

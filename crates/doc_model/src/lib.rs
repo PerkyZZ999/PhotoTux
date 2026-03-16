@@ -1,4 +1,4 @@
-use common::{CanvasRect, CanvasSize, DocumentId, LayerId, DEFAULT_TILE_SIZE};
+use common::{CanvasRect, CanvasSize, DocumentId, GroupId, LayerId, DEFAULT_TILE_SIZE};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +38,54 @@ impl RasterTile {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskTile {
+    pub alpha: Vec<u8>,
+}
+
+impl MaskTile {
+    pub fn new(tile_size: u32) -> Self {
+        let pixel_count = tile_size as usize * tile_size as usize;
+        Self {
+            alpha: vec![255; pixel_count],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RasterMask {
+    pub enabled: bool,
+    pub tiles: HashMap<TileCoord, MaskTile>,
+    pub dirty_tiles: HashSet<TileCoord>,
+}
+
+impl RasterMask {
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            tiles: HashMap::new(),
+            dirty_tiles: HashSet::new(),
+        }
+    }
+
+    pub fn ensure_tile(&mut self, coord: TileCoord, tile_size: u32) -> &mut MaskTile {
+        self.dirty_tiles.insert(coord);
+        self.tiles
+            .entry(coord)
+            .or_insert_with(|| MaskTile::new(tile_size))
+    }
+
+    pub fn mark_tile_dirty(&mut self, coord: TileCoord) {
+        self.dirty_tiles.insert(coord);
+    }
+
+    pub fn take_dirty_tiles(&mut self) -> Vec<TileCoord> {
+        let mut dirty_tiles = self.dirty_tiles.drain().collect::<Vec<_>>();
+        dirty_tiles.sort_by_key(|coord| (coord.y, coord.x));
+        dirty_tiles
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RasterLayer {
     pub id: LayerId,
@@ -45,6 +93,7 @@ pub struct RasterLayer {
     pub visible: bool,
     pub opacity_percent: u8,
     pub blend_mode: BlendMode,
+    pub mask: Option<RasterMask>,
     pub offset_x: i32,
     pub offset_y: i32,
     pub tiles: HashMap<TileCoord, RasterTile>,
@@ -59,6 +108,7 @@ impl RasterLayer {
             visible: true,
             opacity_percent: 100,
             blend_mode: BlendMode::Normal,
+            mask: None,
             offset_x: 0,
             offset_y: 0,
             tiles: HashMap::new(),
@@ -92,11 +142,51 @@ pub struct TileGridSize {
 
 pub type RectSelection = CanvasRect;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerEditTarget {
+    LayerPixels,
+    LayerMask,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerStateSnapshot {
     pub offset_x: i32,
     pub offset_y: i32,
     pub tiles: HashMap<TileCoord, RasterTile>,
+    pub mask: Option<RasterMask>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerHierarchyNodeRef {
+    Layer(LayerId),
+    Group(GroupId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerGroup {
+    pub id: GroupId,
+    pub name: String,
+    pub visible: bool,
+    pub opacity_percent: u8,
+    pub children: Vec<LayerHierarchyNode>,
+}
+
+impl LayerGroup {
+    pub fn new(name: impl Into<String>, children: Vec<LayerHierarchyNode>) -> Self {
+        Self {
+            id: GroupId::new(),
+            name: name.into(),
+            visible: true,
+            opacity_percent: 100,
+            children,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerHierarchyNode {
+    Layer(LayerId),
+    Group(LayerGroup),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +194,9 @@ pub struct Document {
     pub id: DocumentId,
     pub canvas_size: CanvasSize,
     pub layers: Vec<RasterLayer>,
+    pub layer_hierarchy: Vec<LayerHierarchyNode>,
     pub active_layer_index: usize,
+    pub active_edit_target: LayerEditTarget,
     pub tile_size: u32,
     pub selection: Option<RectSelection>,
     pub selection_inverted: bool,
@@ -112,11 +204,15 @@ pub struct Document {
 
 impl Document {
     pub fn new(width: u32, height: u32) -> Self {
+        let background = RasterLayer::new("Background");
+        let background_id = background.id;
         Self {
             id: DocumentId::new(),
             canvas_size: CanvasSize::new(width, height),
-            layers: vec![RasterLayer::new("Background")],
+            layers: vec![background],
+            layer_hierarchy: vec![LayerHierarchyNode::Layer(background_id)],
             active_layer_index: 0,
+            active_edit_target: LayerEditTarget::LayerPixels,
             tile_size: DEFAULT_TILE_SIZE,
             selection: None,
             selection_inverted: false,
@@ -148,6 +244,78 @@ impl Document {
 
     pub fn active_layer_index(&self) -> usize {
         self.active_layer_index
+    }
+
+    pub fn active_edit_target(&self) -> LayerEditTarget {
+        self.active_edit_target
+    }
+
+    pub fn layer_hierarchy(&self) -> &[LayerHierarchyNode] {
+        &self.layer_hierarchy
+    }
+
+    pub fn group_count(&self) -> usize {
+        Self::count_groups_in_nodes(&self.layer_hierarchy)
+    }
+
+    pub fn group(&self, group_id: GroupId) -> Option<&LayerGroup> {
+        Self::find_group_in_nodes(&self.layer_hierarchy, group_id)
+    }
+
+    pub fn create_layer_group(
+        &mut self,
+        name: impl Into<String>,
+        child_layer_ids: &[LayerId],
+    ) -> Option<GroupId> {
+        if child_layer_ids.is_empty() {
+            return None;
+        }
+
+        let mut unique_ids = HashSet::new();
+        for layer_id in child_layer_ids {
+            if !unique_ids.insert(*layer_id) {
+                return None;
+            }
+        }
+
+        let mut insertion_index = None;
+        let mut grouped_children = Vec::with_capacity(child_layer_ids.len());
+        for expected_layer_id in child_layer_ids {
+            let node_index = self.layer_hierarchy.iter().position(|node| {
+                matches!(node, LayerHierarchyNode::Layer(layer_id) if layer_id == expected_layer_id)
+            })?;
+            if insertion_index.is_none() {
+                insertion_index = Some(node_index);
+            }
+            let node = self.layer_hierarchy.remove(node_index);
+            grouped_children.push(node);
+        }
+
+        let group = LayerGroup::new(name, grouped_children);
+        let group_id = group.id;
+        self.layer_hierarchy
+            .insert(insertion_index.unwrap_or(self.layer_hierarchy.len()), LayerHierarchyNode::Group(group));
+
+        self.validate_layer_hierarchy().ok()?;
+        Some(group_id)
+    }
+
+    pub fn validate_layer_hierarchy(&self) -> Result<(), &'static str> {
+        let known_layer_ids = self.layers.iter().map(|layer| layer.id).collect::<HashSet<_>>();
+        let mut referenced_layer_ids = HashSet::new();
+        let mut referenced_group_ids = HashSet::new();
+        Self::validate_hierarchy_nodes(
+            &self.layer_hierarchy,
+            &known_layer_ids,
+            &mut referenced_layer_ids,
+            &mut referenced_group_ids,
+        )?;
+
+        if referenced_layer_ids != known_layer_ids {
+            return Err("layer hierarchy does not reference every document layer exactly once");
+        }
+
+        Ok(())
     }
 
     pub fn layer(&self, index: usize) -> Option<&RasterLayer> {
@@ -193,6 +361,69 @@ impl Document {
             (max_x - min_x + 1) * self.tile_size,
             (max_y - min_y + 1) * self.tile_size,
         ))
+    }
+
+    fn count_groups_in_nodes(nodes: &[LayerHierarchyNode]) -> usize {
+        nodes.iter().map(|node| match node {
+            LayerHierarchyNode::Layer(_) => 0,
+            LayerHierarchyNode::Group(group) => 1 + Self::count_groups_in_nodes(&group.children),
+        }).sum()
+    }
+
+    fn find_group_in_nodes(nodes: &[LayerHierarchyNode], group_id: GroupId) -> Option<&LayerGroup> {
+        for node in nodes {
+            if let LayerHierarchyNode::Group(group) = node {
+                if group.id == group_id {
+                    return Some(group);
+                }
+                if let Some(found) = Self::find_group_in_nodes(&group.children, group_id) {
+                    return Some(found);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn validate_hierarchy_nodes(
+        nodes: &[LayerHierarchyNode],
+        known_layer_ids: &HashSet<LayerId>,
+        referenced_layer_ids: &mut HashSet<LayerId>,
+        referenced_group_ids: &mut HashSet<GroupId>,
+    ) -> Result<(), &'static str> {
+        for node in nodes {
+            match node {
+                LayerHierarchyNode::Layer(layer_id) => {
+                    if !known_layer_ids.contains(layer_id) {
+                        return Err("layer hierarchy references a missing layer");
+                    }
+                    if !referenced_layer_ids.insert(*layer_id) {
+                        return Err("layer hierarchy references the same layer more than once");
+                    }
+                }
+                LayerHierarchyNode::Group(group) => {
+                    if !referenced_group_ids.insert(group.id) {
+                        return Err("layer hierarchy references the same group more than once");
+                    }
+                    Self::validate_hierarchy_nodes(
+                        &group.children,
+                        known_layer_ids,
+                        referenced_layer_ids,
+                        referenced_group_ids,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rebuild_flat_layer_hierarchy(&mut self) {
+        self.layer_hierarchy = self
+            .layers
+            .iter()
+            .map(|layer| LayerHierarchyNode::Layer(layer.id))
+            .collect();
     }
 
     pub fn selection(&self) -> Option<RectSelection> {
@@ -280,6 +511,9 @@ impl Document {
         let layer = RasterLayer::new(name);
         let layer_id = layer.id;
         self.layers.insert(self.active_layer_index + 1, layer);
+        if self.group_count() == 0 {
+            self.rebuild_flat_layer_hierarchy();
+        }
         self.active_layer_index += 1;
         layer_id
     }
@@ -290,6 +524,62 @@ impl Document {
         }
 
         self.active_layer_index = index;
+        if self.active_edit_target == LayerEditTarget::LayerMask && self.layers[index].mask.is_none() {
+            self.active_edit_target = LayerEditTarget::LayerPixels;
+        }
+        true
+    }
+
+    pub fn set_active_edit_target(&mut self, target: LayerEditTarget) -> bool {
+        if target == LayerEditTarget::LayerMask && self.active_layer().mask.is_none() {
+            return false;
+        }
+
+        self.active_edit_target = target;
+        true
+    }
+
+    pub fn layer_mask(&self, index: usize) -> Option<&RasterMask> {
+        self.layers.get(index)?.mask.as_ref()
+    }
+
+    pub fn layer_mask_mut(&mut self, index: usize) -> Option<&mut RasterMask> {
+        self.layers.get_mut(index)?.mask.as_mut()
+    }
+
+    pub fn add_layer_mask(&mut self, index: usize) -> bool {
+        let Some(layer) = self.layers.get_mut(index) else {
+            return false;
+        };
+        if layer.mask.is_some() {
+            return false;
+        }
+
+        layer.mask = Some(RasterMask::new());
+        true
+    }
+
+    pub fn remove_layer_mask(&mut self, index: usize) -> bool {
+        let Some(layer) = self.layers.get_mut(index) else {
+            return false;
+        };
+        if layer.mask.is_none() {
+            return false;
+        }
+
+        layer.mask = None;
+        if self.active_layer_index == index {
+            self.active_edit_target = LayerEditTarget::LayerPixels;
+        }
+        true
+    }
+
+    pub fn set_layer_mask_enabled(&mut self, index: usize, enabled: bool) -> bool {
+        let Some(mask) = self.layer_mask_mut(index) else {
+            return false;
+        };
+
+        mask.enabled = enabled;
         true
     }
 
@@ -304,6 +594,11 @@ impl Document {
             visible: source.visible,
             opacity_percent: source.opacity_percent,
             blend_mode: source.blend_mode,
+            mask: source.mask.map(|mask| RasterMask {
+                enabled: mask.enabled,
+                tiles: mask.tiles,
+                dirty_tiles: HashSet::new(),
+            }),
             offset_x: source.offset_x,
             offset_y: source.offset_y,
             tiles: source.tiles,
@@ -311,6 +606,9 @@ impl Document {
         };
 
         self.layers.insert(index + 1, duplicate);
+        if self.group_count() == 0 {
+            self.rebuild_flat_layer_hierarchy();
+        }
         self.active_layer_index = index + 1;
         Some(duplicate_id)
     }
@@ -321,6 +619,7 @@ impl Document {
             offset_x: layer.offset_x,
             offset_y: layer.offset_y,
             tiles: layer.tiles.clone(),
+            mask: layer.mask.clone(),
         })
     }
 
@@ -337,6 +636,10 @@ impl Document {
         layer.offset_y = snapshot.offset_y;
         layer.tiles = snapshot.tiles;
         layer.dirty_tiles = layer.tiles.keys().copied().collect();
+        layer.mask = snapshot.mask;
+        if let Some(mask) = layer.mask.as_mut() {
+            mask.dirty_tiles = mask.tiles.keys().copied().collect();
+        }
         true
     }
 
@@ -352,12 +655,28 @@ impl Document {
         Some(layer.ensure_tile(coord, tile_size))
     }
 
+    pub fn ensure_mask_tile_for_pixel(
+        &mut self,
+        layer_index: usize,
+        pixel_x: u32,
+        pixel_y: u32,
+    ) -> Option<&mut MaskTile> {
+        let coord = self.tile_coord_for_pixel(pixel_x, pixel_y)?;
+        let tile_size = self.tile_size;
+        let mask = self.layer_mask_mut(layer_index)?;
+        Some(mask.ensure_tile(coord, tile_size))
+    }
+
     pub fn dirty_tiles(&self, layer_index: usize) -> Option<&HashSet<TileCoord>> {
         Some(&self.layers.get(layer_index)?.dirty_tiles)
     }
 
     pub fn tile_snapshot(&self, layer_index: usize, coord: TileCoord) -> Option<RasterTile> {
         self.layers.get(layer_index)?.tiles.get(&coord).cloned()
+    }
+
+    pub fn mask_tile_snapshot(&self, layer_index: usize, coord: TileCoord) -> Option<MaskTile> {
+        self.layers.get(layer_index)?.mask.as_ref()?.tiles.get(&coord).cloned()
     }
 
     pub fn apply_tile_snapshot(
@@ -382,6 +701,38 @@ impl Document {
             None => {
                 layer.tiles.remove(&coord);
                 layer.mark_tile_dirty(coord);
+            }
+        }
+
+        true
+    }
+
+    pub fn apply_mask_tile_snapshot(
+        &mut self,
+        layer_id: LayerId,
+        coord: TileCoord,
+        tile: Option<MaskTile>,
+    ) -> bool {
+        let Some(layer_index) = self.layer_index_by_id(layer_id) else {
+            return false;
+        };
+
+        let Some(layer) = self.layers.get_mut(layer_index) else {
+            return false;
+        };
+
+        let Some(mask) = layer.mask.as_mut() else {
+            return false;
+        };
+
+        match tile {
+            Some(tile) => {
+                mask.tiles.insert(coord, tile);
+                mask.mark_tile_dirty(coord);
+            }
+            None => {
+                mask.tiles.remove(&coord);
+                mask.mark_tile_dirty(coord);
             }
         }
 
@@ -437,8 +788,13 @@ impl Document {
             return false;
         }
 
+        if self.group_count() != 0 {
+            return false;
+        }
+
         let layer = self.layers.remove(from_index);
         self.layers.insert(to_index, layer);
+        self.rebuild_flat_layer_hierarchy();
         self.active_layer_index = to_index;
         true
     }
@@ -449,8 +805,16 @@ impl Document {
         }
 
         self.layers.remove(index);
+        if self.group_count() == 0 {
+            self.rebuild_flat_layer_hierarchy();
+        }
         if self.active_layer_index >= self.layers.len() {
             self.active_layer_index = self.layers.len() - 1;
+        }
+        if self.active_edit_target == LayerEditTarget::LayerMask
+            && self.layers[self.active_layer_index].mask.is_none()
+        {
+            self.active_edit_target = LayerEditTarget::LayerPixels;
         }
 
         true
@@ -459,7 +823,7 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlendMode, Document, RasterTile, TileCoord};
+    use super::{BlendMode, Document, LayerEditTarget, LayerHierarchyNode, RasterTile, TileCoord};
     use common::CanvasRect;
 
     #[test]
@@ -471,8 +835,38 @@ mod tests {
         assert_eq!(document.layer_count(), 1);
         assert_eq!(document.active_layer().name, "Background");
         assert_eq!(document.active_layer().blend_mode, BlendMode::Normal);
+        assert_eq!(document.active_edit_target(), LayerEditTarget::LayerPixels);
+        assert!(document.layer_mask(0).is_none());
         assert_eq!(document.tile_grid_size().columns, 8);
         assert_eq!(document.tile_grid_size().rows, 5);
+        assert!(document.validate_layer_hierarchy().is_ok());
+        assert_eq!(document.layer_hierarchy(), &[LayerHierarchyNode::Layer(document.active_layer().id)]);
+    }
+
+    #[test]
+    fn layer_masks_can_be_added_targeted_and_removed() {
+        let mut document = Document::new(640, 480);
+
+        assert!(document.add_layer_mask(0));
+        assert!(document.layer_mask(0).is_some());
+        assert!(document.layer_mask(0).expect("mask exists").enabled);
+        assert!(document.set_active_edit_target(LayerEditTarget::LayerMask));
+        assert_eq!(document.active_edit_target(), LayerEditTarget::LayerMask);
+
+        assert!(document.set_layer_mask_enabled(0, false));
+        assert!(!document.layer_mask(0).expect("mask exists").enabled);
+
+        assert!(document.remove_layer_mask(0));
+        assert!(document.layer_mask(0).is_none());
+        assert_eq!(document.active_edit_target(), LayerEditTarget::LayerPixels);
+    }
+
+    #[test]
+    fn layer_mask_target_requires_mask_presence() {
+        let mut document = Document::new(640, 480);
+
+        assert!(!document.set_active_edit_target(LayerEditTarget::LayerMask));
+        assert_eq!(document.active_edit_target(), LayerEditTarget::LayerPixels);
     }
 
     #[test]
@@ -484,6 +878,55 @@ mod tests {
         assert_eq!(document.layer_count(), 2);
         assert_eq!(document.active_layer_index, 1);
         assert_eq!(document.active_layer().name, "Sketch");
+        assert!(document.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn create_layer_group_wraps_top_level_layers_in_order() {
+        let mut document = Document::new(640, 480);
+        document.add_layer("Sketch");
+        document.add_layer("Highlights");
+
+        let background_id = document.layers[0].id;
+        let sketch_id = document.layers[1].id;
+        let highlights_id = document.layers[2].id;
+
+        let group_id = document
+            .create_layer_group("Paint Stack", &[sketch_id, highlights_id])
+            .expect("group creation should succeed");
+
+        assert_eq!(document.group_count(), 1);
+        assert!(document.validate_layer_hierarchy().is_ok());
+
+        let [LayerHierarchyNode::Layer(layer_id), LayerHierarchyNode::Group(group)] = document.layer_hierarchy() else {
+            panic!("expected one top-level layer followed by one top-level group");
+        };
+
+        assert_eq!(*layer_id, background_id);
+        assert_eq!(group.id, group_id);
+        assert_eq!(group.name, "Paint Stack");
+        assert_eq!(group.children.len(), 2);
+        assert_eq!(group.children[0], LayerHierarchyNode::Layer(sketch_id));
+        assert_eq!(group.children[1], LayerHierarchyNode::Layer(highlights_id));
+    }
+
+    #[test]
+    fn create_layer_group_rejects_duplicate_or_missing_layer_ids() {
+        let mut document = Document::new(640, 480);
+        document.add_layer("Sketch");
+
+        let background_id = document.layers[0].id;
+        let sketch_id = document.layers[1].id;
+
+        assert!(document
+            .create_layer_group("Invalid", &[background_id, background_id])
+            .is_none());
+        assert!(document
+            .create_layer_group("Valid", &[background_id, sketch_id])
+            .is_some());
+        assert!(document
+            .create_layer_group("Nested Duplicate", &[background_id])
+            .is_none());
     }
 
     #[test]
@@ -495,6 +938,11 @@ mod tests {
             .expect("tile should be created");
         tile.pixels[0] = 120;
         tile.pixels[3] = 255;
+        assert!(document.add_layer_mask(0));
+        let tile_size = document.tile_size;
+        let mask = document.layer_mask_mut(0).expect("mask exists");
+        let mask_tile = mask.ensure_tile(TileCoord::new(0, 0), tile_size);
+        mask_tile.alpha[0] = 64;
 
         let duplicate_id = document
             .duplicate_layer(0)
@@ -506,6 +954,14 @@ mod tests {
         assert_ne!(document.layers[0].id, duplicate_id);
         assert_eq!(document.layers[1].id, duplicate_id);
         assert_eq!(document.layers[1].tiles, document.layers[0].tiles);
+        assert_eq!(
+            document.layers[1].mask.as_ref().map(|mask| mask.enabled),
+            document.layers[0].mask.as_ref().map(|mask| mask.enabled)
+        );
+        assert_eq!(
+            document.layers[1].mask.as_ref().map(|mask| &mask.tiles),
+            document.layers[0].mask.as_ref().map(|mask| &mask.tiles)
+        );
     }
 
     #[test]
@@ -530,6 +986,7 @@ mod tests {
         assert!(moved);
         assert_eq!(document.layers[0].name, "Highlights");
         assert_eq!(document.active_layer_index, 0);
+        assert!(document.validate_layer_hierarchy().is_ok());
     }
 
     #[test]

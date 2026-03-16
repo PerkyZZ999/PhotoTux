@@ -32,8 +32,8 @@ impl BrushDab {
 pub fn apply_round_brush_dab(
     tile_pixels: &mut [u8],
     tile_size: u32,
-    tile_origin_x: u32,
-    tile_origin_y: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
     center_x: f32,
     center_y: f32,
     dab: BrushDab,
@@ -51,11 +51,61 @@ pub fn apply_round_brush_dab(
     )
 }
 
+pub fn apply_round_mask_hide_dab_clipped(
+    tile_alpha: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
+    apply_round_mask_dab(
+        tile_alpha,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        false,
+        clip_rect,
+        clip_inverted,
+    )
+}
+
+pub fn apply_round_mask_reveal_dab_clipped(
+    tile_alpha: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
+    apply_round_mask_dab(
+        tile_alpha,
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        dab,
+        true,
+        clip_rect,
+        clip_inverted,
+    )
+}
+
 pub fn apply_round_brush_dab_clipped(
     tile_pixels: &mut [u8],
     tile_size: u32,
-    tile_origin_x: u32,
-    tile_origin_y: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
     center_x: f32,
     center_y: f32,
     dab: BrushDab,
@@ -79,8 +129,8 @@ pub fn apply_round_brush_dab_clipped(
 pub fn apply_round_eraser_dab(
     tile_pixels: &mut [u8],
     tile_size: u32,
-    tile_origin_x: u32,
-    tile_origin_y: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
     center_x: f32,
     center_y: f32,
     dab: BrushDab,
@@ -101,8 +151,8 @@ pub fn apply_round_eraser_dab(
 pub fn apply_round_eraser_dab_clipped(
     tile_pixels: &mut [u8],
     tile_size: u32,
-    tile_origin_x: u32,
-    tile_origin_y: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
     center_x: f32,
     center_y: f32,
     dab: BrushDab,
@@ -126,8 +176,8 @@ pub fn apply_round_eraser_dab_clipped(
 fn apply_round_dab(
     tile_pixels: &mut [u8],
     tile_size: u32,
-    tile_origin_x: u32,
-    tile_origin_y: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
     center_x: f32,
     center_y: f32,
     dab: BrushDab,
@@ -152,10 +202,10 @@ fn apply_round_dab(
         return false;
     }
 
-    let start_x = ((center_x - dab.radius).floor().max(tile_min_x)) as u32;
-    let end_x = ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as u32;
-    let start_y = ((center_y - dab.radius).floor().max(tile_min_y)) as u32;
-    let end_y = ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as u32;
+    let start_x = ((center_x - dab.radius).floor().max(tile_min_x)) as i32;
+    let end_x = ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as i32;
+    let start_y = ((center_y - dab.radius).floor().max(tile_min_y)) as i32;
+    let end_y = ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as i32;
 
     let hard_radius = dab.radius * dab.hardness;
     let soft_width = (dab.radius - hard_radius).max(0.000_1);
@@ -163,7 +213,7 @@ fn apply_round_dab(
 
     for canvas_y in start_y..=end_y {
         for canvas_x in start_x..=end_x {
-            if !pixel_is_within_clip(canvas_x as i32, canvas_y as i32, clip_rect, clip_inverted) {
+            if !pixel_is_within_clip(canvas_x, canvas_y, clip_rect, clip_inverted) {
                 continue;
             }
 
@@ -194,6 +244,89 @@ fn apply_round_dab(
 
             blend_pixel(&mut tile_pixels[index..index + 4], dab.color, alpha, blend_mode);
             changed = true;
+        }
+    }
+
+    changed
+}
+
+fn apply_round_mask_dab(
+    tile_alpha: &mut [u8],
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    center_x: f32,
+    center_y: f32,
+    dab: BrushDab,
+    reveal: bool,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
+    if tile_alpha.len() != tile_size as usize * tile_size as usize || dab.radius <= 0.0 {
+        return false;
+    }
+
+    let tile_min_x = tile_origin_x as f32;
+    let tile_min_y = tile_origin_y as f32;
+    let tile_max_x = tile_min_x + tile_size as f32;
+    let tile_max_y = tile_min_y + tile_size as f32;
+
+    if center_x + dab.radius < tile_min_x
+        || center_y + dab.radius < tile_min_y
+        || center_x - dab.radius >= tile_max_x
+        || center_y - dab.radius >= tile_max_y
+    {
+        return false;
+    }
+
+    let start_x = ((center_x - dab.radius).floor().max(tile_min_x)) as i32;
+    let end_x = ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as i32;
+    let start_y = ((center_y - dab.radius).floor().max(tile_min_y)) as i32;
+    let end_y = ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as i32;
+
+    let hard_radius = dab.radius * dab.hardness;
+    let soft_width = (dab.radius - hard_radius).max(0.000_1);
+    let mut changed = false;
+
+    for canvas_y in start_y..=end_y {
+        for canvas_x in start_x..=end_x {
+            if !pixel_is_within_clip(canvas_x, canvas_y, clip_rect, clip_inverted) {
+                continue;
+            }
+
+            let pixel_center_x = canvas_x as f32 + 0.5;
+            let pixel_center_y = canvas_y as f32 + 0.5;
+            let delta_x = pixel_center_x - center_x;
+            let delta_y = pixel_center_y - center_y;
+            let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
+
+            if distance > dab.radius {
+                continue;
+            }
+
+            let coverage = if distance <= hard_radius {
+                1.0
+            } else {
+                1.0 - ((distance - hard_radius) / soft_width)
+            };
+            let alpha = (dab.opacity * coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let local_x = (canvas_x - tile_origin_x) as usize;
+            let local_y = (canvas_y - tile_origin_y) as usize;
+            let index = local_y * tile_size as usize + local_x;
+            let before = tile_alpha[index];
+            let target = if reveal { 255.0 } else { 0.0 };
+            let after = (before as f32 * (1.0 - alpha) + target * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+
+            if after != before {
+                tile_alpha[index] = after;
+                changed = true;
+            }
         }
     }
 
@@ -240,7 +373,11 @@ fn erase_pixel(destination: &mut [u8], alpha: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_round_brush_dab, apply_round_brush_dab_clipped, apply_round_eraser_dab, apply_round_eraser_dab_clipped, BrushDab};
+    use super::{
+        apply_round_brush_dab, apply_round_brush_dab_clipped, apply_round_eraser_dab,
+        apply_round_eraser_dab_clipped, apply_round_mask_hide_dab_clipped,
+        apply_round_mask_reveal_dab_clipped, BrushDab,
+    };
     use common::CanvasRect;
 
     #[test]
@@ -375,5 +512,40 @@ mod tests {
         let outside = (8 * 16 + 4) * 4 + 3;
         assert_eq!(pixels[inside], 255);
         assert!(pixels[outside] < 255);
+    }
+
+    #[test]
+    fn mask_hide_and_reveal_adjust_alpha() {
+        let mut alpha = vec![255_u8; 16 * 16];
+        let changed = apply_round_mask_hide_dab_clipped(
+            &mut alpha,
+            16,
+            0,
+            0,
+            8.0,
+            8.0,
+            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            None,
+            false,
+        );
+
+        assert!(changed);
+        let center = 8 * 16 + 8;
+        assert_eq!(alpha[center], 0);
+
+        let changed = apply_round_mask_reveal_dab_clipped(
+            &mut alpha,
+            16,
+            0,
+            0,
+            8.0,
+            8.0,
+            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            None,
+            false,
+        );
+
+        assert!(changed);
+        assert_eq!(alpha[center], 255);
     }
 }
