@@ -1,9 +1,9 @@
 use anyhow::Context;
 use color_math::{blend_rgba_over, BlendModeMath};
-use common::{CanvasSize, LayerId};
+use common::{CanvasSize, GroupId, LayerId};
 use doc_model::{
-	BlendMode, Document, LayerEditTarget, LayerHierarchyNode, MaskTile, RasterLayer, RasterTile,
-	TileCoord,
+	BlendMode, Document, LayerEditTarget, LayerGroup, LayerHierarchyNode, MaskTile, RasterLayer,
+	RasterTile, TileCoord,
 };
 use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,8 @@ pub struct ProjectManifest {
 	pub canvas_size: CanvasSize,
 	pub active_edit_target: LayerEditTarget,
 	pub layers: Vec<ManifestLayerRecord>,
+	#[serde(default)]
+	pub layer_hierarchy: Vec<ManifestHierarchyNode>,
 }
 
 impl From<&Document> for ProjectManifest {
@@ -64,6 +66,11 @@ impl From<&Document> for ProjectManifest {
 			canvas_size: document.canvas_size,
 			active_edit_target: document.active_edit_target,
 			layers,
+			layer_hierarchy: document
+				.layer_hierarchy
+				.iter()
+				.map(ManifestHierarchyNode::from)
+				.collect(),
 		}
 	}
 }
@@ -80,6 +87,42 @@ pub struct ManifestLayerRecord {
 	pub offset_y: i32,
 	pub payload_path: String,
 	pub mask_payload_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ManifestHierarchyNode {
+	Layer(LayerId),
+	Group(ManifestGroupRecord),
+}
+
+impl From<&LayerHierarchyNode> for ManifestHierarchyNode {
+	fn from(node: &LayerHierarchyNode) -> Self {
+		match node {
+			LayerHierarchyNode::Layer(layer_id) => Self::Layer(*layer_id),
+			LayerHierarchyNode::Group(group) => Self::Group(ManifestGroupRecord::from(group)),
+		}
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestGroupRecord {
+	pub id: GroupId,
+	pub name: String,
+	pub visible: bool,
+	pub opacity_percent: u8,
+	pub children: Vec<ManifestHierarchyNode>,
+}
+
+impl From<&LayerGroup> for ManifestGroupRecord {
+	fn from(group: &LayerGroup) -> Self {
+		Self {
+			id: group.id,
+			name: group.name.clone(),
+			visible: group.visible,
+			opacity_percent: group.opacity_percent,
+			children: group.children.iter().map(ManifestHierarchyNode::from).collect(),
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,20 +241,49 @@ impl TryFrom<ProjectFile> for Document {
 			});
 		}
 
-		Ok(Document {
+		let fallback_hierarchy = restored_layers
+			.iter()
+			.map(|layer| LayerHierarchyNode::Layer(layer.id))
+			.collect::<Vec<_>>();
+		let restored_hierarchy = if manifest.layer_hierarchy.is_empty() {
+			fallback_hierarchy.clone()
+		} else {
+			manifest
+				.layer_hierarchy
+				.iter()
+				.map(manifest_hierarchy_to_document)
+				.collect()
+		};
+
+		let mut document = Document {
 			id: common::DocumentId::new(),
 			canvas_size: manifest.canvas_size,
-			layer_hierarchy: restored_layers
-				.iter()
-				.map(|layer| LayerHierarchyNode::Layer(layer.id))
-				.collect(),
+			layer_hierarchy: fallback_hierarchy,
 			layers: restored_layers,
 			active_layer_index: 0,
 			active_edit_target: manifest.active_edit_target,
 			tile_size: common::DEFAULT_TILE_SIZE,
 			selection: None,
 			selection_inverted: false,
-		})
+		};
+		document
+			.set_layer_hierarchy(restored_hierarchy)
+			.map_err(|error| anyhow::anyhow!(error))?;
+
+		Ok(document)
+	}
+}
+
+fn manifest_hierarchy_to_document(node: &ManifestHierarchyNode) -> LayerHierarchyNode {
+	match node {
+		ManifestHierarchyNode::Layer(layer_id) => LayerHierarchyNode::Layer(*layer_id),
+		ManifestHierarchyNode::Group(group) => LayerHierarchyNode::Group(LayerGroup {
+			id: group.id,
+			name: group.name.clone(),
+			visible: group.visible,
+			opacity_percent: group.opacity_percent,
+			children: group.children.iter().map(manifest_hierarchy_to_document).collect(),
+		}),
 	}
 }
 
@@ -331,55 +403,7 @@ fn import_raster_document_from_path(path: &Path) -> anyhow::Result<Document> {
 
 pub fn flatten_document_rgba(document: &Document) -> Vec<u8> {
 	let mut output = vec![0_u8; (document.canvas_size.width * document.canvas_size.height * 4) as usize];
-
-	for layer in &document.layers {
-		if !layer.visible {
-			continue;
-		}
-
-		let layer_opacity = layer.opacity_percent as f32 / 100.0;
-		for (coord, tile) in &layer.tiles {
-			let mask_tile = layer
-				.mask
-				.as_ref()
-				.filter(|mask| mask.enabled)
-				.and_then(|mask| mask.tiles.get(coord));
-			let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
-			for local_y in 0..document.tile_size as usize {
-				let canvas_y = tile_origin_y as i32 + layer.offset_y + local_y as i32;
-				if canvas_y < 0 {
-					continue;
-				}
-				if canvas_y >= document.canvas_size.height as i32 {
-					break;
-				}
-
-				for local_x in 0..document.tile_size as usize {
-					let canvas_x = tile_origin_x as i32 + layer.offset_x + local_x as i32;
-					if canvas_x < 0 {
-						continue;
-					}
-					if canvas_x >= document.canvas_size.width as i32 {
-						break;
-					}
-
-					let src_index = (local_y * document.tile_size as usize + local_x) * 4;
-					let mask_alpha = mask_tile
-						.map(|tile| tile.alpha[local_y * document.tile_size as usize + local_x])
-						.unwrap_or(255);
-					let dst_index =
-						(canvas_y as usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
-					composite_masked_pixel(
-						&mut output[dst_index..dst_index + 4],
-						&tile.pixels[src_index..src_index + 4],
-						mask_alpha,
-						layer_opacity,
-						layer.blend_mode,
-					);
-				}
-			}
-		}
-	}
+	composite_hierarchy_into(document, &mut output, None);
 
 	output
 }
@@ -447,11 +471,11 @@ mod tests {
 		export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
 		import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
 		recovery_path_for_project_path, save_document_to_path, update_flattened_region_rgba,
-		ProjectFile, ProjectManifest,
+		ManifestHierarchyNode, ProjectFile, ProjectManifest,
 		CURRENT_PROJECT_FORMAT_VERSION,
 	};
 	use color_math::{blend_rgba_over, BlendModeMath};
-	use doc_model::{BlendMode, Document, TileCoord};
+	use doc_model::{BlendMode, Document, LayerGroup, LayerHierarchyNode, TileCoord};
 	use std::fs;
 	use std::path::PathBuf;
 	use std::time::{SystemTime, UNIX_EPOCH};
@@ -610,6 +634,68 @@ mod tests {
 		document
 	}
 
+	fn build_grouped_scene() -> Document {
+		let mut document = Document::new(16, 16);
+		document.rename_layer(0, "Background");
+		for y in 0..16 {
+			for x in 0..16 {
+				set_pixel(&mut document, 0, x, y, [20, 30, 40, 255]);
+			}
+		}
+
+		document.add_layer("Warm Tint");
+		let warm_index = document.active_layer_index();
+		for y in 2..14 {
+			for x in 2..14 {
+				set_pixel(&mut document, warm_index, x, y, [180, 80, 40, 255]);
+			}
+		}
+
+		document.add_layer("Cool Accent");
+		let cool_index = document.active_layer_index();
+		for y in 4..12 {
+			for x in 4..12 {
+				set_pixel(&mut document, cool_index, x, y, [40, 140, 220, 255]);
+			}
+		}
+
+		document.add_layer("Top Highlight");
+		let top_index = document.active_layer_index();
+		for y in 6..10 {
+			for x in 6..10 {
+				set_pixel(&mut document, top_index, x, y, [250, 250, 250, 255]);
+			}
+		}
+
+		let hierarchy = vec![
+			LayerHierarchyNode::Layer(document.layers[0].id),
+			LayerHierarchyNode::Group(LayerGroup {
+				id: common::GroupId::new(),
+				name: "Color Stack".to_string(),
+				visible: true,
+				opacity_percent: 60,
+				children: vec![
+					LayerHierarchyNode::Layer(document.layers[warm_index].id),
+					LayerHierarchyNode::Group(LayerGroup {
+						id: common::GroupId::new(),
+						name: "Accents".to_string(),
+						visible: true,
+						opacity_percent: 50,
+						children: vec![
+							LayerHierarchyNode::Layer(document.layers[cool_index].id),
+							LayerHierarchyNode::Layer(document.layers[top_index].id),
+						],
+					}),
+				],
+			}),
+		];
+
+		document
+			.set_layer_hierarchy(hierarchy)
+			.expect("grouped scene hierarchy should be valid");
+		document
+	}
+
 	#[test]
 	fn project_manifest_uses_current_version() {
 		let document = Document::new(1920, 1080);
@@ -627,6 +713,16 @@ mod tests {
 		document.add_layer("Paint");
 		assert!(document.add_layer_mask(1));
 		assert!(document.set_layer_mask_enabled(1, false));
+		let layer_ids = document.layers.iter().map(|layer| layer.id).collect::<Vec<_>>();
+		document
+			.set_layer_hierarchy(vec![LayerHierarchyNode::Group(LayerGroup {
+				id: common::GroupId::new(),
+				name: "Stack".to_string(),
+				visible: true,
+				opacity_percent: 85,
+				children: layer_ids.into_iter().map(LayerHierarchyNode::Layer).collect(),
+			})])
+			.expect("manifest test hierarchy should be valid");
 
 		let manifest = ProjectManifest::from(&document);
 		let json = serde_json::to_string_pretty(&manifest).expect("manifest should serialize");
@@ -640,6 +736,8 @@ mod tests {
 		assert_eq!(restored.layers[1].offset_x, 0);
 		assert!(restored.layers[1].payload_path.starts_with("layers/"));
 		assert!(restored.layers[1].payload_path.ends_with(".png"));
+		assert_eq!(restored.layer_hierarchy.len(), 1);
+		assert!(matches!(restored.layer_hierarchy[0], ManifestHierarchyNode::Group(_)));
 	}
 
 	#[test]
@@ -901,6 +999,71 @@ mod tests {
 	}
 
 	#[test]
+	fn flatten_document_propagates_group_visibility_and_opacity() {
+		let mut document = build_grouped_scene();
+		let index = (8 * document.canvas_size.width as usize + 8) * 4;
+
+		let grouped = flatten_document_rgba(&document);
+		assert_ne!(&grouped[index..index + 4], &[20, 30, 40, 255]);
+
+		let mut hidden_hierarchy = document.layer_hierarchy().to_vec();
+		if let LayerHierarchyNode::Group(group) = &mut hidden_hierarchy[1] {
+			group.visible = false;
+		}
+		document
+			.set_layer_hierarchy(hidden_hierarchy)
+			.expect("hidden hierarchy should remain valid");
+		let hidden = flatten_document_rgba(&document);
+		assert_eq!(&hidden[index..index + 4], &[20, 30, 40, 255]);
+	}
+
+	#[test]
+	fn grouped_scene_roundtrip_preserves_hierarchy_and_flattened_output() {
+		let document = build_grouped_scene();
+		let expected = flatten_document_rgba(&document);
+
+		let path = temporary_project_path();
+		save_document_to_path(&path, &document).expect("grouped scene should save");
+		let restored = load_document_from_path(&path).expect("grouped scene should load");
+		fs::remove_file(&path).expect("temporary project file should be removed");
+
+		assert_eq!(restored.group_count(), 2);
+		assert_eq!(restored.layer_hierarchy(), document.layer_hierarchy());
+		assert_eq!(flatten_document_rgba(&restored), expected);
+	}
+
+	#[test]
+	fn grouped_scene_png_export_matches_flattened_output() {
+		let document = build_grouped_scene();
+		let expected = flatten_document_rgba(&document);
+
+		let path = std::env::temp_dir().join(format!("phototux-grouped-{}.png", temporary_suffix()));
+		export_png_to_path(&path, &document).expect("grouped scene png export should succeed");
+		let restored = import_png_from_path(&path).expect("grouped scene png import should succeed");
+		fs::remove_file(&path).expect("temporary png should be removed");
+
+		assert_eq!(flatten_document_rgba(&restored), expected);
+	}
+
+	#[test]
+	fn update_flattened_region_matches_full_flatten_for_grouped_scene() {
+		let document = build_grouped_scene();
+		let expected = flatten_document_rgba(&document);
+		let mut partial = expected.clone();
+		let rect = common::CanvasRect::new(2, 2, 12, 12);
+
+		for y in rect.y as usize..(rect.y + rect.height as i32) as usize {
+			for x in rect.x as usize..(rect.x + rect.width as i32) as usize {
+				let index = (y * document.canvas_size.width as usize + x) * 4;
+				partial[index..index + 4].copy_from_slice(&[9, 8, 7, 6]);
+			}
+		}
+
+		update_flattened_region_rgba(&document, &mut partial, rect);
+		assert_eq!(partial, expected);
+	}
+
+	#[test]
 	fn flatten_document_applies_layer_offsets() {
 		let mut document = Document::new(6, 6);
 		let tile_size = document.tile_size as usize;
@@ -1093,55 +1256,127 @@ pub fn update_flattened_region_rgba(document: &Document, output: &mut [u8], rect
         output[dst_offset..dst_offset + row_len].fill(0);
     }
 
-    for layer in &document.layers {
-        if !layer.visible {
-            continue;
-        }
+	composite_hierarchy_into(document, output, Some(rect));
+}
 
-        let layer_opacity = layer.opacity_percent as f32 / 100.0;
-        for (coord, tile) in &layer.tiles {
-			let mask_tile = layer
-				.mask
-				.as_ref()
-				.filter(|mask| mask.enabled)
-				.and_then(|mask| mask.tiles.get(coord));
-            let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
-            let tile_canvas_x = tile_origin_x as i32 + layer.offset_x;
-            let tile_canvas_y = tile_origin_y as i32 + layer.offset_y;
+fn composite_hierarchy_into(
+	document: &Document,
+	output: &mut [u8],
+	clip_rect: Option<common::CanvasRect>,
+) {
+	composite_hierarchy_nodes(document, &document.layer_hierarchy, output, clip_rect, true, 1.0);
+}
 
-            if tile_canvas_x + document.tile_size as i32 <= rect.x || tile_canvas_x >= rect.x + rect.width as i32 {
-                continue;
-            }
-            if tile_canvas_y + document.tile_size as i32 <= rect.y || tile_canvas_y >= rect.y + rect.height as i32 {
-                continue;
-            }
+fn composite_hierarchy_nodes(
+	document: &Document,
+	nodes: &[LayerHierarchyNode],
+	output: &mut [u8],
+	clip_rect: Option<common::CanvasRect>,
+	ancestors_visible: bool,
+	ancestor_opacity: f32,
+) {
+	for node in nodes {
+		match node {
+			LayerHierarchyNode::Layer(layer_id) => {
+				let Some(layer) = document.layer_by_id(*layer_id) else {
+					continue;
+				};
+				if !ancestors_visible || !layer.visible {
+					continue;
+				}
 
-            let canvas_clip_y = tile_canvas_y.max(rect.y).max(0);
-            let canvas_clip_h = (tile_canvas_y + document.tile_size as i32).min(rect.y + rect.height as i32).min(document.canvas_size.height as i32);
-            let canvas_clip_x = tile_canvas_x.max(rect.x).max(0);
-            let canvas_clip_w = (tile_canvas_x + document.tile_size as i32).min(rect.x + rect.width as i32).min(document.canvas_size.width as i32);
+				let effective_opacity = ancestor_opacity * (layer.opacity_percent as f32 / 100.0);
+				if effective_opacity <= 0.0 {
+					continue;
+				}
 
-            for canvas_y in canvas_clip_y..canvas_clip_h {
-                let local_y = (canvas_y - tile_canvas_y) as usize;
-                let canvas_y_usize = canvas_y as usize;
-                
-                for canvas_x in canvas_clip_x..canvas_clip_w {
-                    let local_x = (canvas_x - tile_canvas_x) as usize;
-                    let src_index = (local_y * document.tile_size as usize + local_x) * 4;
-					let mask_alpha = mask_tile
-						.map(|tile| tile.alpha[local_y * document.tile_size as usize + local_x])
-						.unwrap_or(255);
-                    let dst_index = (canvas_y_usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
-                    
-					composite_masked_pixel(
-                        &mut output[dst_index..dst_index + 4],
-                        &tile.pixels[src_index..src_index + 4],
-						mask_alpha,
-                        layer_opacity,
-                        layer.blend_mode,
-                    );
-                }
-            }
-        }
-    }
+				composite_layer_into(document, layer, output, clip_rect, effective_opacity);
+			}
+			LayerHierarchyNode::Group(group) => {
+				if !ancestors_visible || !group.visible {
+					continue;
+				}
+				let effective_opacity = ancestor_opacity * (group.opacity_percent as f32 / 100.0);
+				if effective_opacity <= 0.0 {
+					continue;
+				}
+				composite_hierarchy_nodes(
+					document,
+					&group.children,
+					output,
+					clip_rect,
+					true,
+					effective_opacity,
+				);
+			}
+		}
+	}
+}
+
+fn composite_layer_into(
+	document: &Document,
+	layer: &RasterLayer,
+	output: &mut [u8],
+	clip_rect: Option<common::CanvasRect>,
+	layer_opacity: f32,
+) {
+	for (coord, tile) in &layer.tiles {
+		let mask_tile = layer
+			.mask
+			.as_ref()
+			.filter(|mask| mask.enabled)
+			.and_then(|mask| mask.tiles.get(coord));
+		let (tile_origin_x, tile_origin_y) = document.tile_origin(*coord);
+		let tile_canvas_x = tile_origin_x as i32 + layer.offset_x;
+		let tile_canvas_y = tile_origin_y as i32 + layer.offset_y;
+
+		if let Some(rect) = clip_rect {
+			if tile_canvas_x + document.tile_size as i32 <= rect.x || tile_canvas_x >= rect.x + rect.width as i32 {
+				continue;
+			}
+			if tile_canvas_y + document.tile_size as i32 <= rect.y || tile_canvas_y >= rect.y + rect.height as i32 {
+				continue;
+			}
+		}
+
+		let (start_x, end_x, start_y, end_y) = if let Some(rect) = clip_rect {
+			(
+				tile_canvas_x.max(rect.x).max(0),
+				(tile_canvas_x + document.tile_size as i32)
+					.min(rect.x + rect.width as i32)
+					.min(document.canvas_size.width as i32),
+				tile_canvas_y.max(rect.y).max(0),
+				(tile_canvas_y + document.tile_size as i32)
+					.min(rect.y + rect.height as i32)
+					.min(document.canvas_size.height as i32),
+			)
+		} else {
+			(
+				tile_canvas_x.max(0),
+				(tile_canvas_x + document.tile_size as i32).min(document.canvas_size.width as i32),
+				tile_canvas_y.max(0),
+				(tile_canvas_y + document.tile_size as i32).min(document.canvas_size.height as i32),
+			)
+		};
+
+		for canvas_y in start_y..end_y {
+			let local_y = (canvas_y - tile_canvas_y) as usize;
+			for canvas_x in start_x..end_x {
+				let local_x = (canvas_x - tile_canvas_x) as usize;
+				let src_index = (local_y * document.tile_size as usize + local_x) * 4;
+				let mask_alpha = mask_tile
+					.map(|tile| tile.alpha[local_y * document.tile_size as usize + local_x])
+					.unwrap_or(255);
+				let dst_index =
+					(canvas_y as usize * document.canvas_size.width as usize + canvas_x as usize) * 4;
+				composite_masked_pixel(
+					&mut output[dst_index..dst_index + 4],
+					&tile.pixels[src_index..src_index + 4],
+					mask_alpha,
+					layer_opacity,
+					layer.blend_mode,
+				);
+			}
+		}
+	}
 }

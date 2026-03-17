@@ -354,7 +354,7 @@ Use a tile-aware composition pipeline with dirty-tile invalidation and an offscr
 
 ### Post-MVP Document Extensions
 - `Mask` is now modeled as an optional embedded alpha-mask payload on each raster layer.
-- `LayerGroup` now exists as a document-owned hierarchy node for post-MVP structural workflows, with flattening and persistence semantics staged separately from the initial headless model.
+- `LayerGroup` now exists as a document-owned hierarchy node for post-MVP structural workflows, with recursive `.ptx` hierarchy persistence and inherited visibility and opacity propagation during grouped flattening.
 
 ### PSD Mapping Principle
 PSD interoperability must map into the PhotoTux document model without changing the internal architecture to mirror Photoshop-specific internals.

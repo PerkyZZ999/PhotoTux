@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::{CanvasRaster, CanvasRect, CanvasSize, APP_NAME};
+use common::{CanvasRaster, CanvasRect, CanvasSize, GroupId, APP_NAME};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
@@ -18,13 +18,17 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
-    pub index: usize,
+    pub index: Option<usize>,
+    pub group_id: Option<GroupId>,
     pub name: String,
+    pub depth: usize,
+    pub is_group: bool,
     pub visible: bool,
     pub opacity_percent: u8,
     pub has_mask: bool,
     pub mask_enabled: bool,
     pub mask_target_active: bool,
+    pub is_selected: bool,
     pub is_active: bool,
 }
 
@@ -73,6 +77,12 @@ pub struct ShellSnapshot {
     pub active_layer_has_mask: bool,
     pub active_layer_mask_enabled: bool,
     pub active_edit_target_name: String,
+    pub selected_structure_name: String,
+    pub selected_structure_is_group: bool,
+    pub can_create_group_from_active_layer: bool,
+    pub can_ungroup_selected_group: bool,
+    pub can_move_active_layer_into_selected_group: bool,
+    pub can_move_active_layer_out_of_group: bool,
     pub active_layer_bounds: Option<CanvasRect>,
     pub transform_preview_rect: Option<CanvasRect>,
     pub transform_active: bool,
@@ -98,7 +108,13 @@ pub trait ShellController {
     fn edit_active_layer_pixels(&mut self);
     fn edit_active_layer_mask(&mut self);
     fn select_layer(&mut self, index: usize);
+    fn select_group(&mut self, group_id: GroupId);
     fn toggle_layer_visibility(&mut self, index: usize);
+    fn toggle_group_visibility(&mut self, group_id: GroupId);
+    fn create_group_from_active_layer(&mut self);
+    fn ungroup_selected_group(&mut self);
+    fn move_active_layer_into_selected_group(&mut self);
+    fn move_active_layer_out_of_group(&mut self);
     fn increase_active_layer_opacity(&mut self);
     fn decrease_active_layer_opacity(&mut self);
     fn next_active_layer_blend_mode(&mut self);
@@ -2031,6 +2047,7 @@ impl ShellUiState {
             format!("Tool: {}", snapshot.active_tool_name),
             format!("Tool Shortcut: {}", shell_tool_shortcut(snapshot.active_tool)),
             format!("Layer: {}", snapshot.active_layer_name),
+            format!("Selection: {}", snapshot.selected_structure_name),
             format!("Edit Target: {}", snapshot.active_edit_target_name),
             format!("Blend: {}", snapshot.active_layer_blend_mode),
             format!("Opacity: {}%", snapshot.active_layer_opacity_percent),
@@ -2336,8 +2353,12 @@ impl ShellUiState {
         actions.add_css_class("layers-toolbar");
         for (label, action) in [
             ("+ Layer", LayerAction::Add),
+            ("+ Group", LayerAction::AddGroup),
+            ("Ungroup", LayerAction::Ungroup),
             ("Duplicate", LayerAction::Duplicate),
             ("Delete", LayerAction::Delete),
+            ("Into Group", LayerAction::MoveIntoGroup),
+            ("Out Group", LayerAction::MoveOutOfGroup),
             ("+ Mask", LayerAction::AddMask),
             (
                 if snapshot.active_layer_mask_enabled { "Mask Off" } else { "Mask On" },
@@ -2354,6 +2375,10 @@ impl ShellUiState {
             button.add_css_class("tool-chip");
             button.add_css_class("layer-action-chip");
             match action {
+                LayerAction::AddGroup => button.set_sensitive(snapshot.can_create_group_from_active_layer),
+                LayerAction::Ungroup => button.set_sensitive(snapshot.can_ungroup_selected_group),
+                LayerAction::MoveIntoGroup => button.set_sensitive(snapshot.can_move_active_layer_into_selected_group),
+                LayerAction::MoveOutOfGroup => button.set_sensitive(snapshot.can_move_active_layer_out_of_group),
                 LayerAction::AddMask => button.set_sensitive(!snapshot.active_layer_has_mask),
                 LayerAction::ToggleMask => button.set_sensitive(snapshot.active_layer_has_mask),
                 LayerAction::ToggleMaskTarget => button.set_sensitive(snapshot.active_layer_has_mask),
@@ -2362,8 +2387,12 @@ impl ShellUiState {
             let controller = self.controller.clone();
             button.connect_clicked(move |_| match action {
                 LayerAction::Add => controller.borrow_mut().add_layer(),
+                LayerAction::AddGroup => controller.borrow_mut().create_group_from_active_layer(),
+                LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
                 LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
                 LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
+                LayerAction::MoveIntoGroup => controller.borrow_mut().move_active_layer_into_selected_group(),
+                LayerAction::MoveOutOfGroup => controller.borrow_mut().move_active_layer_out_of_group(),
                 LayerAction::AddMask => controller.borrow_mut().add_active_layer_mask(),
                 LayerAction::ToggleMask => controller.borrow_mut().toggle_active_layer_mask_enabled(),
                 LayerAction::ToggleMaskTarget => {
@@ -2384,12 +2413,16 @@ impl ShellUiState {
 
         for layer in &snapshot.layers {
             let row = GtkBox::new(Orientation::Horizontal, 4);
-            row.add_css_class(if layer.is_active { "layer-row-active" } else { "layer-row" });
+            row.add_css_class(if layer.is_selected { "layer-row-active" } else { "layer-row" });
+            row.set_margin_start((layer.depth as i32) * 14);
             if layer.mask_target_active {
                 row.add_css_class("layer-row-mask-target");
             }
             if layer.has_mask && !layer.mask_enabled {
                 row.add_css_class("layer-row-mask-disabled");
+            }
+            if layer.is_group {
+                row.add_css_class("layer-row-group");
             }
 
             let visibility_icon = if layer.visible {
@@ -2400,75 +2433,101 @@ impl ShellUiState {
             let visibility =
                 build_icon_only_button(visibility_icon, "Toggle Visibility", "menu-button", 12);
             visibility.add_css_class("layer-visibility-button");
-            {
+            if let Some(index) = layer.index {
                 let controller = self.controller.clone();
-                let index = layer.index;
                 visibility.connect_clicked(move |_| controller.borrow_mut().toggle_layer_visibility(index));
+            } else if let Some(group_id) = layer.group_id {
+                let controller = self.controller.clone();
+                visibility.connect_clicked(move |_| controller.borrow_mut().toggle_group_visibility(group_id));
             }
             row.append(&visibility);
 
-            let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-            target_strip.add_css_class("layer-target-strip");
-
-            let layer_target = build_target_chip(
-                "L",
-                "Select the layer and edit its pixels",
-                layer.is_active && !layer.mask_target_active,
-                true,
-            );
-            {
-                let controller = self.controller.clone();
-                let index = layer.index;
-                layer_target.connect_clicked(move |_| {
-                    let mut controller = controller.borrow_mut();
-                    controller.select_layer(index);
-                    controller.edit_active_layer_pixels();
-                });
-            }
-            target_strip.append(&layer_target);
-
-            let mask_target = build_target_chip(
-                if layer.mask_enabled { "M" } else { "M!" },
-                "Select the layer and edit its mask",
-                layer.mask_target_active,
-                layer.has_mask,
-            );
-            if layer.has_mask {
-                let controller = self.controller.clone();
-                let index = layer.index;
-                mask_target.connect_clicked(move |_| {
-                    let mut controller = controller.borrow_mut();
-                    controller.select_layer(index);
-                    controller.edit_active_layer_mask();
-                });
-            }
-            target_strip.append(&mask_target);
-            row.append(&target_strip);
-
-            let mask_suffix = if !layer.has_mask {
-                String::new()
-            } else if layer.mask_target_active {
-                if layer.mask_enabled {
-                    "  [Mask Editing]".to_string()
-                } else {
-                    "  [Mask Editing Off]".to_string()
+            if layer.is_group {
+                let target_strip = GtkBox::new(Orientation::Horizontal, 3);
+                target_strip.add_css_class("layer-target-strip");
+                let group_chip = build_target_chip("G", "Select this group", layer.is_selected, true);
+                if let Some(group_id) = layer.group_id {
+                    let controller = self.controller.clone();
+                    group_chip.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
                 }
-            } else if layer.mask_enabled {
-                "  [Mask]".to_string()
+                target_strip.append(&group_chip);
+                row.append(&target_strip);
+
+                let select = Button::with_label(&format!("{}  ({}%) [Group]", layer.name, layer.opacity_percent));
+                select.add_css_class("layer-select-button");
+                if layer.is_selected {
+                    select.add_css_class("layer-select-button-active");
+                }
+                if let Some(group_id) = layer.group_id {
+                    let controller = self.controller.clone();
+                    select.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
+                }
+                row.append(&select);
             } else {
-                "  [Mask Off]".to_string()
-            };
-            let select = Button::with_label(&format!("{}  ({}%){}", layer.name, layer.opacity_percent, mask_suffix));
-            select.add_css_class("layer-select-button");
-            if layer.is_active {
-                select.add_css_class("layer-select-button-active");
+                let target_strip = GtkBox::new(Orientation::Horizontal, 3);
+                target_strip.add_css_class("layer-target-strip");
+
+                let layer_target = build_target_chip(
+                    "L",
+                    "Select the layer and edit its pixels",
+                    layer.is_active && !layer.mask_target_active,
+                    true,
+                );
+                if let Some(index) = layer.index {
+                    let controller = self.controller.clone();
+                    layer_target.connect_clicked(move |_| {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(index);
+                        controller.edit_active_layer_pixels();
+                    });
+                }
+                target_strip.append(&layer_target);
+
+                let mask_target = build_target_chip(
+                    if layer.mask_enabled { "M" } else { "M!" },
+                    "Select the layer and edit its mask",
+                    layer.mask_target_active,
+                    layer.has_mask,
+                );
+                if layer.has_mask {
+                    if let Some(index) = layer.index {
+                        let controller = self.controller.clone();
+                        mask_target.connect_clicked(move |_| {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(index);
+                            controller.edit_active_layer_mask();
+                        });
+                    }
+                }
+                target_strip.append(&mask_target);
+                row.append(&target_strip);
+
+                let mask_suffix = if !layer.has_mask {
+                    String::new()
+                } else if layer.mask_target_active {
+                    if layer.mask_enabled {
+                        "  [Mask Editing]".to_string()
+                    } else {
+                        "  [Mask Editing Off]".to_string()
+                    }
+                } else {
+                    if layer.mask_enabled {
+                        "  [Mask]".to_string()
+                    } else {
+                        "  [Mask Off]".to_string()
+                    }
+                };
+                let select = Button::with_label(&format!("{}  ({}%){}", layer.name, layer.opacity_percent, mask_suffix));
+                select.add_css_class("layer-select-button");
+                if layer.is_selected {
+                    select.add_css_class("layer-select-button-active");
+                }
+                if let Some(index) = layer.index {
+                    let controller = self.controller.clone();
+                    select.connect_clicked(move |_| controller.borrow_mut().select_layer(index));
+                }
+                row.append(&select);
             }
-            {
-                let controller = self.controller.clone();
-                let index = layer.index;
-                select.connect_clicked(move |_| controller.borrow_mut().select_layer(index));
-            }
-            row.append(&select);
 
             self.layers_body.append(&row);
         }
@@ -2716,8 +2775,12 @@ fn apply_status_notice_style(label: &Label, message: &str) {
 #[derive(Clone, Copy)]
 enum LayerAction {
     Add,
+    AddGroup,
+    Ungroup,
     Duplicate,
     Delete,
+    MoveIntoGroup,
+    MoveOutOfGroup,
     AddMask,
     ToggleMask,
     ToggleMaskTarget,
@@ -3625,6 +3688,10 @@ popover.menu-dropdown contents {
 
 .layer-row-mask-disabled {
     background: linear-gradient(90deg, rgba(152,128,66,0.16), rgba(44,44,44,0.92));
+}
+
+.layer-row-group {
+    background: linear-gradient(90deg, rgba(80,92,110,0.18), rgba(44,44,44,0.92));
 }
 
 .layer-select-button {

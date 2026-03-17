@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{CanvasRaster, CanvasRect};
-use doc_model::{BlendMode, Document, LayerEditTarget, RasterMask};
+use doc_model::{
+    BlendMode, Document, LayerEditTarget, LayerHierarchyNode, LayerHierarchyNodeRef, RasterMask,
+};
 use file_io::{
     export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
     import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
@@ -31,6 +33,7 @@ const AUTOSAVE_IDLE_INTERVAL: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 struct PhotoTuxController {
     document: Document,
+    selected_structure_target: LayerHierarchyNodeRef,
     history: HistoryStack<EditorHistoryEntry>,
     foreground_color: [u8; 4],
     background_color: [u8; 4],
@@ -101,6 +104,7 @@ enum EditorOperation {
     MoveLayer(MoveLayerRecord),
     Selection(RectangularSelectionRecord),
     MaskState(MaskStateRecord),
+    LayerHierarchy(LayerHierarchyRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +114,50 @@ struct MaskStateRecord {
     after_mask: Option<RasterMask>,
     before_target: LayerEditTarget,
     after_target: LayerEditTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayerHierarchyRecord {
+    before_hierarchy: Vec<LayerHierarchyNode>,
+    after_hierarchy: Vec<LayerHierarchyNode>,
+    before_active_layer_id: common::LayerId,
+    after_active_layer_id: common::LayerId,
+    before_selected_target: LayerHierarchyNodeRef,
+    after_selected_target: LayerHierarchyNodeRef,
+}
+
+impl LayerHierarchyRecord {
+    fn undo(&self, controller: &mut PhotoTuxController) {
+        self.apply(
+            controller,
+            self.before_hierarchy.clone(),
+            self.before_active_layer_id,
+            self.before_selected_target,
+        );
+    }
+
+    fn redo(&self, controller: &mut PhotoTuxController) {
+        self.apply(
+            controller,
+            self.after_hierarchy.clone(),
+            self.after_active_layer_id,
+            self.after_selected_target,
+        );
+    }
+
+    fn apply(
+        &self,
+        controller: &mut PhotoTuxController,
+        hierarchy: Vec<LayerHierarchyNode>,
+        active_layer_id: common::LayerId,
+        selected_target: LayerHierarchyNodeRef,
+    ) {
+        let _ = controller.document.set_layer_hierarchy(hierarchy);
+        if let Some(layer_index) = controller.document.layer_index_by_id(active_layer_id) {
+            let _ = controller.document.set_active_layer(layer_index);
+        }
+        controller.selected_structure_target = selected_target;
+    }
 }
 
 impl MaskStateRecord {
@@ -499,6 +547,7 @@ impl PhotoTuxController {
 
         let mut controller = Self {
             document,
+            selected_structure_target: LayerHierarchyNodeRef::Layer(common::LayerId::new()),
             history,
             foreground_color: [232, 236, 243, 255],
             background_color: [27, 29, 33, 255],
@@ -524,6 +573,7 @@ impl PhotoTuxController {
             transform_session: None,
             interaction: None,
         };
+        controller.reset_selected_structure_target_to_active_layer();
         controller.refresh_recovery_path();
         controller.recovery_offer_pending = controller
             .recovery_path
@@ -535,6 +585,59 @@ impl PhotoTuxController {
 
     fn active_layer_name(&self) -> String {
         self.document.active_layer().name.clone()
+    }
+
+    fn active_layer_id(&self) -> common::LayerId {
+        self.document.active_layer().id
+    }
+
+    fn reset_selected_structure_target_to_active_layer(&mut self) {
+        self.selected_structure_target = LayerHierarchyNodeRef::Layer(self.active_layer_id());
+    }
+
+    fn selected_structure_name(&self) -> String {
+        match self.selected_structure_target {
+            LayerHierarchyNodeRef::Layer(layer_id) => self
+                .document
+                .layer_by_id(layer_id)
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| self.active_layer_name()),
+            LayerHierarchyNodeRef::Group(group_id) => self
+                .document
+                .group(group_id)
+                .map(|group| group.name.clone())
+                .unwrap_or_else(|| self.active_layer_name()),
+        }
+    }
+
+    fn selected_group_id(&self) -> Option<common::GroupId> {
+        match self.selected_structure_target {
+            LayerHierarchyNodeRef::Group(group_id) => Some(group_id),
+            LayerHierarchyNodeRef::Layer(_) => None,
+        }
+    }
+
+    fn push_layer_hierarchy_operation(
+        &mut self,
+        label: impl Into<String>,
+        before_hierarchy: Vec<LayerHierarchyNode>,
+        before_active_layer_id: common::LayerId,
+        before_selected_target: LayerHierarchyNodeRef,
+        after_hierarchy: Vec<LayerHierarchyNode>,
+        after_active_layer_id: common::LayerId,
+        after_selected_target: LayerHierarchyNodeRef,
+    ) {
+        self.push_operation(
+            label,
+            EditorOperation::LayerHierarchy(LayerHierarchyRecord {
+                before_hierarchy,
+                after_hierarchy,
+                before_active_layer_id,
+                after_active_layer_id,
+                before_selected_target,
+                after_selected_target,
+            }),
+        );
     }
 
     fn push_history(&mut self, entry: impl Into<String>) {
@@ -659,24 +762,186 @@ impl PhotoTuxController {
         );
     }
 
+    fn collect_layer_items(
+        &self,
+        nodes: &[LayerHierarchyNode],
+        depth: usize,
+        output: &mut Vec<LayerPanelItem>,
+    ) {
+        for node in nodes.iter().rev() {
+            match node {
+                LayerHierarchyNode::Layer(layer_id) => {
+                    let Some(layer_index) = self.document.layer_index_by_id(*layer_id) else {
+                        continue;
+                    };
+                    let Some(layer) = self.document.layer(layer_index) else {
+                        continue;
+                    };
+                    output.push(LayerPanelItem {
+                        index: Some(layer_index),
+                        group_id: None,
+                        name: layer.name.clone(),
+                        depth,
+                        is_group: false,
+                        visible: layer.visible,
+                        opacity_percent: layer.opacity_percent,
+                        has_mask: layer.mask.is_some(),
+                        mask_enabled: layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
+                        mask_target_active: layer_index == self.document.active_layer_index()
+                            && self.document.active_edit_target() == LayerEditTarget::LayerMask,
+                        is_selected: self.selected_structure_target == LayerHierarchyNodeRef::Layer(*layer_id),
+                        is_active: layer_index == self.document.active_layer_index(),
+                    });
+                }
+                LayerHierarchyNode::Group(group) => {
+                    output.push(LayerPanelItem {
+                        index: None,
+                        group_id: Some(group.id),
+                        name: group.name.clone(),
+                        depth,
+                        is_group: true,
+                        visible: group.visible,
+                        opacity_percent: group.opacity_percent,
+                        has_mask: false,
+                        mask_enabled: false,
+                        mask_target_active: false,
+                        is_selected: self.selected_structure_target == LayerHierarchyNodeRef::Group(group.id),
+                        is_active: false,
+                    });
+                    self.collect_layer_items(&group.children, depth + 1, output);
+                }
+            }
+        }
+    }
+
     fn layer_items(&self) -> Vec<LayerPanelItem> {
-        self.document
-            .layers
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(index, layer)| LayerPanelItem {
-                index,
-                name: layer.name.clone(),
-                visible: layer.visible,
-                opacity_percent: layer.opacity_percent,
-                has_mask: layer.mask.is_some(),
-                mask_enabled: layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
-                mask_target_active: index == self.document.active_layer_index()
-                    && self.document.active_edit_target() == LayerEditTarget::LayerMask,
-                is_active: index == self.document.active_layer_index(),
-            })
-            .collect()
+        let mut items = Vec::new();
+        self.collect_layer_items(self.document.layer_hierarchy(), 0, &mut items);
+        items
+    }
+
+    fn create_group_from_active_layer_inner(&mut self) {
+        let before_hierarchy = self.document.layer_hierarchy().to_vec();
+        let before_active_layer_id = self.active_layer_id();
+        let before_selected_target = self.selected_structure_target;
+        let active_layer_name = self.active_layer_name();
+        let group_name = format!("{} Group", active_layer_name);
+        let Some(group_id) = self.document.wrap_hierarchy_node_in_group(
+            LayerHierarchyNodeRef::Layer(before_active_layer_id),
+            group_name,
+        ) else {
+            return;
+        };
+        self.selected_structure_target = LayerHierarchyNodeRef::Group(group_id);
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_layer_hierarchy_operation(
+            format!("Group {}", active_layer_name),
+            before_hierarchy,
+            before_active_layer_id,
+            before_selected_target,
+            self.document.layer_hierarchy().to_vec(),
+            self.active_layer_id(),
+            self.selected_structure_target,
+        );
+        self.status_message = format!("Grouped {}", active_layer_name);
+    }
+
+    fn ungroup_selected_group_inner(&mut self) {
+        let Some(group_id) = self.selected_group_id() else {
+            return;
+        };
+        let group_name = self
+            .document
+            .group(group_id)
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| "Group".to_string());
+        let before_hierarchy = self.document.layer_hierarchy().to_vec();
+        let before_active_layer_id = self.active_layer_id();
+        let before_selected_target = self.selected_structure_target;
+        if !self.document.ungroup(group_id) {
+            return;
+        }
+        self.reset_selected_structure_target_to_active_layer();
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_layer_hierarchy_operation(
+            format!("Ungroup {}", group_name),
+            before_hierarchy,
+            before_active_layer_id,
+            before_selected_target,
+            self.document.layer_hierarchy().to_vec(),
+            self.active_layer_id(),
+            self.selected_structure_target,
+        );
+        self.status_message = format!("Ungrouped {}", group_name);
+    }
+
+    fn move_active_layer_into_selected_group_inner(&mut self) {
+        let Some(group_id) = self.selected_group_id() else {
+            return;
+        };
+        let active_layer_id = self.active_layer_id();
+        let active_layer_name = self.active_layer_name();
+        let group_name = self
+            .document
+            .group(group_id)
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| "Group".to_string());
+        let before_hierarchy = self.document.layer_hierarchy().to_vec();
+        let before_selected_target = self.selected_structure_target;
+        if !self
+            .document
+            .move_node_into_group(LayerHierarchyNodeRef::Layer(active_layer_id), group_id)
+        {
+            return;
+        }
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_layer_hierarchy_operation(
+            format!("Move {} Into {}", active_layer_name, group_name),
+            before_hierarchy,
+            active_layer_id,
+            before_selected_target,
+            self.document.layer_hierarchy().to_vec(),
+            self.active_layer_id(),
+            self.selected_structure_target,
+        );
+        self.status_message = format!("Moved {} into {}", active_layer_name, group_name);
+    }
+
+    fn move_active_layer_out_of_group_inner(&mut self) {
+        let active_layer_id = self.active_layer_id();
+        let active_layer_name = self.active_layer_name();
+        let Some(group_id) = self.document.group_for_layer(active_layer_id) else {
+            return;
+        };
+        let group_name = self
+            .document
+            .group(group_id)
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| "Group".to_string());
+        let before_hierarchy = self.document.layer_hierarchy().to_vec();
+        let before_selected_target = self.selected_structure_target;
+        if !self
+            .document
+            .move_node_out_of_group(LayerHierarchyNodeRef::Layer(active_layer_id))
+        {
+            return;
+        }
+        self.selected_structure_target = LayerHierarchyNodeRef::Layer(active_layer_id);
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+        self.push_layer_hierarchy_operation(
+            format!("Move {} Out Of {}", active_layer_name, group_name),
+            before_hierarchy,
+            active_layer_id,
+            before_selected_target,
+            self.document.layer_hierarchy().to_vec(),
+            self.active_layer_id(),
+            self.selected_structure_target,
+        );
+        self.status_message = format!("Moved {} out of {}", active_layer_name, group_name);
     }
 
     fn move_active_layer_by(&mut self, delta: isize) {
@@ -792,6 +1057,7 @@ impl PhotoTuxController {
         status_message: String,
     ) {
         self.document = document;
+        self.reset_selected_structure_target_to_active_layer();
         self.document_title = document_title;
         self.document_path = document_path;
         self.working_directory = working_directory;
@@ -901,6 +1167,7 @@ impl PhotoTuxController {
                     self.pending_recovery_load_job = None;
                     self.recovery_offer_pending = false;
                     self.document = document;
+                    self.reset_selected_structure_target_to_active_layer();
                     self.document_path = document_path;
                     self.document_title = document_title;
                     self.recovery_path = Some(recovery_path.clone());
@@ -1166,6 +1433,15 @@ impl ShellController for PhotoTuxController {
             active_layer_has_mask: active_layer.mask.is_some(),
             active_layer_mask_enabled: active_layer.mask.as_ref().map(|mask| mask.enabled).unwrap_or(false),
             active_edit_target_name: self.active_edit_target_name().to_string(),
+            selected_structure_name: self.selected_structure_name(),
+            selected_structure_is_group: matches!(self.selected_structure_target, LayerHierarchyNodeRef::Group(_)),
+            can_create_group_from_active_layer: true,
+            can_ungroup_selected_group: matches!(self.selected_structure_target, LayerHierarchyNodeRef::Group(_)),
+            can_move_active_layer_into_selected_group: self
+                .selected_group_id()
+                .map(|group_id| self.document.group_for_layer(self.active_layer_id()) != Some(group_id))
+                .unwrap_or(false),
+            can_move_active_layer_out_of_group: self.document.group_for_layer(self.active_layer_id()).is_some(),
             active_layer_bounds: self.active_layer_bounds(),
             transform_preview_rect: self.transform_preview_rect(),
             transform_active: self.transform_session.is_some(),
@@ -1331,7 +1607,16 @@ impl ShellController for PhotoTuxController {
     }
 
     fn select_layer(&mut self, index: usize) {
-        let _ = self.document.set_active_layer(index);
+        if self.document.set_active_layer(index) {
+            self.selected_structure_target = LayerHierarchyNodeRef::Layer(self.active_layer_id());
+        }
+    }
+
+    fn select_group(&mut self, group_id: common::GroupId) {
+        if self.document.group(group_id).is_some() {
+            self.selected_structure_target = LayerHierarchyNodeRef::Group(group_id);
+            self.status_message = format!("Selected group {}", self.selected_structure_name());
+        }
     }
 
     fn toggle_layer_visibility(&mut self, index: usize) {
@@ -1343,6 +1628,34 @@ impl ShellController for PhotoTuxController {
             self.mark_document_dirty();
             self.push_history(format!("Toggle Visibility {}", layer_name));
         }
+    }
+
+    fn toggle_group_visibility(&mut self, group_id: common::GroupId) {
+        if let Some(group) = self.document.group(group_id) {
+            let visible = !group.visible;
+            let group_name = group.name.clone();
+            if self.document.set_group_visibility(group_id, visible) {
+                self.bump_canvas_revision();
+                self.mark_document_dirty();
+                self.push_history(format!("Toggle Group Visibility {}", group_name));
+            }
+        }
+    }
+
+    fn create_group_from_active_layer(&mut self) {
+        self.create_group_from_active_layer_inner();
+    }
+
+    fn ungroup_selected_group(&mut self) {
+        self.ungroup_selected_group_inner();
+    }
+
+    fn move_active_layer_into_selected_group(&mut self) {
+        self.move_active_layer_into_selected_group_inner();
+    }
+
+    fn move_active_layer_out_of_group(&mut self) {
+        self.move_active_layer_out_of_group_inner();
     }
 
     fn increase_active_layer_opacity(&mut self) {
@@ -1511,6 +1824,11 @@ impl ShellController for PhotoTuxController {
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
+                EditorOperation::LayerHierarchy(record) => {
+                    record.undo(self);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
             }
         }
     }
@@ -1543,6 +1861,11 @@ impl ShellController for PhotoTuxController {
                 }
                 EditorOperation::MaskState(record) => {
                     record.redo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
+                EditorOperation::LayerHierarchy(record) => {
+                    record.redo(self);
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
@@ -2050,6 +2373,17 @@ mod tests {
         document
     }
 
+    fn first_group_id(document: &doc_model::Document) -> common::GroupId {
+        document
+            .layer_hierarchy()
+            .iter()
+            .find_map(|node| match node {
+                doc_model::LayerHierarchyNode::Group(group) => Some(group.id),
+                doc_model::LayerHierarchyNode::Layer(_) => None,
+            })
+            .expect("expected a top-level group")
+    }
+
     fn wait_for_background_jobs(controller: &mut PhotoTuxController) {
         for _ in 0..50 {
             controller.poll_background_tasks_at(Instant::now());
@@ -2467,6 +2801,79 @@ mod tests {
 
         controller.redo();
         assert_eq!(flattened_pixel(&controller.canvas_raster(), sample_x, sample_y), hidden_pixel);
+    }
+
+    #[test]
+    fn group_commands_update_snapshot_and_undo_redo() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+
+        controller.create_group_from_active_layer();
+        let group_id = first_group_id(&controller.document);
+        let grouped_snapshot = controller.snapshot();
+        assert!(grouped_snapshot.selected_structure_is_group);
+        assert!(grouped_snapshot.can_ungroup_selected_group);
+        assert!(grouped_snapshot
+            .layers
+            .iter()
+            .any(|item| item.is_group && item.group_id == Some(group_id)));
+
+        controller.undo();
+        assert_eq!(controller.document.group_count(), 0);
+
+        controller.redo();
+        assert_eq!(controller.document.group_count(), 1);
+        assert!(matches!(
+            controller.selected_structure_target,
+            doc_model::LayerHierarchyNodeRef::Group(_)
+        ));
+    }
+
+    #[test]
+    fn move_layer_into_and_out_of_group_roundtrips_through_history() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+
+        let top_layer_id = controller.document.active_layer().id;
+        controller.create_group_from_active_layer();
+        let group_id = first_group_id(&controller.document);
+
+        controller.select_layer(1);
+        let moved_layer_id = controller.document.active_layer().id;
+        controller.select_group(group_id);
+        controller.move_active_layer_into_selected_group();
+        assert_eq!(controller.document.group_for_layer(moved_layer_id), Some(group_id));
+
+        let nested_snapshot = controller.snapshot();
+        let moved_row = nested_snapshot
+            .layers
+            .iter()
+            .find(|item| item.index == Some(1))
+            .expect("expected moved layer row in snapshot");
+        assert_eq!(moved_row.depth, 1);
+
+        controller.undo();
+        assert_eq!(controller.document.group_for_layer(moved_layer_id), None);
+
+        controller.redo();
+        assert_eq!(controller.document.group_for_layer(moved_layer_id), Some(group_id));
+
+        controller.move_active_layer_out_of_group();
+        assert_eq!(controller.document.group_for_layer(moved_layer_id), None);
+
+        controller.undo();
+        assert_eq!(controller.document.group_for_layer(moved_layer_id), Some(group_id));
+        assert_eq!(controller.document.active_layer().id, moved_layer_id);
+        assert_eq!(
+            top_layer_id,
+            controller
+                .document
+                .layer(2)
+                .expect("top layer should still exist")
+                .id
+        );
     }
 
     #[test]

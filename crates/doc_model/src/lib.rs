@@ -262,6 +262,23 @@ impl Document {
         Self::find_group_in_nodes(&self.layer_hierarchy, group_id)
     }
 
+    pub fn group_for_layer(&self, layer_id: LayerId) -> Option<GroupId> {
+        Self::find_parent_group_for_ref(&self.layer_hierarchy, LayerHierarchyNodeRef::Layer(layer_id), None)
+    }
+
+    pub fn set_layer_hierarchy(
+        &mut self,
+        layer_hierarchy: Vec<LayerHierarchyNode>,
+    ) -> Result<(), &'static str> {
+        let previous = std::mem::replace(&mut self.layer_hierarchy, layer_hierarchy);
+        if let Err(error) = self.validate_layer_hierarchy() {
+            self.layer_hierarchy = previous;
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
     pub fn create_layer_group(
         &mut self,
         name: impl Into<String>,
@@ -300,6 +317,67 @@ impl Document {
         Some(group_id)
     }
 
+    pub fn wrap_hierarchy_node_in_group(
+        &mut self,
+        target: LayerHierarchyNodeRef,
+        name: impl Into<String>,
+    ) -> Option<GroupId> {
+        let mut hierarchy = self.layer_hierarchy.clone();
+        let group_id = Self::wrap_node_in_group_in_nodes(&mut hierarchy, target, name.into())?;
+        self.set_layer_hierarchy(hierarchy).ok()?;
+        Some(group_id)
+    }
+
+    pub fn ungroup(&mut self, group_id: GroupId) -> bool {
+        let mut hierarchy = self.layer_hierarchy.clone();
+        if !Self::ungroup_in_nodes(&mut hierarchy, group_id) {
+            return false;
+        }
+
+        self.set_layer_hierarchy(hierarchy).is_ok()
+    }
+
+    pub fn move_node_into_group(&mut self, node_ref: LayerHierarchyNodeRef, group_id: GroupId) -> bool {
+        if node_ref == LayerHierarchyNodeRef::Group(group_id) {
+            return false;
+        }
+
+        let mut hierarchy = self.layer_hierarchy.clone();
+        let Some(node) = Self::extract_node_from_nodes(&mut hierarchy, node_ref) else {
+            return false;
+        };
+        if Self::node_contains_group_id(&node, group_id) {
+            return false;
+        }
+        if Self::insert_node_into_group(&mut hierarchy, group_id, node).is_err() {
+            return false;
+        }
+
+        self.set_layer_hierarchy(hierarchy).is_ok()
+    }
+
+    pub fn move_node_out_of_group(&mut self, node_ref: LayerHierarchyNodeRef) -> bool {
+        let mut hierarchy = self.layer_hierarchy.clone();
+        let Some((node, Some(parent_group_id))) =
+            Self::extract_node_with_parent_group(&mut hierarchy, node_ref, None)
+        else {
+            return false;
+        };
+        if Self::insert_node_after_group(&mut hierarchy, parent_group_id, node).is_err() {
+            return false;
+        }
+
+        self.set_layer_hierarchy(hierarchy).is_ok()
+    }
+
+    pub fn set_group_visibility(&mut self, group_id: GroupId, visible: bool) -> bool {
+        let Some(group) = Self::find_group_mut_in_nodes(&mut self.layer_hierarchy, group_id) else {
+            return false;
+        };
+        group.visible = visible;
+        true
+    }
+
     pub fn validate_layer_hierarchy(&self) -> Result<(), &'static str> {
         let known_layer_ids = self.layers.iter().map(|layer| layer.id).collect::<HashSet<_>>();
         let mut referenced_layer_ids = HashSet::new();
@@ -319,6 +397,11 @@ impl Document {
     }
 
     pub fn layer(&self, index: usize) -> Option<&RasterLayer> {
+        self.layers.get(index)
+    }
+
+    pub fn layer_by_id(&self, layer_id: LayerId) -> Option<&RasterLayer> {
+        let index = self.layer_index_by_id(layer_id)?;
         self.layers.get(index)
     }
 
@@ -383,6 +466,206 @@ impl Document {
         }
 
         None
+    }
+
+    fn find_group_mut_in_nodes(
+        nodes: &mut [LayerHierarchyNode],
+        group_id: GroupId,
+    ) -> Option<&mut LayerGroup> {
+        for node in nodes {
+            if let LayerHierarchyNode::Group(group) = node {
+                if group.id == group_id {
+                    return Some(group);
+                }
+                if let Some(found) = Self::find_group_mut_in_nodes(&mut group.children, group_id) {
+                    return Some(found);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn find_parent_group_for_ref(
+        nodes: &[LayerHierarchyNode],
+        target: LayerHierarchyNodeRef,
+        parent_group_id: Option<GroupId>,
+    ) -> Option<GroupId> {
+        for node in nodes {
+            if Self::node_matches_ref(node, target) {
+                return parent_group_id;
+            }
+            if let LayerHierarchyNode::Group(group) = node {
+                if let Some(found) =
+                    Self::find_parent_group_for_ref(&group.children, target, Some(group.id))
+                {
+                    return Some(found);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn node_matches_ref(node: &LayerHierarchyNode, target: LayerHierarchyNodeRef) -> bool {
+        match (node, target) {
+            (LayerHierarchyNode::Layer(layer_id), LayerHierarchyNodeRef::Layer(target_id)) => {
+                *layer_id == target_id
+            }
+            (LayerHierarchyNode::Group(group), LayerHierarchyNodeRef::Group(target_id)) => {
+                group.id == target_id
+            }
+            _ => false,
+        }
+    }
+
+    fn wrap_node_in_group_in_nodes(
+        nodes: &mut Vec<LayerHierarchyNode>,
+        target: LayerHierarchyNodeRef,
+        name: String,
+    ) -> Option<GroupId> {
+        for index in 0..nodes.len() {
+            if Self::node_matches_ref(&nodes[index], target) {
+                let child = nodes.remove(index);
+                let group = LayerGroup::new(name, vec![child]);
+                let group_id = group.id;
+                nodes.insert(index, LayerHierarchyNode::Group(group));
+                return Some(group_id);
+            }
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
+                if let Some(group_id) =
+                    Self::wrap_node_in_group_in_nodes(&mut group.children, target, name.clone())
+                {
+                    return Some(group_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn ungroup_in_nodes(nodes: &mut Vec<LayerHierarchyNode>, group_id: GroupId) -> bool {
+        for index in 0..nodes.len() {
+            match &mut nodes[index] {
+                LayerHierarchyNode::Group(group) if group.id == group_id => {
+                    let LayerHierarchyNode::Group(group) = nodes.remove(index) else {
+                        return false;
+                    };
+                    nodes.splice(index..index, group.children);
+                    return true;
+                }
+                LayerHierarchyNode::Group(group) => {
+                    if Self::ungroup_in_nodes(&mut group.children, group_id) {
+                        return true;
+                    }
+                }
+                LayerHierarchyNode::Layer(_) => {}
+            }
+        }
+
+        false
+    }
+
+    fn extract_node_from_nodes(
+        nodes: &mut Vec<LayerHierarchyNode>,
+        target: LayerHierarchyNodeRef,
+    ) -> Option<LayerHierarchyNode> {
+        for index in 0..nodes.len() {
+            if Self::node_matches_ref(&nodes[index], target) {
+                return Some(nodes.remove(index));
+            }
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
+                if let Some(node) = Self::extract_node_from_nodes(&mut group.children, target) {
+                    return Some(node);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn extract_node_with_parent_group(
+        nodes: &mut Vec<LayerHierarchyNode>,
+        target: LayerHierarchyNodeRef,
+        parent_group_id: Option<GroupId>,
+    ) -> Option<(LayerHierarchyNode, Option<GroupId>)> {
+        for index in 0..nodes.len() {
+            if Self::node_matches_ref(&nodes[index], target) {
+                return Some((nodes.remove(index), parent_group_id));
+            }
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
+                if let Some(result) =
+                    Self::extract_node_with_parent_group(&mut group.children, target, Some(group.id))
+                {
+                    return Some(result);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn insert_node_into_group(
+        nodes: &mut Vec<LayerHierarchyNode>,
+        group_id: GroupId,
+        node: LayerHierarchyNode,
+    ) -> Result<(), LayerHierarchyNode> {
+        let mut pending_node = Some(node);
+        for entry in nodes {
+            if let LayerHierarchyNode::Group(group) = entry {
+                if group.id == group_id {
+                    group.children.push(pending_node.take().expect("node should still be present"));
+                    return Ok(());
+                }
+                if let Err(node) = Self::insert_node_into_group(&mut group.children, group_id, pending_node.take().expect("node should still be present")) {
+                    pending_node = Some(node);
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(pending_node.expect("node should still be present"))
+    }
+
+    fn insert_node_after_group(
+        nodes: &mut Vec<LayerHierarchyNode>,
+        group_id: GroupId,
+        node: LayerHierarchyNode,
+    ) -> Result<(), LayerHierarchyNode> {
+        let mut pending_node = Some(node);
+        for index in 0..nodes.len() {
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
+                if group.id == group_id {
+                    nodes.insert(index + 1, pending_node.take().expect("node should still be present"));
+                    return Ok(());
+                }
+                if let Err(node) = Self::insert_node_after_group(
+                    &mut group.children,
+                    group_id,
+                    pending_node.take().expect("node should still be present"),
+                ) {
+                    pending_node = Some(node);
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(pending_node.expect("node should still be present"))
+    }
+
+    fn node_contains_group_id(node: &LayerHierarchyNode, group_id: GroupId) -> bool {
+        match node {
+            LayerHierarchyNode::Layer(_) => false,
+            LayerHierarchyNode::Group(group) => {
+                group.id == group_id
+                    || group
+                        .children
+                        .iter()
+                        .any(|child| Self::node_contains_group_id(child, group_id))
+            }
+        }
     }
 
     fn validate_hierarchy_nodes(
@@ -823,7 +1106,10 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlendMode, Document, LayerEditTarget, LayerHierarchyNode, RasterTile, TileCoord};
+    use super::{
+        BlendMode, Document, LayerEditTarget, LayerHierarchyNode, LayerHierarchyNodeRef,
+        RasterTile, TileCoord,
+    };
     use common::CanvasRect;
 
     #[test]
@@ -927,6 +1213,56 @@ mod tests {
         assert!(document
             .create_layer_group("Nested Duplicate", &[background_id])
             .is_none());
+    }
+
+    #[test]
+    fn wrap_node_in_group_and_ungroup_roundtrip_hierarchy() {
+        let mut document = Document::new(640, 480);
+        document.add_layer("Sketch");
+        let sketch_id = document.layers[1].id;
+
+        let group_id = document
+            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(sketch_id), "Sketch Group")
+            .expect("wrapping a top-level layer should succeed");
+        assert_eq!(document.group_count(), 1);
+        assert!(document.group(group_id).is_some());
+
+        assert!(document.ungroup(group_id));
+        assert_eq!(document.group_count(), 0);
+        assert!(document.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn move_layer_into_group_and_back_out_preserves_hierarchy() {
+        let mut document = Document::new(640, 480);
+        document.add_layer("Sketch");
+        document.add_layer("Highlights");
+
+        let sketch_id = document.layers[1].id;
+        let highlights_id = document.layers[2].id;
+        let group_id = document
+            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(highlights_id), "Highlights Group")
+            .expect("wrapping highlights should create a group");
+
+        assert!(document.move_node_into_group(LayerHierarchyNodeRef::Layer(sketch_id), group_id));
+        assert_eq!(document.group_for_layer(sketch_id), Some(group_id));
+        assert!(document.validate_layer_hierarchy().is_ok());
+
+        assert!(document.move_node_out_of_group(LayerHierarchyNodeRef::Layer(sketch_id)));
+        assert_eq!(document.group_for_layer(sketch_id), None);
+        assert!(document.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn set_group_visibility_updates_stored_group_state() {
+        let mut document = Document::new(640, 480);
+        let background_id = document.layers[0].id;
+        let group_id = document
+            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(background_id), "Background Group")
+            .expect("wrapping background should succeed");
+
+        assert!(document.set_group_visibility(group_id, false));
+        assert_eq!(document.group(group_id).map(|group| group.visible), Some(false));
     }
 
     #[test]

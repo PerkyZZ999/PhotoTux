@@ -109,7 +109,7 @@ Progress notes:
 
 ### EW06 - Add group flatten, save, and load support
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: groups are trusted document structure rather than temporary UI nesting
 - Includes:
   - group-aware flatten evaluation
@@ -119,9 +119,15 @@ Progress notes:
 - Done when:
   - grouped documents preserve order, visibility, and output through persistence
 
+Progress notes:
+- `file_io` flattening and regional recomposition now walk the recursive document hierarchy instead of the flat layer list, so group visibility and group opacity propagate through child layer composition without inventing separate shell-only rules.
+- `.ptx` project manifests now serialize the recursive layer hierarchy alongside layer payloads, while load restores nested groups through `doc_model::set_layer_hierarchy` so hierarchy validation remains enforced on persisted documents.
+- grouped documents without hierarchy metadata still fall back to the flat layer order on load, which keeps earlier project files readable while allowing new grouped scenes to roundtrip with their full structure intact.
+- regression coverage now includes grouped flatten behavior, grouped save/load hierarchy roundtrips, grouped regional recomposition parity, and grouped PNG export parity so grouped viewport and exported output stay aligned.
+
 ### EW07 - Add group editing commands and shell presentation
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: users can organize complex documents structurally
 - Includes:
   - create/ungroup/move into group/move out of group operations
@@ -130,6 +136,12 @@ Progress notes:
 - Depends on: EW06
 - Done when:
   - real grouped editing workflows are possible without order corruption
+
+Progress notes:
+- `doc_model` now exposes validated hierarchy mutations for wrapping a node in a group, ungrouping a group, moving a node into a group, moving a node out of its parent group, and toggling stored group visibility, which keeps structural editing headless and testable.
+- `app_core` now tracks the selected structure target separately from the active paint layer, so group rows can be selected as structural targets without moving document ownership of hierarchy state into the shell.
+- the controller now exposes shell-facing commands for grouping the active layer, ungrouping the selected group, moving the active layer into the selected group, and moving the active layer out of its parent group, all with dedicated undo and redo history records.
+- `ui_shell` now renders nested layer and group rows with indentation, group selection, group visibility toggles, and group action chips in the Layers panel, making grouped organization workflows possible without flattening or order corruption.
 
 ### EW08 - Define freeform selection representation
 
