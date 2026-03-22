@@ -65,6 +65,13 @@ pub struct CanvasOverlayRect {
     pub fill_rgba: Option<[u8; 4]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasOverlayPath {
+    pub points: Vec<(i32, i32)>,
+    pub stroke_rgba: [u8; 4],
+    pub closed: bool,
+}
+
 pub struct OffscreenCanvasRenderer {
     instance: wgpu::Instance,
     device: wgpu::Device,
@@ -177,6 +184,7 @@ impl OffscreenCanvasRenderer {
         scale_factor: f64,
         canvas_raster: Option<&CanvasRaster>,
         overlays: &[CanvasOverlayRect],
+        overlay_paths: &[CanvasOverlayPath],
     ) -> Result<CanvasFrame> {
         let physical_width = ((logical_width as f64 * scale_factor).round() as u32).max(1);
         let physical_height = ((logical_height as f64 * scale_factor).round() as u32).max(1);
@@ -325,6 +333,14 @@ impl OffscreenCanvasRenderer {
             scale_factor as f32,
             overlays,
         );
+        draw_overlay_paths(
+            &mut pixels,
+            physical_width,
+            physical_height,
+            viewport_state,
+            scale_factor as f32,
+            overlay_paths,
+        );
 
         Ok(CanvasFrame {
             width: physical_width,
@@ -420,6 +436,108 @@ fn draw_overlay_rect(
             if x == left.max(0) || x == right - 1 || y == top.max(0) || y == bottom - 1 {
                 blend_overlay_pixel(pixels, frame_width, x as u32, y as u32, overlay.stroke_rgba);
             }
+        }
+    }
+}
+
+fn draw_overlay_paths(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    overlays: &[CanvasOverlayPath],
+) {
+    for overlay in overlays {
+        draw_overlay_path(
+            pixels,
+            frame_width,
+            frame_height,
+            viewport_state,
+            scale_factor,
+            overlay,
+        );
+    }
+}
+
+fn draw_overlay_path(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    overlay: &CanvasOverlayPath,
+) {
+    if overlay.points.len() < 2 {
+        return;
+    }
+
+    let mut transformed = overlay
+        .points
+        .iter()
+        .map(|&(x, y)| {
+            (
+                (viewport_state.pan_x * scale_factor + x as f32 * viewport_state.zoom).round() as i32,
+                (viewport_state.pan_y * scale_factor + y as f32 * viewport_state.zoom).round() as i32,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if overlay.closed {
+        transformed.push(transformed[0]);
+    }
+
+    for segment in transformed.windows(2) {
+        draw_overlay_line(
+            pixels,
+            frame_width,
+            frame_height,
+            segment[0].0,
+            segment[0].1,
+            segment[1].0,
+            segment[1].1,
+            overlay.stroke_rgba,
+        );
+    }
+}
+
+fn draw_overlay_line(
+    pixels: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+    rgba: [u8; 4],
+) {
+    let mut x0 = start_x;
+    let mut y0 = start_y;
+    let x1 = end_x;
+    let y1 = end_y;
+    let delta_x = (x1 - x0).abs();
+    let step_x = if x0 < x1 { 1 } else { -1 };
+    let delta_y = -(y1 - y0).abs();
+    let step_y = if y0 < y1 { 1 } else { -1 };
+    let mut error = delta_x + delta_y;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 && x0 < frame_width as i32 && y0 < frame_height as i32 {
+            blend_overlay_pixel(pixels, frame_width, x0 as u32, y0 as u32, rgba);
+        }
+
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+
+        let doubled_error = error * 2;
+        if doubled_error >= delta_y {
+            error += delta_y;
+            x0 += step_x;
+        }
+        if doubled_error <= delta_x {
+            error += delta_x;
+            y0 += step_y;
         }
     }
 }
@@ -544,7 +662,10 @@ impl ViewportState {
 
 #[cfg(test)]
 mod tests {
-    use super::{draw_canvas_raster, draw_overlay_rects, CanvasOverlayRect, ViewportSize, ViewportState};
+    use super::{
+        draw_canvas_raster, draw_overlay_paths, draw_overlay_rects, CanvasOverlayPath,
+        CanvasOverlayRect, ViewportSize, ViewportState,
+    };
     use common::{CanvasRaster, CanvasRect, CanvasSize};
 
     #[test]
@@ -610,6 +731,26 @@ mod tests {
 
         let top_left = ((10 * 64 + 10) * 4) as usize;
         assert_eq!(&pixels[top_left..top_left + 4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn overlay_path_draws_visible_stroke() {
+        let mut pixels = vec![0_u8; 64 * 64 * 4];
+        draw_overlay_paths(
+            &mut pixels,
+            64,
+            64,
+            ViewportState::default(),
+            1.0,
+            &[CanvasOverlayPath {
+                points: vec![(10, 10), (20, 10), (20, 20)],
+                stroke_rgba: [0, 255, 0, 255],
+                closed: false,
+            }],
+        );
+
+        let point = ((10 * 64 + 15) * 4) as usize;
+        assert_eq!(&pixels[point..point + 4], &[0, 255, 0, 255]);
     }
 
     #[test]

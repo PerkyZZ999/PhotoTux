@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use common::{CanvasRaster, CanvasRect};
 use doc_model::{
-    BlendMode, Document, LayerEditTarget, LayerHierarchyNode, LayerHierarchyNodeRef, RasterMask,
+    BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerHierarchyNode,
+    LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape,
 };
 use file_io::{
     export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
@@ -19,16 +20,18 @@ use file_io::{
 };
 use history_engine::HistoryStack;
 use tool_system::{
-    BrushChange, BrushStrokeRecord, BrushSettings, BrushTool, BrushToolMode, MoveLayerRecord,
-    RectangularMarqueeTool, RectangularSelectionRecord, SimpleTransformTool, LayerTransformRecord,
+    BrushChange, BrushSample, BrushStrokeRecord, BrushSettings, BrushTool, BrushToolMode,
+    LayerTransformRecord, LassoTool, MoveLayerRecord, RectangularMarqueeTool, SelectionRecord,
+    SimpleTransformTool,
 };
-use ui_shell::{LayerPanelItem, ShellController, ShellSnapshot, ShellToolKind};
+use ui_shell::{LayerPanelItem, ShellController, ShellGuide, ShellSnapshot, ShellToolKind};
 
 pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
     Rc::new(RefCell::new(PhotoTuxController::new()))
 }
 
 const AUTOSAVE_IDLE_INTERVAL: Duration = Duration::from_secs(2);
+const GUIDE_SNAP_THRESHOLD: i32 = 8;
 
 #[derive(Debug)]
 struct PhotoTuxController {
@@ -58,6 +61,14 @@ struct PhotoTuxController {
     cached_canvas_raster: Option<Vec<u8>>,
     transform_session: Option<TransformSession>,
     interaction: Option<CanvasInteraction>,
+    snapping_enabled: bool,
+    temporary_snap_bypass: bool,
+    pressure_size_enabled: bool,
+    pressure_opacity_enabled: bool,
+    brush_radius: f32,
+    brush_hardness: f32,
+    brush_spacing: f32,
+    brush_flow: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +76,9 @@ struct TransformSession {
     layer_id: common::LayerId,
     translate_x: i32,
     translate_y: i32,
-    scale: f32,
+    scale_x: f32,
+    scale_y: f32,
+    rotate_quadrants: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -76,17 +89,25 @@ enum CanvasInteraction {
         start_canvas_y: i32,
         start_offset_x: i32,
         start_offset_y: i32,
+        initial_state: Option<LayerStateSnapshot>,
+        snapping_base_bounds: Option<CanvasRect>,
     },
     Marquee {
-        before: Option<common::CanvasRect>,
+        before: Option<SelectionShape>,
         before_inverted: bool,
         start_canvas_x: i32,
         start_canvas_y: i32,
+    },
+    Lasso {
+        before: Option<SelectionShape>,
+        before_inverted: bool,
+        points: Vec<(i32, i32)>,
     },
     Brush {
         mode: BrushToolMode,
         last_canvas_x: i32,
         last_canvas_y: i32,
+        last_pressure: f32,
         aggregate: Option<BrushStrokeRecord>,
     },
 }
@@ -102,9 +123,18 @@ enum EditorOperation {
     BrushStroke(BrushStrokeRecord),
     TransformLayer(LayerTransformRecord),
     MoveLayer(MoveLayerRecord),
-    Selection(RectangularSelectionRecord),
+    Selection(SelectionRecord),
+    Guides(GuideStateRecord),
     MaskState(MaskStateRecord),
     LayerHierarchy(LayerHierarchyRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuideStateRecord {
+    before_guides: Vec<Guide>,
+    before_visible: bool,
+    after_guides: Vec<Guide>,
+    after_visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +187,16 @@ impl LayerHierarchyRecord {
             let _ = controller.document.set_active_layer(layer_index);
         }
         controller.selected_structure_target = selected_target;
+    }
+}
+
+impl GuideStateRecord {
+    fn undo(&self, document: &mut Document) {
+        document.set_guides_state(self.before_guides.clone(), self.before_visible);
+    }
+
+    fn redo(&self, document: &mut Document) {
+        document.set_guides_state(self.after_guides.clone(), self.after_visible);
     }
 }
 
@@ -572,6 +612,14 @@ impl PhotoTuxController {
             cached_canvas_raster: None,
             transform_session: None,
             interaction: None,
+            snapping_enabled: true,
+            temporary_snap_bypass: false,
+            pressure_size_enabled: false,
+            pressure_opacity_enabled: false,
+            brush_radius: 12.0,
+            brush_hardness: 0.72,
+            brush_spacing: 5.0,
+            brush_flow: 0.82,
         };
         controller.reset_selected_structure_target_to_active_layer();
         controller.refresh_recovery_path();
@@ -585,6 +633,138 @@ impl PhotoTuxController {
 
     fn active_layer_name(&self) -> String {
         self.document.active_layer().name.clone()
+    }
+
+    fn selection_path_points(&self) -> Option<Vec<(i32, i32)>> {
+        match self.document.selection_shape() {
+            Some(SelectionShape::Freeform(selection)) => {
+                Some(selection.points.iter().map(|point| (point.x, point.y)).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn selection_preview_path_points(&self) -> Option<Vec<(i32, i32)>> {
+        match &self.interaction {
+            Some(CanvasInteraction::Lasso { points, .. }) if points.len() >= 2 => Some(points.clone()),
+            _ => None,
+        }
+    }
+
+    fn shell_guides(&self) -> Vec<ShellGuide> {
+        self.document
+            .guides()
+            .iter()
+            .map(|guide| match guide.orientation {
+                GuideOrientation::Horizontal => ShellGuide::Horizontal { y: guide.position },
+                GuideOrientation::Vertical => ShellGuide::Vertical { x: guide.position },
+            })
+            .collect()
+    }
+
+    fn snapping_temporarily_bypassed(&self) -> bool {
+        self.temporary_snap_bypass
+            && matches!(self.interaction, Some(CanvasInteraction::Move { .. }))
+    }
+
+    fn move_snapping_base_bounds(&self) -> Option<CanvasRect> {
+        if let Some(selection_shape) = self.document.selection_shape() {
+            let selection_bounds = selection_shape.bounds();
+            let layer_bounds = self.active_layer_bounds()?;
+            let left = layer_bounds.x.max(selection_bounds.x);
+            let top = layer_bounds.y.max(selection_bounds.y);
+            let right = (layer_bounds.x + layer_bounds.width as i32)
+                .min(selection_bounds.x + selection_bounds.width as i32);
+            let bottom = (layer_bounds.y + layer_bounds.height as i32)
+                .min(selection_bounds.y + selection_bounds.height as i32);
+            if left < right && top < bottom {
+                return Some(CanvasRect::new(
+                    left,
+                    top,
+                    (right - left) as u32,
+                    (bottom - top) as u32,
+                ));
+            }
+        }
+
+        self.active_layer_bounds()
+    }
+
+    fn transform_snapping_base_bounds(&self) -> Option<CanvasRect> {
+        let session = self.transform_session.as_ref()?;
+        let layer_index = self.document.layer_index_by_id(session.layer_id)?;
+        SimpleTransformTool::preview_bounds(
+            &self.document,
+            layer_index,
+            session.scale_x,
+            session.scale_y,
+            session.rotate_quadrants,
+            0,
+            0,
+        )
+    }
+
+    fn snapped_translation(&self, base_bounds: Option<CanvasRect>, translate_x: i32, translate_y: i32) -> (i32, i32) {
+        if !self.snapping_enabled || self.temporary_snap_bypass {
+            return (translate_x, translate_y);
+        }
+        let Some(base_bounds) = base_bounds else {
+            return (translate_x, translate_y);
+        };
+
+        let moved = CanvasRect::new(
+            base_bounds.x + translate_x,
+            base_bounds.y + translate_y,
+            base_bounds.width,
+            base_bounds.height,
+        );
+
+        let mut snapped_x = translate_x;
+        let mut snapped_y = translate_y;
+        let mut best_x_distance = GUIDE_SNAP_THRESHOLD + 1;
+        let mut best_y_distance = GUIDE_SNAP_THRESHOLD + 1;
+        let right = moved.x + moved.width as i32;
+        let bottom = moved.y + moved.height as i32;
+
+        for guide in self.document.guides() {
+            match guide.orientation {
+                GuideOrientation::Vertical => {
+                    for edge in [moved.x, right] {
+                        let delta = guide.position - edge;
+                        let distance = delta.abs();
+                        if distance <= GUIDE_SNAP_THRESHOLD && distance < best_x_distance {
+                            best_x_distance = distance;
+                            snapped_x = translate_x + delta;
+                        }
+                    }
+                }
+                GuideOrientation::Horizontal => {
+                    for edge in [moved.y, bottom] {
+                        let delta = guide.position - edge;
+                        let distance = delta.abs();
+                        if distance <= GUIDE_SNAP_THRESHOLD && distance < best_y_distance {
+                            best_y_distance = distance;
+                            snapped_y = translate_y + delta;
+                        }
+                    }
+                }
+            }
+        }
+
+        (snapped_x, snapped_y)
+    }
+
+    fn push_guide_state_operation(&mut self, label: impl Into<String>, before_guides: Vec<Guide>, before_visible: bool) {
+        self.mark_document_dirty();
+        self.push_operation(
+            label,
+            EditorOperation::Guides(GuideStateRecord {
+                before_guides,
+                before_visible,
+                after_guides: self.document.guides().to_vec(),
+                after_visible: self.document.guides_visible(),
+            }),
+        );
     }
 
     fn active_layer_id(&self) -> common::LayerId {
@@ -660,21 +840,24 @@ impl PhotoTuxController {
 
     fn current_brush_settings(&self, mode: BrushToolMode) -> BrushSettings {
         BrushSettings {
-            radius: 12.0,
-            hardness: 0.8,
+            radius: self.brush_radius,
+            hardness: self.brush_hardness,
             opacity: 1.0,
-            spacing: 6.0,
+            spacing: self.brush_spacing,
+            flow: self.brush_flow,
             color: match mode {
                 BrushToolMode::Paint => self.foreground_color,
                 BrushToolMode::Erase => [0, 0, 0, 255],
             },
+            pressure_size_enabled: self.pressure_size_enabled,
+            pressure_opacity_enabled: self.pressure_opacity_enabled,
         }
     }
 
     fn apply_active_layer_stroke_segment(
         &mut self,
         mode: BrushToolMode,
-        points: &[(f32, f32)],
+        samples: &[BrushSample],
     ) -> Option<BrushStrokeRecord> {
         let layer_index = self.document.active_layer_index();
         let settings = self.current_brush_settings(mode);
@@ -684,7 +867,14 @@ impl PhotoTuxController {
             self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
         }
 
-        let record = BrushTool::apply_stroke(&mut self.document, layer_index, points, settings, mode, target)?;
+        let record = BrushTool::apply_stroke_with_samples(
+            &mut self.document,
+            layer_index,
+            samples,
+            settings,
+            mode,
+            target,
+        )?;
         
         if let Some(ref mut cached) = self.cached_canvas_raster {
             let layer = &self.document.layers[layer_index];
@@ -1373,7 +1563,9 @@ impl PhotoTuxController {
             layer_id: layer.id,
             translate_x: 0,
             translate_y: 0,
-            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotate_quadrants: 0,
         });
         self.bump_canvas_revision();
     }
@@ -1384,7 +1576,9 @@ impl PhotoTuxController {
         SimpleTransformTool::preview_bounds(
             &self.document,
             layer_index,
-            session.scale,
+            session.scale_x,
+            session.scale_y,
+            session.rotate_quadrants,
             session.translate_x,
             session.translate_y,
         )
@@ -1397,7 +1591,9 @@ impl PhotoTuxController {
                 let _ = SimpleTransformTool::transform_layer(
                     &mut preview_document,
                     layer_index,
-                    session.scale,
+                    session.scale_x,
+                    session.scale_y,
+                    session.rotate_quadrants,
                     session.translate_x,
                     session.translate_y,
                 );
@@ -1448,9 +1644,37 @@ impl ShellController for PhotoTuxController {
             transform_scale_percent: self
                 .transform_session
                 .as_ref()
-                .map(|session| (session.scale * 100.0).round() as u32)
+                .map(|session| ((session.scale_x + session.scale_y) * 50.0).round() as u32)
                 .unwrap_or(100),
+            transform_scale_x_percent: self
+                .transform_session
+                .as_ref()
+                .map(|session| (session.scale_x * 100.0).round() as u32)
+                .unwrap_or(100),
+            transform_scale_y_percent: self
+                .transform_session
+                .as_ref()
+                .map(|session| (session.scale_y * 100.0).round() as u32)
+                .unwrap_or(100),
+            transform_rotation_degrees: self
+                .transform_session
+                .as_ref()
+                .map(|session| session.rotate_quadrants.rem_euclid(4) as i32 * 90)
+                .unwrap_or(0),
+            brush_radius: self.brush_radius.round() as u32,
+            brush_hardness_percent: (self.brush_hardness * 100.0).round() as u32,
+            brush_spacing: self.brush_spacing.round() as u32,
+            brush_flow_percent: (self.brush_flow * 100.0).round() as u32,
+            pressure_size_enabled: self.pressure_size_enabled,
+            pressure_opacity_enabled: self.pressure_opacity_enabled,
+            snapping_enabled: self.snapping_enabled,
+            snapping_temporarily_bypassed: self.snapping_temporarily_bypassed(),
+            guides_visible: self.document.guides_visible(),
+            guide_count: self.document.guides().len(),
+            guides: self.shell_guides(),
             selection_rect: self.document.selection(),
+            selection_path: self.selection_path_points(),
+            selection_preview_path: self.selection_preview_path_points(),
             selection_inverted: self.document.selection_inverted(),
             foreground_color: self.foreground_color,
             background_color: self.background_color,
@@ -1704,7 +1928,7 @@ impl ShellController for PhotoTuxController {
     }
 
     fn clear_selection(&mut self) {
-        let before = self.document.selection();
+        let before = self.document.selection_shape().cloned();
         let before_inverted = self.document.selection_inverted();
         if before.is_none() {
             return;
@@ -1714,7 +1938,7 @@ impl ShellController for PhotoTuxController {
         self.mark_document_dirty();
         self.push_operation(
             "Clear Selection",
-            EditorOperation::Selection(RectangularSelectionRecord {
+            EditorOperation::Selection(SelectionRecord {
                 before,
                 before_inverted,
                 after: None,
@@ -1724,7 +1948,7 @@ impl ShellController for PhotoTuxController {
     }
 
     fn invert_selection(&mut self) {
-        let before = self.document.selection();
+        let before = self.document.selection_shape().cloned();
         let before_inverted = self.document.selection_inverted();
         if !self.document.invert_selection() {
             return;
@@ -1733,13 +1957,116 @@ impl ShellController for PhotoTuxController {
         self.mark_document_dirty();
         self.push_operation(
             "Invert Selection",
-            EditorOperation::Selection(RectangularSelectionRecord {
+            EditorOperation::Selection(SelectionRecord {
                 before,
                 before_inverted,
-                after: self.document.selection(),
+                after: self.document.selection_shape().cloned(),
                 after_inverted: self.document.selection_inverted(),
             }),
         );
+    }
+
+    fn add_horizontal_guide(&mut self) {
+        let before_guides = self.document.guides().to_vec();
+        let before_visible = self.document.guides_visible();
+        self.document
+            .add_guide(Guide::horizontal((self.document.canvas_size.height / 2) as i32));
+        self.push_guide_state_operation("Add Horizontal Guide", before_guides, before_visible);
+    }
+
+    fn add_vertical_guide(&mut self) {
+        let before_guides = self.document.guides().to_vec();
+        let before_visible = self.document.guides_visible();
+        self.document
+            .add_guide(Guide::vertical((self.document.canvas_size.width / 2) as i32));
+        self.push_guide_state_operation("Add Vertical Guide", before_guides, before_visible);
+    }
+
+    fn remove_last_guide(&mut self) {
+        let before_guides = self.document.guides().to_vec();
+        let before_visible = self.document.guides_visible();
+        if self.document.remove_last_guide().is_none() {
+            return;
+        }
+        self.push_guide_state_operation("Remove Guide", before_guides, before_visible);
+    }
+
+    fn toggle_guides_visible(&mut self) {
+        let before_guides = self.document.guides().to_vec();
+        let before_visible = self.document.guides_visible();
+        self.document.toggle_guides_visible();
+        self.push_guide_state_operation("Toggle Guides", before_guides, before_visible);
+    }
+
+    fn toggle_snapping_enabled(&mut self) {
+        self.snapping_enabled = !self.snapping_enabled;
+        self.status_message = if self.snapping_enabled {
+            "Guide snapping enabled".to_string()
+        } else {
+            "Guide snapping disabled".to_string()
+        };
+    }
+
+    fn toggle_pressure_size_enabled(&mut self) {
+        self.pressure_size_enabled = !self.pressure_size_enabled;
+        self.status_message = if self.pressure_size_enabled {
+            "Pressure-to-size enabled".to_string()
+        } else {
+            "Pressure-to-size disabled".to_string()
+        };
+    }
+
+    fn toggle_pressure_opacity_enabled(&mut self) {
+        self.pressure_opacity_enabled = !self.pressure_opacity_enabled;
+        self.status_message = if self.pressure_opacity_enabled {
+            "Pressure-to-opacity enabled".to_string()
+        } else {
+            "Pressure-to-opacity disabled".to_string()
+        };
+    }
+
+    fn increase_brush_radius(&mut self) {
+        self.brush_radius = (self.brush_radius + 2.0).clamp(1.0, 128.0);
+        self.status_message = format!("Brush radius {} px", self.brush_radius.round() as u32);
+    }
+
+    fn decrease_brush_radius(&mut self) {
+        self.brush_radius = (self.brush_radius - 2.0).clamp(1.0, 128.0);
+        self.status_message = format!("Brush radius {} px", self.brush_radius.round() as u32);
+    }
+
+    fn increase_brush_hardness(&mut self) {
+        self.brush_hardness = (self.brush_hardness + 0.05).clamp(0.0, 1.0);
+        self.status_message = format!("Brush hardness {}%", (self.brush_hardness * 100.0).round() as u32);
+    }
+
+    fn decrease_brush_hardness(&mut self) {
+        self.brush_hardness = (self.brush_hardness - 0.05).clamp(0.0, 1.0);
+        self.status_message = format!("Brush hardness {}%", (self.brush_hardness * 100.0).round() as u32);
+    }
+
+    fn increase_brush_spacing(&mut self) {
+        self.brush_spacing = (self.brush_spacing + 1.0).clamp(1.0, 64.0);
+        self.status_message = format!("Brush spacing {} px", self.brush_spacing.round() as u32);
+    }
+
+    fn decrease_brush_spacing(&mut self) {
+        self.brush_spacing = (self.brush_spacing - 1.0).clamp(1.0, 64.0);
+        self.status_message = format!("Brush spacing {} px", self.brush_spacing.round() as u32);
+    }
+
+    fn increase_brush_flow(&mut self) {
+        self.brush_flow = (self.brush_flow + 0.05).clamp(0.05, 1.0);
+        self.status_message = format!("Brush flow {}%", (self.brush_flow * 100.0).round() as u32);
+    }
+
+    fn decrease_brush_flow(&mut self) {
+        self.brush_flow = (self.brush_flow - 0.05).clamp(0.05, 1.0);
+        self.status_message = format!("Brush flow {}%", (self.brush_flow * 100.0).round() as u32);
+    }
+
+    fn set_temporary_snap_bypass(&mut self, bypassed: bool) {
+        self.temporary_snap_bypass = bypassed;
     }
 
     fn begin_transform(&mut self) {
@@ -1751,7 +2078,8 @@ impl ShellController for PhotoTuxController {
         let Some(session) = &mut self.transform_session else {
             return;
         };
-        session.scale = (session.scale + 0.1).min(4.0);
+        session.scale_x = (session.scale_x + 0.1).min(4.0);
+        session.scale_y = (session.scale_y + 0.1).min(4.0);
         self.bump_canvas_revision();
     }
 
@@ -1760,7 +2088,62 @@ impl ShellController for PhotoTuxController {
         let Some(session) = &mut self.transform_session else {
             return;
         };
-        session.scale = (session.scale - 0.1).max(0.1);
+        session.scale_x = (session.scale_x - 0.1).max(0.1);
+        session.scale_y = (session.scale_y - 0.1).max(0.1);
+        self.bump_canvas_revision();
+    }
+
+    fn scale_transform_x_up(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale_x = (session.scale_x + 0.1).min(4.0);
+        self.bump_canvas_revision();
+    }
+
+    fn scale_transform_x_down(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale_x = (session.scale_x - 0.1).max(0.1);
+        self.bump_canvas_revision();
+    }
+
+    fn scale_transform_y_up(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale_y = (session.scale_y + 0.1).min(4.0);
+        self.bump_canvas_revision();
+    }
+
+    fn scale_transform_y_down(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.scale_y = (session.scale_y - 0.1).max(0.1);
+        self.bump_canvas_revision();
+    }
+
+    fn rotate_transform_left(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.rotate_quadrants -= 1;
+        self.bump_canvas_revision();
+    }
+
+    fn rotate_transform_right(&mut self) {
+        self.begin_transform_session_if_needed();
+        let Some(session) = &mut self.transform_session else {
+            return;
+        };
+        session.rotate_quadrants += 1;
         self.bump_canvas_revision();
     }
 
@@ -1775,7 +2158,9 @@ impl ShellController for PhotoTuxController {
         if let Some(record) = SimpleTransformTool::transform_layer(
             &mut self.document,
             layer_index,
-            session.scale,
+            session.scale_x,
+            session.scale_y,
+            session.rotate_quadrants,
             session.translate_x,
             session.translate_y,
         ) {
@@ -1819,6 +2204,10 @@ impl ShellController for PhotoTuxController {
                     record.undo(&mut self.document);
                     self.mark_document_dirty();
                 }
+                EditorOperation::Guides(record) => {
+                    record.undo(&mut self.document);
+                    self.mark_document_dirty();
+                }
                 EditorOperation::MaskState(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
@@ -1856,6 +2245,10 @@ impl ShellController for PhotoTuxController {
                     self.mark_document_dirty();
                 }
                 EditorOperation::Selection(record) => {
+                    record.redo(&mut self.document);
+                    self.mark_document_dirty();
+                }
+                EditorOperation::Guides(record) => {
                     record.redo(&mut self.document);
                     self.mark_document_dirty();
                 }
@@ -2022,11 +2415,16 @@ impl ShellController for PhotoTuxController {
     }
 
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32) {
+        self.begin_canvas_interaction_with_pressure(canvas_x, canvas_y, 1.0);
+    }
+
+    fn begin_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
         match self.active_tool {
             ShellToolKind::Move => {
+                let layer_index = self.document.active_layer_index();
                 let (start_offset_x, start_offset_y) = self
                     .document
-                    .layer_offset(self.document.active_layer_index())
+                    .layer_offset(layer_index)
                     .unwrap_or((0, 0));
                 self.interaction = Some(CanvasInteraction::Move {
                     layer_id: self.document.active_layer().id,
@@ -2034,14 +2432,26 @@ impl ShellController for PhotoTuxController {
                     start_canvas_y: canvas_y,
                     start_offset_x,
                     start_offset_y,
+                    initial_state: self
+                        .document
+                        .selection_shape()
+                        .and_then(|_| self.document.layer_state_snapshot(layer_index)),
+                    snapping_base_bounds: self.move_snapping_base_bounds(),
                 });
             }
             ShellToolKind::RectangularMarquee => {
                 self.interaction = Some(CanvasInteraction::Marquee {
-                    before: self.document.selection(),
+                    before: self.document.selection_shape().cloned(),
                     before_inverted: self.document.selection_inverted(),
                     start_canvas_x: canvas_x,
                     start_canvas_y: canvas_y,
+                });
+            }
+            ShellToolKind::Lasso => {
+                self.interaction = Some(CanvasInteraction::Lasso {
+                    before: self.document.selection_shape().cloned(),
+                    before_inverted: self.document.selection_inverted(),
+                    points: vec![(canvas_x, canvas_y)],
                 });
             }
             ShellToolKind::Transform => {
@@ -2053,6 +2463,8 @@ impl ShellController for PhotoTuxController {
                         start_canvas_y: canvas_y,
                         start_offset_x: session.translate_x,
                         start_offset_y: session.translate_y,
+                        initial_state: None,
+                        snapping_base_bounds: self.transform_snapping_base_bounds(),
                     });
                 }
             }
@@ -2063,7 +2475,7 @@ impl ShellController for PhotoTuxController {
                     BrushToolMode::Erase
                 };
                 let aggregate =
-                    self.apply_active_layer_stroke_segment(mode, &[(canvas_x as f32, canvas_y as f32)]);
+                    self.apply_active_layer_stroke_segment(mode, &[BrushSample::new(canvas_x as f32, canvas_y as f32, pressure)]);
                 if aggregate.is_some() {
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = true;
@@ -2073,6 +2485,7 @@ impl ShellController for PhotoTuxController {
                     mode,
                     last_canvas_x: canvas_x,
                     last_canvas_y: canvas_y,
+                    last_pressure: pressure,
                     aggregate,
                 });
             }
@@ -2081,6 +2494,10 @@ impl ShellController for PhotoTuxController {
     }
 
     fn update_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32) {
+        self.update_canvas_interaction_with_pressure(canvas_x, canvas_y, 1.0);
+    }
+
+    fn update_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
         let Some(interaction) = self.interaction.take() else {
             return;
         };
@@ -2092,22 +2509,55 @@ impl ShellController for PhotoTuxController {
                 start_canvas_y,
                 start_offset_x,
                 start_offset_y,
+                initial_state,
+                snapping_base_bounds,
             } => {
-                let delta_x = canvas_x - start_canvas_x;
-                let delta_y = canvas_y - start_canvas_y;
+                let raw_delta_x = canvas_x - start_canvas_x;
+                let raw_delta_y = canvas_y - start_canvas_y;
                 if self.active_tool == ShellToolKind::Transform {
+                    let (translate_x, translate_y) = self.snapped_translation(
+                        snapping_base_bounds,
+                        start_offset_x + raw_delta_x,
+                        start_offset_y + raw_delta_y,
+                    );
                     if let Some(session) = &mut self.transform_session {
-                        session.translate_x = start_offset_x + delta_x;
-                        session.translate_y = start_offset_y + delta_y;
+                        session.translate_x = translate_x;
+                        session.translate_y = translate_y;
                     }
+                } else if let Some(initial_state) = &initial_state {
+                    let layer_index = self.document.active_layer_index();
+                    let _ = self.document.apply_layer_state_snapshot(layer_id, initial_state.clone());
+                    let (translate_x, translate_y) = self.snapped_translation(
+                        snapping_base_bounds,
+                        raw_delta_x,
+                        raw_delta_y,
+                    );
+                    let _ = SimpleTransformTool::transform_layer(
+                        &mut self.document,
+                        layer_index,
+                        1.0,
+                        1.0,
+                        0,
+                        translate_x,
+                        translate_y,
+                    );
+                    self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
+                    self.dirty_since_primary_save = true;
+                    self.dirty_since_autosave = true;
+                    self.last_change_at = Some(std::time::Instant::now());
                 } else {
                     let layer_index = self.document.active_layer_index();
                     let old_bounds = self.document.layer_canvas_bounds(layer_index);
+                    let (translate_x, translate_y) = self.snapped_translation(
+                        snapping_base_bounds,
+                        start_offset_x + raw_delta_x,
+                        start_offset_y + raw_delta_y,
+                    );
 
                     let _ = self.document.set_layer_offset(
                         layer_index,
-                        start_offset_x + delta_x,
-                        start_offset_y + delta_y,
+                        translate_x,
+                        translate_y,
                     );
                     
                     let new_bounds = self.document.layer_canvas_bounds(layer_index);
@@ -2134,6 +2584,8 @@ impl ShellController for PhotoTuxController {
                     start_canvas_y,
                     start_offset_x,
                     start_offset_y,
+                    initial_state,
+                    snapping_base_bounds,
                 })
             }
             CanvasInteraction::Marquee {
@@ -2159,18 +2611,36 @@ impl ShellController for PhotoTuxController {
                     start_canvas_y,
                 })
             }
+            CanvasInteraction::Lasso {
+                before,
+                before_inverted,
+                mut points,
+            } => {
+                if points.last().copied() != Some((canvas_x, canvas_y)) {
+                    points.push((canvas_x, canvas_y));
+                }
+                self.dirty_since_primary_save = true;
+                self.dirty_since_autosave = true;
+                self.last_change_at = Some(std::time::Instant::now());
+                Some(CanvasInteraction::Lasso {
+                    before,
+                    before_inverted,
+                    points,
+                })
+            }
             CanvasInteraction::Brush {
                 mode,
                 last_canvas_x,
                 last_canvas_y,
+                last_pressure,
                 mut aggregate,
             } => {
                 if last_canvas_x != canvas_x || last_canvas_y != canvas_y {
                     if let Some(segment) = self.apply_active_layer_stroke_segment(
                         mode,
                         &[
-                            (last_canvas_x as f32, last_canvas_y as f32),
-                            (canvas_x as f32, canvas_y as f32),
+                            BrushSample::new(last_canvas_x as f32, last_canvas_y as f32, last_pressure),
+                            BrushSample::new(canvas_x as f32, canvas_y as f32, pressure),
                         ],
                     ) {
                         if let Some(existing) = &mut aggregate {
@@ -2188,6 +2658,7 @@ impl ShellController for PhotoTuxController {
                     mode,
                     last_canvas_x: canvas_x,
                     last_canvas_y: canvas_y,
+                    last_pressure: pressure,
                     aggregate,
                 })
             }
@@ -2200,26 +2671,47 @@ impl ShellController for PhotoTuxController {
                 layer_id,
                 start_offset_x,
                 start_offset_y,
+                initial_state,
                 ..
             }) => {
                 if self.active_tool == ShellToolKind::Transform {
                     return;
                 }
-                let (current_x, current_y) = self
-                    .document
-                    .layer_offset(self.document.active_layer_index())
-                    .unwrap_or((0, 0));
-                let delta_x = current_x - start_offset_x;
-                let delta_y = current_y - start_offset_y;
-                if delta_x != 0 || delta_y != 0 {
-                    self.push_operation(
-                        format!("Move Layer {} ({}, {})", self.active_layer_name(), delta_x, delta_y),
-                        EditorOperation::MoveLayer(MoveLayerRecord {
-                            layer_id,
-                            before_offset: (start_offset_x, start_offset_y),
-                            after_offset: (current_x, current_y),
-                        }),
-                    );
+                if let Some(before_state) = initial_state {
+                    let Some(after_state) = self
+                        .document
+                        .layer_index_by_id(layer_id)
+                        .and_then(|index| self.document.layer_state_snapshot(index))
+                    else {
+                        return;
+                    };
+                    if before_state != after_state {
+                        self.push_operation(
+                            "Move Selection",
+                            EditorOperation::TransformLayer(LayerTransformRecord {
+                                layer_id,
+                                before: before_state,
+                                after: after_state,
+                            }),
+                        );
+                    }
+                } else {
+                    let (current_x, current_y) = self
+                        .document
+                        .layer_offset(self.document.active_layer_index())
+                        .unwrap_or((0, 0));
+                    let delta_x = current_x - start_offset_x;
+                    let delta_y = current_y - start_offset_y;
+                    if delta_x != 0 || delta_y != 0 {
+                        self.push_operation(
+                            format!("Move Layer {} ({}, {})", self.active_layer_name(), delta_x, delta_y),
+                            EditorOperation::MoveLayer(MoveLayerRecord {
+                                layer_id,
+                                before_offset: (start_offset_x, start_offset_y),
+                                after_offset: (current_x, current_y),
+                            }),
+                        );
+                    }
                 }
             }
             Some(CanvasInteraction::Marquee {
@@ -2231,10 +2723,10 @@ impl ShellController for PhotoTuxController {
                 if let Some(selection) = self.document.selection() {
                     self.push_operation(
                         "Rectangular Selection",
-                        EditorOperation::Selection(RectangularSelectionRecord {
+                        EditorOperation::Selection(SelectionRecord {
                             before,
                             before_inverted,
-                            after: Some(selection),
+                            after: Some(SelectionShape::Rectangular(selection)),
                             after_inverted: self.document.selection_inverted(),
                         }),
                     );
@@ -2246,6 +2738,18 @@ impl ShellController for PhotoTuxController {
                         start_canvas_x,
                         start_canvas_y,
                     );
+                    self.mark_document_dirty();
+                }
+            }
+            Some(CanvasInteraction::Lasso {
+                before,
+                before_inverted,
+                points,
+            }) => {
+                if let Some(record) = LassoTool::apply_selection(&mut self.document, &points) {
+                    self.mark_document_dirty();
+                    self.push_operation("Lasso Selection", EditorOperation::Selection(record));
+                } else if before.is_some() && !before_inverted {
                     self.mark_document_dirty();
                 }
             }
@@ -2276,7 +2780,7 @@ mod tests {
     use std::fs;
     use std::thread;
     use std::time::{Duration, Instant};
-    use ui_shell::{ShellController, ShellToolKind};
+    use ui_shell::{ShellController, ShellGuide, ShellToolKind};
 
     fn set_pixel(document: &mut doc_model::Document, layer_index: usize, x: u32, y: u32, rgba: [u8; 4]) {
         let tile_size = document.tile_size as usize;
@@ -2370,6 +2874,42 @@ mod tests {
             }
         }
 
+        document
+    }
+
+    fn build_lasso_transform_fixture_document() -> doc_model::Document {
+        let mut document = doc_model::Document::new(96, 96);
+        document.rename_layer(0, "Subject");
+
+        for y in 18..54 {
+            for x in 14..46 {
+                set_pixel(&mut document, 0, x, y, [210, 120, 80, 255]);
+            }
+        }
+
+        for y in 30..66 {
+            for x in 52..84 {
+                set_pixel(&mut document, 0, x, y, [70, 150, 220, 255]);
+            }
+        }
+
+        let freeform = doc_model::FreeformSelection::new(vec![
+            doc_model::SelectionPoint::new(12, 16),
+            doc_model::SelectionPoint::new(50, 18),
+            doc_model::SelectionPoint::new(44, 58),
+            doc_model::SelectionPoint::new(16, 60),
+        ])
+        .expect("lasso transform fixture selection should be valid");
+        document.set_freeform_selection(freeform);
+
+        document
+    }
+
+    fn build_guided_snapping_fixture_document() -> doc_model::Document {
+        let mut document = doc_model::Document::new(128, 128);
+        set_pixel(&mut document, 0, 0, 0, [255, 255, 255, 255]);
+        document.add_guide(doc_model::Guide::vertical(32));
+        document.add_guide(doc_model::Guide::horizontal(16));
         document
     }
 
@@ -2726,6 +3266,242 @@ mod tests {
 
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.selection_rect, Some(CanvasRect::new(10, 20, 40, 50)));
+    }
+
+    #[test]
+    fn lasso_interaction_sets_freeform_selection_path() {
+        let mut controller = PhotoTuxController::new();
+        controller.select_tool(ShellToolKind::Lasso);
+        controller.begin_canvas_interaction(10, 20);
+        controller.update_canvas_interaction(40, 20);
+        controller.update_canvas_interaction(25, 50);
+        controller.end_canvas_interaction();
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.selection_rect, Some(CanvasRect::new(10, 20, 31, 31)));
+        assert_eq!(snapshot.selection_path, Some(vec![(10, 20), (40, 20), (25, 50)]));
+        assert!(snapshot.selection_preview_path.is_none());
+        assert!(controller.document.selection_contains_pixel(25, 30));
+    }
+
+    #[test]
+    fn guide_commands_update_snapshot_and_roundtrip_history() {
+        let mut controller = PhotoTuxController::new();
+
+        controller.add_horizontal_guide();
+        controller.add_vertical_guide();
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.guide_count, 2);
+        assert!(snapshot.guides_visible);
+        assert!(snapshot.guides.iter().any(|guide| matches!(guide, ShellGuide::Horizontal { .. })));
+        assert!(snapshot.guides.iter().any(|guide| matches!(guide, ShellGuide::Vertical { .. })));
+
+        controller.toggle_guides_visible();
+        assert!(!controller.snapshot().guides_visible);
+
+        controller.undo();
+        assert!(controller.snapshot().guides_visible);
+
+        controller.remove_last_guide();
+        assert_eq!(controller.snapshot().guide_count, 1);
+        controller.undo();
+        assert_eq!(controller.snapshot().guide_count, 2);
+        controller.redo();
+        assert_eq!(controller.snapshot().guide_count, 1);
+    }
+
+    #[test]
+    fn pressure_mapping_toggles_update_snapshot() {
+        let mut controller = PhotoTuxController::new();
+
+        assert!(!controller.snapshot().pressure_size_enabled);
+        assert!(!controller.snapshot().pressure_opacity_enabled);
+
+        controller.toggle_pressure_size_enabled();
+        controller.toggle_pressure_opacity_enabled();
+
+        let snapshot = controller.snapshot();
+        assert!(snapshot.pressure_size_enabled);
+        assert!(snapshot.pressure_opacity_enabled);
+    }
+
+    #[test]
+    fn brush_parameter_controls_update_snapshot() {
+        let mut controller = PhotoTuxController::new();
+
+        let before = controller.snapshot();
+        controller.increase_brush_radius();
+        controller.decrease_brush_hardness();
+        controller.increase_brush_spacing();
+        controller.decrease_brush_flow();
+
+        let after = controller.snapshot();
+        assert!(after.brush_radius > before.brush_radius);
+        assert!(after.brush_hardness_percent < before.brush_hardness_percent);
+        assert!(after.brush_spacing > before.brush_spacing);
+        assert!(after.brush_flow_percent < before.brush_flow_percent);
+    }
+
+    #[test]
+    fn move_interaction_snaps_to_guides_when_enabled() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_guided_snapping_fixture_document();
+
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(30, 15);
+        controller.end_canvas_interaction();
+
+        assert_eq!(controller.snapshot().active_layer_bounds, Some(CanvasRect::new(32, 16, 256, 256)));
+    }
+
+    #[test]
+    fn transform_preview_snaps_to_guides_when_enabled() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_guided_snapping_fixture_document();
+
+        controller.select_tool(ShellToolKind::Transform);
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(30, 15);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.transform_preview_rect, Some(CanvasRect::new(32, 16, 256, 256)));
+    }
+
+    #[test]
+    fn move_interaction_can_disable_or_bypass_snapping() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_guided_snapping_fixture_document();
+
+        controller.toggle_snapping_enabled();
+        assert!(!controller.snapshot().snapping_enabled);
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(30, 15);
+        controller.end_canvas_interaction();
+        assert_eq!(controller.snapshot().active_layer_bounds, Some(CanvasRect::new(30, 15, 256, 256)));
+
+        controller.undo();
+        controller.toggle_snapping_enabled();
+        controller.set_temporary_snap_bypass(true);
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(30, 15);
+        assert!(controller.snapshot().snapping_temporarily_bypassed);
+        controller.end_canvas_interaction();
+        controller.set_temporary_snap_bypass(false);
+
+        assert_eq!(controller.snapshot().active_layer_bounds, Some(CanvasRect::new(30, 15, 256, 256)));
+    }
+
+    #[test]
+    fn lasso_transform_fixture_commit_matches_flattened_document() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_lasso_transform_fixture_document();
+
+        controller.select_tool(ShellToolKind::Transform);
+        controller.begin_transform();
+        controller.scale_transform_x_up();
+        controller.rotate_transform_right();
+        controller.begin_canvas_interaction(20, 24);
+        controller.update_canvas_interaction(38, 30);
+        controller.end_canvas_interaction();
+        controller.commit_transform();
+
+        let raster = controller.canvas_raster();
+        let flattened = flatten_document_rgba(&controller.document);
+        assert_eq!(raster.pixels, flattened);
+        assert!(controller.document.selection_shape().is_some());
+    }
+
+    #[test]
+    fn move_interaction_moves_only_selected_pixels() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = doc_model::Document::new(128, 128);
+        set_pixel(&mut controller.document, 0, 20, 20, [255, 255, 255, 255]);
+        set_pixel(&mut controller.document, 0, 60, 20, [255, 255, 255, 255]);
+        controller.document.set_selection(CanvasRect::new(16, 16, 16, 16));
+
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(20, 20);
+        controller.update_canvas_interaction(30, 20);
+        controller.end_canvas_interaction();
+
+        let raster = controller.canvas_raster();
+        assert_eq!(flattened_pixel(&raster, 20, 20)[3], 0);
+        assert!(flattened_pixel(&raster, 30, 20)[3] > 0);
+        assert!(flattened_pixel(&raster, 60, 20)[3] > 0);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Move Selection")));
+    }
+
+    #[test]
+    fn transform_interaction_transforms_only_selected_pixels() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = doc_model::Document::new(128, 128);
+        set_pixel(&mut controller.document, 0, 20, 20, [255, 255, 255, 255]);
+        set_pixel(&mut controller.document, 0, 60, 20, [255, 255, 255, 255]);
+        controller.document.set_selection(CanvasRect::new(16, 16, 16, 16));
+
+        controller.select_tool(ShellToolKind::Transform);
+        controller.begin_transform();
+        controller.begin_canvas_interaction(20, 20);
+        controller.update_canvas_interaction(30, 20);
+        controller.end_canvas_interaction();
+        controller.commit_transform();
+
+        let raster = controller.canvas_raster();
+        assert_eq!(flattened_pixel(&raster, 20, 20)[3], 0);
+        assert!(flattened_pixel(&raster, 30, 20)[3] > 0);
+        assert!(flattened_pixel(&raster, 60, 20)[3] > 0);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Transform Layer")));
+    }
+
+    #[test]
+    fn transform_controls_update_snapshot_for_non_uniform_scale_and_rotation() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = doc_model::Document::new(128, 128);
+        set_pixel(&mut controller.document, 0, 20, 20, [255, 255, 255, 255]);
+
+        controller.begin_transform();
+        controller.scale_transform_x_up();
+        controller.scale_transform_y_down();
+        controller.rotate_transform_right();
+
+        let snapshot = controller.snapshot();
+        assert!(snapshot.transform_active);
+        assert_eq!(snapshot.transform_scale_x_percent, 110);
+        assert_eq!(snapshot.transform_scale_y_percent, 90);
+        assert_eq!(snapshot.transform_rotation_degrees, 90);
+        assert_eq!(snapshot.transform_preview_rect, Some(CanvasRect::new(0, 0, 230, 282)));
+    }
+
+    #[test]
+    fn transform_commit_applies_rotation_and_non_uniform_scale() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = doc_model::Document::new(128, 128);
+        set_pixel(&mut controller.document, 0, 0, 0, [255, 255, 255, 255]);
+        let before = controller.canvas_raster();
+
+        controller.begin_transform();
+        controller.scale_transform_x_up();
+        controller.scale_transform_y_down();
+        controller.rotate_transform_right();
+        controller.commit_transform();
+
+        let raster = controller.canvas_raster();
+        assert_ne!(before.pixels, raster.pixels);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Transform Layer")));
     }
 
     #[test]

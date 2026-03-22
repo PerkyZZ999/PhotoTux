@@ -1,5 +1,8 @@
 use common::{CanvasRect, LayerId};
-use doc_model::{Document, LayerEditTarget, LayerStateSnapshot, MaskTile, RasterTile, RectSelection, TileCoord};
+use doc_model::{
+    Document, FreeformSelection, LayerEditTarget, LayerStateSnapshot, MaskTile, RasterTile,
+    SelectionPoint, SelectionShape, TileCoord,
+};
 use image_ops::{
     apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped,
     apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped, BrushDab,
@@ -12,6 +15,7 @@ pub enum ToolKind {
     Eraser,
     Move,
     RectangularMarquee,
+    Lasso,
     Hand,
     Zoom,
 }
@@ -28,12 +32,67 @@ pub struct BrushSettings {
     pub hardness: f32,
     pub opacity: f32,
     pub spacing: f32,
+    pub flow: f32,
     pub color: [u8; 4],
+    pub pressure_size_enabled: bool,
+    pub pressure_opacity_enabled: bool,
 }
 
 impl BrushSettings {
+    pub fn validated(self) -> Self {
+        Self {
+            radius: self.radius.clamp(1.0, 128.0),
+            hardness: self.hardness.clamp(0.0, 1.0),
+            opacity: self.opacity.clamp(0.0, 1.0),
+            spacing: self.spacing.clamp(1.0, 64.0),
+            flow: self.flow.clamp(0.05, 1.0),
+            ..self
+        }
+    }
+
     pub fn to_dab(self) -> BrushDab {
-        BrushDab::new(self.radius, self.hardness, self.opacity, self.color)
+        let settings = self.validated();
+        BrushDab::new(
+            settings.radius,
+            settings.hardness,
+            settings.opacity,
+            settings.flow,
+            settings.color,
+        )
+    }
+
+    pub fn to_dab_with_pressure(self, pressure: f32) -> BrushDab {
+        let settings = self.validated();
+        let normalized_pressure = pressure.clamp(0.0, 1.0);
+        let radius = if settings.pressure_size_enabled {
+            settings.radius * (0.35 + 0.65 * normalized_pressure)
+        } else {
+            settings.radius
+        };
+        let opacity = if settings.pressure_opacity_enabled {
+            settings.opacity * (0.2 + 0.8 * normalized_pressure)
+        } else {
+            settings.opacity
+        };
+
+        BrushDab::new(radius, settings.hardness, opacity, settings.flow, settings.color)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushSample {
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+}
+
+impl BrushSample {
+    pub fn new(x: f32, y: f32, pressure: f32) -> Self {
+        Self {
+            x,
+            y,
+            pressure: pressure.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -164,6 +223,7 @@ impl LayerTransformRecord {
 pub struct BrushTool;
 pub struct MoveTool;
 pub struct RectangularMarqueeTool;
+pub struct LassoTool;
 pub struct SimpleTransformTool;
 
 impl BrushTool {
@@ -175,23 +235,42 @@ impl BrushTool {
         mode: BrushToolMode,
         target: LayerEditTarget,
     ) -> Option<BrushStrokeRecord> {
-        if points.is_empty() || settings.radius <= 0.0 {
+        let samples = points
+            .iter()
+            .map(|(x, y)| BrushSample::new(*x, *y, 1.0))
+            .collect::<Vec<_>>();
+        Self::apply_stroke_with_samples(document, layer_index, &samples, settings, mode, target)
+    }
+
+    pub fn apply_stroke_with_samples(
+        document: &mut Document,
+        layer_index: usize,
+        samples: &[BrushSample],
+        settings: BrushSettings,
+        mode: BrushToolMode,
+        target: LayerEditTarget,
+    ) -> Option<BrushStrokeRecord> {
+        if samples.is_empty() || settings.radius <= 0.0 {
             return None;
         }
 
         let layer_id = document.layer(layer_index)?.id;
-    let (layer_offset_x, layer_offset_y) = document.layer_offset(layer_index)?;
+        let (layer_offset_x, layer_offset_y) = document.layer_offset(layer_index)?;
         let tile_size = document.tile_size;
-        let dab = settings.to_dab();
-        let dab_positions = interpolate_dab_positions(points, settings.spacing.max(1.0));
-        let clip_rect = document.selection();
+        let settings = settings.validated();
+        let dab_positions = interpolate_brush_samples(samples, effective_spacing(settings));
+        let selection_shape = document.selection_shape().cloned();
+        let clip_rect = selection_shape.as_ref().map(SelectionShape::bounds);
         let clip_inverted = document.selection_inverted();
         let mut changes = Vec::<BrushChange>::new();
 
-        for &(dab_x, dab_y) in &dab_positions {
+        for sample in &dab_positions {
+            let dab_x = sample.x;
+            let dab_y = sample.y;
+            let dab = settings.to_dab_with_pressure(sample.pressure);
             let local_dab_x = dab_x - layer_offset_x as f32;
             let local_dab_y = dab_y - layer_offset_y as f32;
-            let touched_coords = document.tile_coords_in_radius(local_dab_x, local_dab_y, settings.radius);
+            let touched_coords = document.tile_coords_in_radius(local_dab_x, local_dab_y, dab.radius);
 
             for coord in touched_coords {
                 let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
@@ -238,6 +317,27 @@ impl BrushTool {
                                 ),
                             }
                         };
+
+                        if let Some(selection_shape) = &selection_shape {
+                            if matches!(selection_shape, SelectionShape::Freeform(_)) {
+                                let before_tile = changes.iter().find_map(|change| match change {
+                                    BrushChange::Pixels { layer_id: changed_layer_id, coord: changed_coord, before, .. }
+                                        if *changed_layer_id == layer_id && *changed_coord == coord => before.clone(),
+                                    _ => None,
+                                });
+                                if let Some(tile) = document.layer_mut(layer_index)?.tiles.get_mut(&coord) {
+                                    restore_pixels_outside_selection(
+                                        &mut tile.pixels,
+                                        before_tile.as_ref(),
+                                        tile_size,
+                                        canvas_tile_origin_x,
+                                        canvas_tile_origin_y,
+                                        selection_shape,
+                                        clip_inverted,
+                                    );
+                                }
+                            }
+                        }
 
                         if !changed
                             && document.layer(layer_index)?.tiles.get(&coord).is_some_and(|tile| {
@@ -295,6 +395,29 @@ impl BrushTool {
                                 ),
                             }
                         };
+
+                        if let Some(selection_shape) = &selection_shape {
+                            if matches!(selection_shape, SelectionShape::Freeform(_)) {
+                                let before_tile = changes.iter().find_map(|change| match change {
+                                    BrushChange::Mask { layer_id: changed_layer_id, coord: changed_coord, before, .. }
+                                        if *changed_layer_id == layer_id && *changed_coord == coord => before.clone(),
+                                    _ => None,
+                                });
+                                if let Some(mask) = document.layer_mask_mut(layer_index) {
+                                    if let Some(tile) = mask.tiles.get_mut(&coord) {
+                                        restore_mask_outside_selection(
+                                            &mut tile.alpha,
+                                            before_tile.as_ref(),
+                                            tile_size,
+                                            canvas_tile_origin_x,
+                                            canvas_tile_origin_y,
+                                            selection_shape,
+                                            clip_inverted,
+                                        );
+                                    }
+                                }
+                            }
+                        }
 
                         if document
                             .mask_tile_snapshot(layer_index, coord)
@@ -371,6 +494,22 @@ impl MoveTool {
             return None;
         }
 
+        if document.selection_shape().is_some() {
+            let before = document.layer_state_snapshot(layer_index)?;
+            let layer_id = document.layer(layer_index)?.id;
+            let _record =
+                SimpleTransformTool::transform_layer(document, layer_index, 1.0, 1.0, 0, delta_x, delta_y)?;
+            let after = document.layer_state_snapshot(layer_index)?;
+            if before == after {
+                return None;
+            }
+            return Some(MoveLayerRecord {
+                layer_id,
+                before_offset: (before.offset_x, before.offset_y),
+                after_offset: (after.offset_x, after.offset_y),
+            });
+        }
+
         let layer = document.layer(layer_index)?;
         let before_offset = (layer.offset_x, layer.offset_y);
         let after_offset = (before_offset.0 + delta_x, before_offset.1 + delta_y);
@@ -387,20 +526,20 @@ impl MoveTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RectangularSelectionRecord {
-    pub before: Option<RectSelection>,
+pub struct SelectionRecord {
+    pub before: Option<SelectionShape>,
     pub before_inverted: bool,
-    pub after: Option<RectSelection>,
+    pub after: Option<SelectionShape>,
     pub after_inverted: bool,
 }
 
-impl RectangularSelectionRecord {
+impl SelectionRecord {
     pub fn undo(&self, document: &mut Document) {
-        document.set_selection_state(self.before, self.before_inverted);
+        document.set_selection_shape_state(self.before.clone(), self.before_inverted);
     }
 
     pub fn redo(&self, document: &mut Document) {
-        document.set_selection_state(self.after, self.after_inverted);
+        document.set_selection_shape_state(self.after.clone(), self.after_inverted);
     }
 }
 
@@ -426,21 +565,21 @@ impl RectangularMarqueeTool {
         start_y: i32,
         end_x: i32,
         end_y: i32,
-    ) -> Option<RectangularSelectionRecord> {
-        let before = document.selection();
+    ) -> Option<SelectionRecord> {
+        let before = document.selection_shape().cloned();
         let before_inverted = document.selection_inverted();
-        let after = Self::preview_rect(start_x, start_y, end_x, end_y);
+        let after = Self::preview_rect(start_x, start_y, end_x, end_y).map(SelectionShape::Rectangular);
 
         if before == after && !before_inverted {
             return None;
         }
 
-        match after {
-            Some(selection) => document.set_selection(selection),
+        match after.clone() {
+            Some(selection) => document.set_selection_shape_state(Some(selection), false),
             None => document.clear_selection(),
         }
 
-        Some(RectangularSelectionRecord {
+        Some(SelectionRecord {
             before,
             before_inverted,
             after,
@@ -449,35 +588,135 @@ impl RectangularMarqueeTool {
     }
 }
 
+impl LassoTool {
+    pub fn preview_selection(points: &[(i32, i32)]) -> Option<FreeformSelection> {
+        let mut deduped = Vec::<SelectionPoint>::new();
+        for &(x, y) in points {
+            if deduped.last().copied() != Some(SelectionPoint::new(x, y)) {
+                deduped.push(SelectionPoint::new(x, y));
+            }
+        }
+
+        FreeformSelection::new(deduped)
+    }
+
+    pub fn apply_selection(document: &mut Document, points: &[(i32, i32)]) -> Option<SelectionRecord> {
+        let before = document.selection_shape().cloned();
+        let before_inverted = document.selection_inverted();
+        let after = Self::preview_selection(points).map(SelectionShape::Freeform);
+
+        if before == after && !before_inverted {
+            return None;
+        }
+
+        match after.clone() {
+            Some(selection) => document.set_selection_shape_state(Some(selection), false),
+            None => document.clear_selection(),
+        }
+
+        Some(SelectionRecord {
+            before,
+            before_inverted,
+            after,
+            after_inverted: false,
+        })
+    }
+}
+
+fn restore_pixels_outside_selection(
+    tile_pixels: &mut [u8],
+    before: Option<&RasterTile>,
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    selection_shape: &SelectionShape,
+    clip_inverted: bool,
+) {
+    for local_y in 0..tile_size as usize {
+        for local_x in 0..tile_size as usize {
+            let canvas_x = tile_origin_x + local_x as i32;
+            let canvas_y = tile_origin_y + local_y as i32;
+            let inside = selection_shape.contains_pixel(canvas_x, canvas_y) != clip_inverted;
+            if inside {
+                continue;
+            }
+
+            let index = (local_y * tile_size as usize + local_x) * 4;
+            if let Some(before) = before {
+                tile_pixels[index..index + 4].copy_from_slice(&before.pixels[index..index + 4]);
+            } else {
+                tile_pixels[index..index + 4].fill(0);
+            }
+        }
+    }
+}
+
+fn restore_mask_outside_selection(
+    tile_alpha: &mut [u8],
+    before: Option<&MaskTile>,
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    selection_shape: &SelectionShape,
+    clip_inverted: bool,
+) {
+    for local_y in 0..tile_size as usize {
+        for local_x in 0..tile_size as usize {
+            let canvas_x = tile_origin_x + local_x as i32;
+            let canvas_y = tile_origin_y + local_y as i32;
+            let inside = selection_shape.contains_pixel(canvas_x, canvas_y) != clip_inverted;
+            if inside {
+                continue;
+            }
+
+            let index = local_y * tile_size as usize + local_x;
+            tile_alpha[index] = before.map(|tile| tile.alpha[index]).unwrap_or(255);
+        }
+    }
+}
+
 impl SimpleTransformTool {
     pub fn preview_bounds(
         document: &Document,
         layer_index: usize,
-        scale: f32,
+        scale_x: f32,
+        scale_y: f32,
+        rotate_quadrants: i32,
         translate_x: i32,
         translate_y: i32,
     ) -> Option<CanvasRect> {
-        let bounds = document.layer_canvas_bounds(layer_index)?;
-        if scale <= 0.0 {
+        if scale_x <= 0.0 || scale_y <= 0.0 {
             return None;
         }
+
+        let bounds = transform_target_bounds(document, layer_index)?;
+        let scaled_width = ((bounds.width as f32) * scale_x).round().max(1.0) as u32;
+        let scaled_height = ((bounds.height as f32) * scale_y).round().max(1.0) as u32;
+        let rotate_quadrants = rotate_quadrants.rem_euclid(4);
+        let (preview_width, preview_height) = if rotate_quadrants % 2 == 0 {
+            (scaled_width, scaled_height)
+        } else {
+            (scaled_height, scaled_width)
+        };
 
         Some(CanvasRect::new(
             bounds.x + translate_x,
             bounds.y + translate_y,
-            ((bounds.width as f32) * scale).round().max(1.0) as u32,
-            ((bounds.height as f32) * scale).round().max(1.0) as u32,
+            preview_width,
+            preview_height,
         ))
     }
 
     pub fn transform_layer(
         document: &mut Document,
         layer_index: usize,
-        scale: f32,
+        scale_x: f32,
+        scale_y: f32,
+        rotate_quadrants: i32,
         translate_x: i32,
         translate_y: i32,
     ) -> Option<LayerTransformRecord> {
-        if scale <= 0.0 {
+        if scale_x <= 0.0 || scale_y <= 0.0 {
             return None;
         }
 
@@ -488,20 +727,47 @@ impl SimpleTransformTool {
 
         let layer_id = document.layer(layer_index)?.id;
         let source_bounds = document.layer_canvas_bounds(layer_index)?;
+        let rotate_quadrants = rotate_quadrants.rem_euclid(4);
+
+        if document.selection_shape().is_some() {
+            let after = transform_selected_layer_state(
+                document,
+                &before,
+                source_bounds,
+                scale_x,
+                scale_y,
+                rotate_quadrants,
+                translate_x,
+                translate_y,
+            )?;
+            if before == after {
+                return None;
+            }
+
+            let _ = document.apply_layer_state_snapshot(layer_id, after.clone());
+            return Some(LayerTransformRecord {
+                layer_id,
+                before,
+                after,
+            });
+        }
+
         let (source_width, source_height, source_pixels) = rasterize_layer_snapshot(
             &before,
             document.tile_size,
             source_bounds,
         )?;
-        let target_width = ((source_width as f32) * scale).round().max(1.0) as u32;
-        let target_height = ((source_height as f32) * scale).round().max(1.0) as u32;
-        let transformed_pixels = resample_nearest_rgba(
+        let scaled_width = ((source_width as f32) * scale_x).round().max(1.0) as u32;
+        let scaled_height = ((source_height as f32) * scale_y).round().max(1.0) as u32;
+        let scaled_pixels = resample_nearest_rgba(
             &source_pixels,
             source_width,
             source_height,
-            target_width,
-            target_height,
+            scaled_width,
+            scaled_height,
         );
+        let (target_width, target_height, transformed_pixels) =
+            rotate_rgba_quadrants(&scaled_pixels, scaled_width, scaled_height, rotate_quadrants);
         let after = layer_state_from_pixels(
             document.tile_size,
             source_bounds.x + translate_x,
@@ -522,6 +788,291 @@ impl SimpleTransformTool {
             after,
         })
     }
+}
+
+fn transform_target_bounds(document: &Document, layer_index: usize) -> Option<CanvasRect> {
+    let source_bounds = document.layer_canvas_bounds(layer_index)?;
+    let Some(selection_shape) = document.selection_shape() else {
+        return Some(source_bounds);
+    };
+
+    let selection_bounds = selection_shape.bounds();
+    let left = source_bounds.x.max(selection_bounds.x);
+    let top = source_bounds.y.max(selection_bounds.y);
+    let right = (source_bounds.x + source_bounds.width as i32)
+        .min(selection_bounds.x + selection_bounds.width as i32);
+    let bottom = (source_bounds.y + source_bounds.height as i32)
+        .min(selection_bounds.y + selection_bounds.height as i32);
+
+    if left >= right || top >= bottom {
+        return Some(source_bounds);
+    }
+
+    Some(CanvasRect::new(
+        left,
+        top,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+fn transform_selected_layer_state(
+    document: &Document,
+    before: &LayerStateSnapshot,
+    source_bounds: CanvasRect,
+    scale_x: f32,
+    scale_y: f32,
+    rotate_quadrants: i32,
+    translate_x: i32,
+    translate_y: i32,
+) -> Option<LayerStateSnapshot> {
+    let (source_width, source_height, source_pixels) =
+        rasterize_layer_snapshot(before, document.tile_size, source_bounds)?;
+    let selected_bounds = selected_pixel_bounds(document, source_bounds, &source_pixels)?;
+    let selected_pixels = extract_selected_pixels(document, source_bounds, selected_bounds, &source_pixels);
+    let base_pixels = clear_selected_pixels(document, source_bounds, &source_pixels);
+
+    let scaled_width = ((selected_bounds.width as f32) * scale_x).round().max(1.0) as u32;
+    let scaled_height = ((selected_bounds.height as f32) * scale_y).round().max(1.0) as u32;
+    let scaled_pixels = resample_nearest_rgba(
+        &selected_pixels,
+        selected_bounds.width,
+        selected_bounds.height,
+        scaled_width,
+        scaled_height,
+    );
+    let (target_width, target_height, transformed_pixels) =
+        rotate_rgba_quadrants(&scaled_pixels, scaled_width, scaled_height, rotate_quadrants);
+
+    let destination_bounds = CanvasRect::new(
+        selected_bounds.x + translate_x,
+        selected_bounds.y + translate_y,
+        target_width,
+        target_height,
+    );
+    let union_bounds = union_rect(source_bounds, destination_bounds);
+    let mut output = vec![0_u8; (union_bounds.width * union_bounds.height * 4) as usize];
+
+    blit_rgba(
+        &mut output,
+        union_bounds.width,
+        union_bounds.height,
+        union_bounds,
+        source_bounds,
+        &base_pixels,
+        source_width,
+        source_height,
+    );
+    composite_rgba(
+        &mut output,
+        union_bounds.width,
+        union_bounds.height,
+        union_bounds,
+        destination_bounds,
+        &transformed_pixels,
+        target_width,
+        target_height,
+    );
+
+    Some(layer_state_from_pixels(
+        document.tile_size,
+        union_bounds.x,
+        union_bounds.y,
+        union_bounds.width,
+        union_bounds.height,
+        &output,
+    ))
+}
+
+fn selected_pixel_bounds(
+    document: &Document,
+    source_bounds: CanvasRect,
+    source_pixels: &[u8],
+) -> Option<CanvasRect> {
+    let width = source_bounds.width as usize;
+    let height = source_bounds.height as usize;
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+
+    for local_y in 0..height {
+        for local_x in 0..width {
+            let index = (local_y * width + local_x) * 4 + 3;
+            if source_pixels[index] == 0 {
+                continue;
+            }
+            let canvas_x = source_bounds.x + local_x as i32;
+            let canvas_y = source_bounds.y + local_y as i32;
+            if !document.allows_pixel_edit(canvas_x, canvas_y) {
+                continue;
+            }
+            min_x = min_x.min(canvas_x);
+            min_y = min_y.min(canvas_y);
+            max_x = max_x.max(canvas_x);
+            max_y = max_y.max(canvas_y);
+        }
+    }
+
+    if min_x == i32::MAX {
+        return None;
+    }
+
+    Some(CanvasRect::new(
+        min_x,
+        min_y,
+        (max_x - min_x + 1) as u32,
+        (max_y - min_y + 1) as u32,
+    ))
+}
+
+fn extract_selected_pixels(
+    document: &Document,
+    source_bounds: CanvasRect,
+    selected_bounds: CanvasRect,
+    source_pixels: &[u8],
+) -> Vec<u8> {
+    let mut selected = vec![0_u8; (selected_bounds.width * selected_bounds.height * 4) as usize];
+    let source_width = source_bounds.width as usize;
+    let selected_width = selected_bounds.width as usize;
+
+    for local_y in 0..selected_bounds.height as usize {
+        for local_x in 0..selected_bounds.width as usize {
+            let canvas_x = selected_bounds.x + local_x as i32;
+            let canvas_y = selected_bounds.y + local_y as i32;
+            if !document.allows_pixel_edit(canvas_x, canvas_y) {
+                continue;
+            }
+
+            let source_x = (canvas_x - source_bounds.x) as usize;
+            let source_y = (canvas_y - source_bounds.y) as usize;
+            let source_index = (source_y * source_width + source_x) * 4;
+            let target_index = (local_y * selected_width + local_x) * 4;
+            selected[target_index..target_index + 4]
+                .copy_from_slice(&source_pixels[source_index..source_index + 4]);
+        }
+    }
+
+    selected
+}
+
+fn clear_selected_pixels(document: &Document, source_bounds: CanvasRect, source_pixels: &[u8]) -> Vec<u8> {
+    let mut base = source_pixels.to_vec();
+    let width = source_bounds.width as usize;
+    let height = source_bounds.height as usize;
+
+    for local_y in 0..height {
+        for local_x in 0..width {
+            let canvas_x = source_bounds.x + local_x as i32;
+            let canvas_y = source_bounds.y + local_y as i32;
+            if !document.allows_pixel_edit(canvas_x, canvas_y) {
+                continue;
+            }
+            let index = (local_y * width + local_x) * 4;
+            base[index..index + 4].fill(0);
+        }
+    }
+
+    base
+}
+
+fn union_rect(left: CanvasRect, right: CanvasRect) -> CanvasRect {
+    let min_x = left.x.min(right.x);
+    let min_y = left.y.min(right.y);
+    let max_x = (left.x + left.width as i32).max(right.x + right.width as i32);
+    let max_y = (left.y + left.height as i32).max(right.y + right.height as i32);
+    CanvasRect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32)
+}
+
+fn blit_rgba(
+    destination: &mut [u8],
+    destination_width: u32,
+    destination_height: u32,
+    union_bounds: CanvasRect,
+    destination_bounds: CanvasRect,
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+) {
+    for y in 0..source_height as usize {
+        for x in 0..source_width as usize {
+            let canvas_x = destination_bounds.x + x as i32;
+            let canvas_y = destination_bounds.y + y as i32;
+            let target_x = canvas_x - union_bounds.x;
+            let target_y = canvas_y - union_bounds.y;
+            if target_x < 0
+                || target_y < 0
+                || target_x >= destination_width as i32
+                || target_y >= destination_height as i32
+            {
+                continue;
+            }
+            let source_index = (y * source_width as usize + x) * 4;
+            let destination_index =
+                ((target_y as usize * destination_width as usize) + target_x as usize) * 4;
+            destination[destination_index..destination_index + 4]
+                .copy_from_slice(&source[source_index..source_index + 4]);
+        }
+    }
+}
+
+fn composite_rgba(
+    destination: &mut [u8],
+    destination_width: u32,
+    destination_height: u32,
+    union_bounds: CanvasRect,
+    destination_bounds: CanvasRect,
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+) {
+    for y in 0..source_height as usize {
+        for x in 0..source_width as usize {
+            let canvas_x = destination_bounds.x + x as i32;
+            let canvas_y = destination_bounds.y + y as i32;
+            let target_x = canvas_x - union_bounds.x;
+            let target_y = canvas_y - union_bounds.y;
+            if target_x < 0
+                || target_y < 0
+                || target_x >= destination_width as i32
+                || target_y >= destination_height as i32
+            {
+                continue;
+            }
+            let source_index = (y * source_width as usize + x) * 4;
+            let alpha = source[source_index + 3] as f32 / 255.0;
+            if alpha <= 0.0 {
+                continue;
+            }
+            let destination_index =
+                ((target_y as usize * destination_width as usize) + target_x as usize) * 4;
+            composite_pixel_over(
+                &mut destination[destination_index..destination_index + 4],
+                [
+                    source[source_index],
+                    source[source_index + 1],
+                    source[source_index + 2],
+                    source[source_index + 3],
+                ],
+                alpha,
+            );
+        }
+    }
+}
+
+fn composite_pixel_over(destination: &mut [u8], source: [u8; 4], alpha: f32) {
+    let source_alpha = alpha.clamp(0.0, 1.0);
+    let destination_alpha = destination[3] as f32 / 255.0;
+    let out_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+
+    for channel in 0..3 {
+        let src = source[channel] as f32 / 255.0;
+        let dst = destination[channel] as f32 / 255.0;
+        let out = src * source_alpha + dst * (1.0 - source_alpha);
+        destination[channel] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+
+    destination[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
 fn rasterize_layer_snapshot(
@@ -591,6 +1142,42 @@ fn resample_nearest_rgba(
     output
 }
 
+fn rotate_rgba_quadrants(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    rotate_quadrants: i32,
+) -> (u32, u32, Vec<u8>) {
+    let rotate_quadrants = rotate_quadrants.rem_euclid(4);
+    if rotate_quadrants == 0 {
+        return (source_width, source_height, source.to_vec());
+    }
+
+    let (target_width, target_height) = if rotate_quadrants % 2 == 0 {
+        (source_width, source_height)
+    } else {
+        (source_height, source_width)
+    };
+    let mut output = vec![0_u8; (target_width * target_height * 4) as usize];
+
+    for source_y in 0..source_height {
+        for source_x in 0..source_width {
+            let (target_x, target_y) = match rotate_quadrants {
+                1 => (source_height - 1 - source_y, source_x),
+                2 => (source_width - 1 - source_x, source_height - 1 - source_y),
+                3 => (source_y, source_width - 1 - source_x),
+                _ => (source_x, source_y),
+            };
+            let source_index = ((source_y * source_width + source_x) * 4) as usize;
+            let target_index = ((target_y * target_width + target_x) * 4) as usize;
+            output[target_index..target_index + 4]
+                .copy_from_slice(&source[source_index..source_index + 4]);
+        }
+    }
+
+    (target_width, target_height, output)
+}
+
 fn layer_state_from_pixels(
     tile_size: u32,
     offset_x: i32,
@@ -641,14 +1228,14 @@ fn layer_state_from_pixels(
     }
 }
 
-fn interpolate_dab_positions(points: &[(f32, f32)], spacing: f32) -> Vec<(f32, f32)> {
-    let mut positions = vec![points[0]];
+fn interpolate_brush_samples(samples: &[BrushSample], spacing: f32) -> Vec<BrushSample> {
+    let mut positions = vec![samples[0]];
 
-    for window in points.windows(2) {
+    for window in samples.windows(2) {
         let start = window[0];
         let end = window[1];
-        let delta_x = end.0 - start.0;
-        let delta_y = end.1 - start.1;
+        let delta_x = end.x - start.x;
+        let delta_y = end.y - start.y;
         let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
 
         if distance == 0.0 {
@@ -658,21 +1245,30 @@ fn interpolate_dab_positions(points: &[(f32, f32)], spacing: f32) -> Vec<(f32, f
         let steps = (distance / spacing).ceil() as usize;
         for step in 1..=steps {
             let t = step as f32 / steps as f32;
-            positions.push((start.0 + delta_x * t, start.1 + delta_y * t));
+            positions.push(BrushSample::new(
+                start.x + delta_x * t,
+                start.y + delta_y * t,
+                start.pressure + (end.pressure - start.pressure) * t,
+            ));
         }
     }
 
     positions
 }
 
+fn effective_spacing(settings: BrushSettings) -> f32 {
+    let max_spacing = (settings.radius * 1.5).max(1.0);
+    settings.spacing.clamp(1.0, max_spacing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushSettings, BrushTool, BrushToolMode, MoveTool, RectangularMarqueeTool,
-        SimpleTransformTool,
+        BrushSample, BrushSettings, BrushTool, BrushToolMode, LassoTool, MoveTool,
+        RectangularMarqueeTool, SimpleTransformTool,
     };
     use common::CanvasRect;
-    use doc_model::{Document, LayerEditTarget, TileCoord};
+    use doc_model::{Document, FreeformSelection, LayerEditTarget, SelectionPoint, SelectionShape, TileCoord};
     use history_engine::HistoryStack;
 
     fn brush_settings() -> BrushSettings {
@@ -681,8 +1277,74 @@ mod tests {
             hardness: 0.8,
             opacity: 1.0,
             spacing: 4.0,
+            flow: 1.0,
             color: [255, 0, 0, 255],
+            pressure_size_enabled: false,
+            pressure_opacity_enabled: false,
         }
+    }
+
+    #[test]
+    fn pressure_samples_interpolate_along_brush_segments() {
+        let samples = super::interpolate_brush_samples(
+            &[
+                BrushSample::new(0.0, 0.0, 0.2),
+                BrushSample::new(8.0, 0.0, 0.8),
+            ],
+            4.0,
+        );
+
+        assert_eq!(samples.first().map(|sample| sample.pressure), Some(0.2));
+        assert_eq!(samples.last().map(|sample| sample.pressure), Some(0.8));
+        assert!(samples.len() >= 3);
+    }
+
+    #[test]
+    fn pressure_mapping_can_reduce_radius_and_opacity() {
+        let mut settings = brush_settings();
+        settings.pressure_size_enabled = true;
+        settings.pressure_opacity_enabled = true;
+
+        let light = settings.to_dab_with_pressure(0.25);
+        let heavy = settings.to_dab_with_pressure(1.0);
+
+        assert!(light.radius < heavy.radius);
+        assert!(light.opacity < heavy.opacity);
+    }
+
+    #[test]
+    fn brush_settings_validation_clamps_dynamic_parameters() {
+        let validated = BrushSettings {
+            radius: 500.0,
+            hardness: -1.0,
+            opacity: 1.5,
+            spacing: 0.0,
+            flow: 0.0,
+            ..brush_settings()
+        }
+        .validated();
+
+        assert_eq!(validated.radius, 128.0);
+        assert_eq!(validated.hardness, 0.0);
+        assert_eq!(validated.opacity, 1.0);
+        assert_eq!(validated.spacing, 1.0);
+        assert_eq!(validated.flow, 0.05);
+    }
+
+    #[test]
+    fn low_flow_reduces_dab_opacity() {
+        let light = BrushSettings {
+            flow: 0.25,
+            ..brush_settings()
+        }
+        .to_dab();
+        let heavy = BrushSettings {
+            flow: 1.0,
+            ..brush_settings()
+        }
+        .to_dab();
+
+        assert!(light.flow < heavy.flow);
     }
 
     fn pixel_alpha(document: &Document, layer_index: usize, pixel_x: u32, pixel_y: u32) -> u8 {
@@ -849,7 +1511,10 @@ mod tests {
         let record = RectangularMarqueeTool::apply_selection(&mut document, 60, 80, 20, 30)
             .expect("selection record should exist");
 
-        assert_eq!(record.after, Some(CanvasRect::new(20, 30, 40, 50)));
+        assert_eq!(
+            record.after,
+            Some(SelectionShape::Rectangular(CanvasRect::new(20, 30, 40, 50)))
+        );
         assert!(!record.after_inverted);
         assert_eq!(document.selection(), Some(CanvasRect::new(20, 30, 40, 50)));
     }
@@ -888,6 +1553,101 @@ mod tests {
         let outside_alpha = pixel_alpha(&document, 0, 58, 64);
         assert!(inside_alpha > 0);
         assert_eq!(outside_alpha, 0);
+    }
+
+    #[test]
+    fn lasso_selection_creates_freeform_shape() {
+        let mut document = Document::new(512, 512);
+        let record = LassoTool::apply_selection(&mut document, &[(10, 10), (40, 10), (25, 40)])
+            .expect("lasso selection should produce a record");
+
+        assert!(matches!(record.after, Some(SelectionShape::Freeform(_))));
+        assert!(document.selection_contains_pixel(25, 20));
+        assert!(!document.selection_contains_pixel(5, 5));
+    }
+
+    #[test]
+    fn brush_stroke_respects_freeform_selection() {
+        let mut document = Document::new(128, 128);
+        let selection = FreeformSelection::new(vec![
+            SelectionPoint::new(60, 56),
+            SelectionPoint::new(76, 56),
+            SelectionPoint::new(68, 72),
+        ])
+        .expect("triangle selection should be valid");
+        document.set_freeform_selection(selection);
+
+        let _record = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(68.0, 64.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
+        )
+        .expect("selected brush stroke should produce a record");
+
+        let inside_alpha = pixel_alpha(&document, 0, 68, 64);
+        let outside_alpha = pixel_alpha(&document, 0, 58, 64);
+        assert!(inside_alpha > 0);
+        assert_eq!(outside_alpha, 0);
+    }
+
+    #[test]
+    fn move_tool_moves_only_selected_pixels() {
+        let mut document = Document::new(128, 128);
+        let _ = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(20.0, 20.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
+        );
+        let _ = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(60.0, 20.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
+        );
+        document.set_selection(CanvasRect::new(16, 16, 16, 16));
+
+        let _record = MoveTool::move_layer(&mut document, 0, 10, 0).expect("selected move should apply");
+
+        assert_eq!(pixel_alpha(&document, 0, 20, 20), 0);
+        assert!(pixel_alpha(&document, 0, 30, 20) > 0);
+        assert!(pixel_alpha(&document, 0, 60, 20) > 0);
+    }
+
+    #[test]
+    fn transform_tool_transforms_only_selected_pixels() {
+        let mut document = Document::new(128, 128);
+        let _ = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(20.0, 20.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
+        );
+        let _ = BrushTool::apply_stroke(
+            &mut document,
+            0,
+            &[(60.0, 20.0)],
+            brush_settings(),
+            BrushToolMode::Paint,
+            LayerEditTarget::LayerPixels,
+        );
+        document.set_selection(CanvasRect::new(16, 16, 16, 16));
+
+        let _record = SimpleTransformTool::transform_layer(&mut document, 0, 1.0, 1.0, 0, 10, 0)
+            .expect("selected transform should apply");
+
+        assert_eq!(pixel_alpha(&document, 0, 20, 20), 0);
+        assert!(pixel_alpha(&document, 0, 30, 20) > 0);
+        assert!(pixel_alpha(&document, 0, 60, 20) > 0);
     }
 
     #[test]
@@ -982,10 +1742,21 @@ mod tests {
         let mut document = Document::new(512, 512);
         let _ = document.ensure_tile_for_pixel(0, 32, 32);
 
-        let bounds = SimpleTransformTool::preview_bounds(&document, 0, 1.5, 20, -10)
+        let bounds = SimpleTransformTool::preview_bounds(&document, 0, 1.5, 1.5, 0, 20, -10)
             .expect("preview bounds should exist");
 
         assert_eq!(bounds, CanvasRect::new(20, -10, 384, 384));
+    }
+
+    #[test]
+    fn simple_transform_preview_bounds_support_non_uniform_scale_and_rotation() {
+        let mut document = Document::new(512, 512);
+        let _ = document.ensure_tile_for_pixel(0, 32, 32);
+
+        let bounds = SimpleTransformTool::preview_bounds(&document, 0, 2.0, 0.5, 1, 20, -10)
+            .expect("preview bounds should exist");
+
+        assert_eq!(bounds, CanvasRect::new(20, -10, 128, 512));
     }
 
     #[test]
@@ -998,7 +1769,7 @@ mod tests {
         tile.pixels[(8 * tile_size + 8) * 4 + 3] = 255;
 
         let before = document.layer_state_snapshot(0).expect("snapshot should exist");
-        let record = SimpleTransformTool::transform_layer(&mut document, 0, 2.0, 15, 5)
+        let record = SimpleTransformTool::transform_layer(&mut document, 0, 2.0, 2.0, 0, 15, 5)
             .expect("transform should produce a record");
         let after = document.layer_state_snapshot(0).expect("snapshot should exist");
 
@@ -1007,5 +1778,22 @@ mod tests {
         assert_eq!(document.layer_state_snapshot(0), Some(before.clone()));
         record.redo(&mut document);
         assert_eq!(document.layer_state_snapshot(0), Some(after));
+    }
+
+    #[test]
+    fn simple_transform_can_rotate_quarter_turns() {
+        let mut document = Document::new(512, 512);
+        let tile_size = document.tile_size as usize;
+        let tile = document
+            .ensure_tile_for_pixel(0, 8, 8)
+            .expect("tile should be created");
+        tile.pixels[(8 * tile_size + 8) * 4 + 3] = 255;
+
+        let record = SimpleTransformTool::transform_layer(&mut document, 0, 1.0, 1.0, 1, 0, 0)
+            .expect("rotation should produce a record");
+
+        assert_eq!(pixel_alpha(&document, 0, 247, 8), 255);
+        record.undo(&mut document);
+        assert_eq!(pixel_alpha(&document, 0, 8, 8), 255);
     }
 }

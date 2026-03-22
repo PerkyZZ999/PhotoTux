@@ -145,7 +145,7 @@ Progress notes:
 
 ### EW08 - Define freeform selection representation
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: lasso support rests on a headless selection model rather than shell geometry only
 - Includes:
   - polygon or path-based selection representation
@@ -155,9 +155,15 @@ Progress notes:
 - Done when:
   - freeform selection state is testable in `doc_model`
 
+Progress notes:
+- `doc_model` selection state now stores a document-owned `SelectionShape` enum instead of only a rectangular bounds box, which establishes a real headless foundation for lasso-style selections without moving geometry into the shell.
+- the freeform branch is represented as a polygon-backed `FreeformSelection` with integer control points, keeping the initial model simple, serializable, and easy to query in pure tests.
+- selection queries now flow through shared shape-aware bounds and hit-testing logic, so rectangular and freeform selections use the same invert and edit-allowance path instead of forking separate document rules.
+- regression coverage now verifies polygon bounds calculation, point-in-selection behavior, and inverted edit semantics for freeform selections while preserving the existing rectangular selection behavior used by current tools.
+
 ### EW09 - Add lasso interaction and edit clipping
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: freeform selection affects real paint and edit operations
 - Includes:
   - lasso tool behavior in `tool_system`
@@ -168,9 +174,16 @@ Progress notes:
 - Done when:
   - lasso selection is usable for real editing, not just visibly drawn
 
+Progress notes:
+- `tool_system` now has a real `LassoTool` and generalized selection history records, so freeform selections can be created, undone, and redone through the same document-owned selection model used by rectangular marquee.
+- `app_core` now exposes a lasso interaction path and snapshot data for both committed and in-progress freeform selection points, which makes lasso state visible to the shell without pushing geometry ownership into GTK state.
+- `render_wgpu` now supports polyline overlays in addition to rectangle overlays, so lasso previews and committed freeform selections render as paths instead of collapsing to bounding boxes.
+- brush, mask, move, and transform workflows now all respect freeform selection clipping, so lasso selection affects real editing instead of only changing overlay state.
+- regression coverage now includes tool-level and controller-level selected move and selected transform behavior, alongside lasso creation, path overlay rendering, and brush/mask clipping behavior.
+
 ### EW10 - Upgrade transform behavior beyond translate and uniform scale
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: transform workflows cover more practical editing cases
 - Includes:
   - rotate support
@@ -181,9 +194,15 @@ Progress notes:
 - Done when:
   - transform workflows materially exceed the MVP subset without regressing parity
 
+Progress notes:
+- `tool_system` transform behavior now supports independent X/Y scaling and quarter-turn rotation with the same preview-versus-commit boundary used by the existing translate workflow.
+- selection-aware transforms continue to work under the expanded model, so non-uniform scale and rotation apply to either the full layer or the active selection without forking separate shell-owned state.
+- `app_core` now tracks richer transform session state and exposes it through shell snapshots, while `ui_shell` surfaces the new controls in the existing Properties panel rather than introducing a second transform mode UI.
+- regression coverage now includes preview bounds for non-uniform scale plus rotation, quarter-turn transform application, controller snapshot updates for transform state, and controller commit coverage for the expanded transform path.
+
 ### EW11 - Add guides and guide rendering
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: alignment assistance exists as real editor state
 - Includes:
   - guide representation
@@ -193,9 +212,15 @@ Progress notes:
 - Done when:
   - guides can be created, toggled, and visualized predictably
 
+Progress notes:
+- `doc_model` now owns persisted horizontal and vertical guide records plus guide visibility state, keeping guides as headless document data rather than shell-only UI state.
+- `app_core` projects guide state through shell snapshots and records add/remove/show-hide guide operations in undoable history, so guide changes behave like real editor state.
+- `ui_shell` now exposes guide controls in the View menu and Properties panel, while the viewport overlay path renders visible guides as document-space lines through the existing renderer integration.
+- `file_io` now persists guide state in project manifests, and regression coverage verifies document, controller, and save/load behavior for guides.
+
 ### EW12 - Add snapping for move and transform workflows
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: alignment-sensitive workflows become faster and more precise
 - Includes:
   - snapping to guides
@@ -205,9 +230,15 @@ Progress notes:
 - Done when:
   - snapping materially improves placement workflows without feeling unpredictable
 
+Progress notes:
+- move and transform translation now snap to document guides in `app_core`, using controller-owned snapping state rather than GTK-owned interaction logic.
+- snapping has a persistent enable/disable toggle and a temporary Shift bypass during drag, which keeps guide-assisted alignment available without making direct manipulation feel sticky.
+- `ui_shell` now exposes snapping controls through the existing View menu and Properties panel, and shell status text reflects when snapping is active or temporarily bypassed.
+- regression coverage now includes snapped move, snapped transform preview, disabled snapping, and temporary bypass behavior through controller-level move/transform integration tests.
+
 ### EW13 - Build representative regression fixtures for upgraded workflows
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: masks, groups, lasso, transform, and guides stay stable over time
 - Includes:
   - masked compositing fixture
@@ -218,6 +249,12 @@ Progress notes:
 - Depends on: EW04, EW07, EW09, EW10, EW12
 - Done when:
   - the upgraded workflow set has stable regression coverage and manual validation notes
+
+Progress notes:
+- the canonical fixture documentation now explicitly covers masked compositing, grouped hierarchy, lasso-aware transform parity, and guide-snapping interaction scenes instead of leaving those upgraded workflows implied.
+- `file_io` continues to carry the representative masked and grouped persistence fixtures, while `app_core` now has a dedicated lasso-aware transform parity fixture and reusable guide-snapping fixture coverage.
+- a new post-MVP editing workflow checklist now documents the manual validation pass for masks, groups, lasso, transform, guides, and snapping so the upgraded workflow set has written manual validation notes rather than tribal knowledge.
+- regression coverage for the upgraded workflow track now has an explicit documented home in both `tests/fixtures/README.md` and `docs/testing-strategy.md`, which closes the loop between automated fixtures and manual validation expectations.
 
 ## Suggested Execution Order
 

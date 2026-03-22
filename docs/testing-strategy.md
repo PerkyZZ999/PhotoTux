@@ -97,6 +97,14 @@ Current implemented fixture set:
 - large sparse document stress scene in `file_io` tests
 - controller viewport/export parity scene in `app_core` tests
 - autosave and recovery scenes in `app_core` tests
+- masked compositing and grouped-hierarchy scenes in `file_io` tests
+- lasso-aware transform parity fixture in `app_core` tests
+- guide-snapping interaction fixtures in `app_core` tests
+
+Current manual validation companion docs:
+
+- MVP shell checklist in `docs/tests/kwin-mcp-test-checklist.md`
+- post-MVP editing workflow checklist in `docs/tests/post-mvp-editing-workflow-checklist.md`
 
 These should be used repeatedly for regressions instead of inventing new ad hoc files every time.
 

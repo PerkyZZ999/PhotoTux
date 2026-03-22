@@ -15,15 +15,17 @@ pub struct BrushDab {
     pub radius: f32,
     pub hardness: f32,
     pub opacity: f32,
+    pub flow: f32,
     pub color: [u8; 4],
 }
 
 impl BrushDab {
-    pub fn new(radius: f32, hardness: f32, opacity: f32, color: [u8; 4]) -> Self {
+    pub fn new(radius: f32, hardness: f32, opacity: f32, flow: f32, color: [u8; 4]) -> Self {
         Self {
             radius,
             hardness: hardness.clamp(0.0, 1.0),
             opacity: opacity.clamp(0.0, 1.0),
+            flow: flow.clamp(0.0, 1.0),
             color,
         }
     }
@@ -230,9 +232,11 @@ fn apply_round_dab(
             let coverage = if distance <= hard_radius {
                 1.0
             } else {
-                1.0 - ((distance - hard_radius) / soft_width)
+                let t = ((distance - hard_radius) / soft_width).clamp(0.0, 1.0);
+                1.0 - (t * t * (3.0 - 2.0 * t))
             };
-            let alpha = (dab.color[3] as f32 / 255.0) * dab.opacity * coverage.clamp(0.0, 1.0);
+            let alpha =
+                (dab.color[3] as f32 / 255.0) * dab.opacity * dab.flow * coverage.clamp(0.0, 1.0);
 
             if alpha <= 0.0 {
                 continue;
@@ -307,9 +311,10 @@ fn apply_round_mask_dab(
             let coverage = if distance <= hard_radius {
                 1.0
             } else {
-                1.0 - ((distance - hard_radius) / soft_width)
+                let t = ((distance - hard_radius) / soft_width).clamp(0.0, 1.0);
+                1.0 - (t * t * (3.0 - 2.0 * t))
             };
-            let alpha = (dab.opacity * coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            let alpha = (dab.opacity * dab.flow * coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
             if alpha <= 0.0 {
                 continue;
             }
@@ -390,7 +395,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(4.0, 1.0, 1.0, [255, 0, 0, 255]),
+            BrushDab::new(4.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
         );
 
         assert!(changed);
@@ -408,7 +413,7 @@ mod tests {
             0,
             40.0,
             40.0,
-            BrushDab::new(3.0, 1.0, 1.0, [255, 0, 0, 255]),
+            BrushDab::new(3.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
         );
 
         assert!(!changed);
@@ -425,7 +430,7 @@ mod tests {
             0,
             18.0,
             4.0,
-            BrushDab::new(2.0, 1.0, 1.0, [0, 255, 0, 255]),
+            BrushDab::new(2.0, 1.0, 1.0, 1.0, [0, 255, 0, 255]),
         );
 
         assert!(changed);
@@ -443,7 +448,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(5.0, 0.25, 1.0, [255, 255, 255, 255]),
+            BrushDab::new(5.0, 0.25, 1.0, 1.0, [255, 255, 255, 255]),
         );
 
         assert!(changed);
@@ -462,7 +467,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(3.0, 1.0, 0.5, [0, 0, 0, 255]),
+            BrushDab::new(3.0, 1.0, 0.5, 1.0, [0, 0, 0, 255]),
         );
 
         assert!(changed);
@@ -480,7 +485,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(4.0, 1.0, 1.0, [255, 0, 0, 255]),
+            BrushDab::new(4.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
             Some(CanvasRect::new(6, 6, 4, 4)),
             false,
         );
@@ -502,7 +507,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
             Some(CanvasRect::new(6, 6, 4, 4)),
             true,
         );
@@ -524,7 +529,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
             None,
             false,
         );
@@ -540,7 +545,7 @@ mod tests {
             0,
             8.0,
             8.0,
-            BrushDab::new(4.0, 1.0, 1.0, [0, 0, 0, 255]),
+            BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
             None,
             false,
         );

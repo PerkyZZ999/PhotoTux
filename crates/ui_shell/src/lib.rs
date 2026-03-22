@@ -5,11 +5,11 @@ use gtk4::prelude::*;
 use gtk4::{
     gdk, Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
     CssProvider, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
-    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, HeaderBar, Image, Label,
+    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, GestureStylus, HeaderBar, Image, Label,
     MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
     ResponseType, Separator,
 };
-use render_wgpu::{CanvasOverlayRect, OffscreenCanvasRenderer, ViewportSize, ViewportState};
+use render_wgpu::{CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportSize, ViewportState};
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,7 @@ pub struct LayerPanelItem {
 pub enum ShellToolKind {
     Move,
     RectangularMarquee,
+    Lasso,
     Transform,
     Brush,
     Eraser,
@@ -43,11 +44,18 @@ pub enum ShellToolKind {
     Zoom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellGuide {
+    Horizontal { y: i32 },
+    Vertical { x: i32 },
+}
+
 impl ShellToolKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Move => "Move Tool",
             Self::RectangularMarquee => "Rectangular Marquee",
+            Self::Lasso => "Lasso Tool",
             Self::Transform => "Transform Tool",
             Self::Brush => "Brush Tool",
             Self::Eraser => "Eraser Tool",
@@ -87,7 +95,23 @@ pub struct ShellSnapshot {
     pub transform_preview_rect: Option<CanvasRect>,
     pub transform_active: bool,
     pub transform_scale_percent: u32,
+    pub transform_scale_x_percent: u32,
+    pub transform_scale_y_percent: u32,
+    pub transform_rotation_degrees: i32,
+    pub brush_radius: u32,
+    pub brush_hardness_percent: u32,
+    pub brush_spacing: u32,
+    pub brush_flow_percent: u32,
+    pub pressure_size_enabled: bool,
+    pub pressure_opacity_enabled: bool,
+    pub snapping_enabled: bool,
+    pub snapping_temporarily_bypassed: bool,
+    pub guides_visible: bool,
+    pub guide_count: usize,
+    pub guides: Vec<ShellGuide>,
     pub selection_rect: Option<CanvasRect>,
+    pub selection_path: Option<Vec<(i32, i32)>>,
+    pub selection_preview_path: Option<Vec<(i32, i32)>>,
     pub selection_inverted: bool,
     pub foreground_color: [u8; 4],
     pub background_color: [u8; 4],
@@ -125,9 +149,31 @@ pub trait ShellController {
     fn reset_colors(&mut self);
     fn clear_selection(&mut self);
     fn invert_selection(&mut self);
+    fn add_horizontal_guide(&mut self);
+    fn add_vertical_guide(&mut self);
+    fn remove_last_guide(&mut self);
+    fn toggle_guides_visible(&mut self);
+    fn toggle_snapping_enabled(&mut self);
+    fn toggle_pressure_size_enabled(&mut self);
+    fn toggle_pressure_opacity_enabled(&mut self);
+    fn increase_brush_radius(&mut self);
+    fn decrease_brush_radius(&mut self);
+    fn increase_brush_hardness(&mut self);
+    fn decrease_brush_hardness(&mut self);
+    fn increase_brush_spacing(&mut self);
+    fn decrease_brush_spacing(&mut self);
+    fn increase_brush_flow(&mut self);
+    fn decrease_brush_flow(&mut self);
+    fn set_temporary_snap_bypass(&mut self, bypassed: bool);
     fn begin_transform(&mut self);
     fn scale_transform_up(&mut self);
     fn scale_transform_down(&mut self);
+    fn scale_transform_x_up(&mut self);
+    fn scale_transform_x_down(&mut self);
+    fn scale_transform_y_up(&mut self);
+    fn scale_transform_y_down(&mut self);
+    fn rotate_transform_left(&mut self);
+    fn rotate_transform_right(&mut self);
     fn commit_transform(&mut self);
     fn cancel_transform(&mut self);
     fn undo(&mut self);
@@ -142,7 +188,15 @@ pub trait ShellController {
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
+    fn begin_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
+        let _ = pressure;
+        self.begin_canvas_interaction(canvas_x, canvas_y);
+    }
     fn update_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
+    fn update_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
+        let _ = pressure;
+        self.update_canvas_interaction(canvas_x, canvas_y);
+    }
     fn end_canvas_interaction(&mut self);
 }
 
@@ -334,6 +388,78 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
     menu.append(&scale_down);
+
+    let scale_x_up = build_icon_label_button("add-line.svg", "Scale X Up");
+    scale_x_up.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        scale_x_up.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().scale_transform_x_up();
+        });
+    }
+    menu.append(&scale_x_up);
+
+    let scale_x_down = build_icon_label_button("subtract-line.svg", "Scale X Down");
+    scale_x_down.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        scale_x_down.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().scale_transform_x_down();
+        });
+    }
+    menu.append(&scale_x_down);
+
+    let scale_y_up = build_icon_label_button("add-line.svg", "Scale Y Up");
+    scale_y_up.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        scale_y_up.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().scale_transform_y_up();
+        });
+    }
+    menu.append(&scale_y_up);
+
+    let scale_y_down = build_icon_label_button("subtract-line.svg", "Scale Y Down");
+    scale_y_down.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        scale_y_down.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().scale_transform_y_down();
+        });
+    }
+    menu.append(&scale_y_down);
+
+    let rotate_left = build_icon_label_button("history-line.svg", "Rotate Left");
+    rotate_left.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        rotate_left.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().rotate_transform_left();
+        });
+    }
+    menu.append(&rotate_left);
+
+    let rotate_right = build_icon_label_button("history-line.svg", "Rotate Right");
+    rotate_right.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        rotate_right.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().rotate_transform_right();
+        });
+    }
+    menu.append(&rotate_right);
 
     let commit_transform = build_icon_label_shortcut_button(
         "check-line.svg",
@@ -720,6 +846,66 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
     menu.append(&fit);
+
+    let add_horizontal_guide = build_icon_label_button("layout-column-line.svg", "Add Horizontal Guide");
+    add_horizontal_guide.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        add_horizontal_guide.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().add_horizontal_guide();
+        });
+    }
+    menu.append(&add_horizontal_guide);
+
+    let add_vertical_guide = build_icon_label_button("layout-column-line.svg", "Add Vertical Guide");
+    add_vertical_guide.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        add_vertical_guide.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().add_vertical_guide();
+        });
+    }
+    menu.append(&add_vertical_guide);
+
+    let toggle_guides = build_icon_label_button("eye-line.svg", "Show/Hide Guides");
+    toggle_guides.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        toggle_guides.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().toggle_guides_visible();
+        });
+    }
+    menu.append(&toggle_guides);
+
+    let toggle_snapping = build_icon_label_button("settings-4-line.svg", "Toggle Snapping");
+    toggle_snapping.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        toggle_snapping.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().toggle_snapping_enabled();
+        });
+    }
+    menu.append(&toggle_snapping);
+
+    let remove_guide = build_icon_label_button("eye-off-line.svg", "Remove Last Guide");
+    remove_guide.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        remove_guide.connect_clicked(move |_| {
+            popover.popdown();
+            controller.borrow_mut().remove_last_guide();
+        });
+    }
+    menu.append(&remove_guide);
 
     popover.set_child(Some(&menu));
     button.set_popover(Some(&popover));
@@ -1236,6 +1422,7 @@ fn build_left_tool_rail(
             "focus-3-line.svg",
             ShellToolKind::RectangularMarquee.label(),
         ),
+        (ShellToolKind::Lasso, "focus-3-line.svg", ShellToolKind::Lasso.label()),
         (
             ShellToolKind::Transform,
             "expand-diagonal-2-line.svg",
@@ -1652,6 +1839,22 @@ impl ShellUiState {
                 self.controller.borrow_mut().scale_transform_down();
                 return true;
             }
+            if matches!(key, gdk::Key::bracketleft) {
+                self.controller.borrow_mut().rotate_transform_left();
+                return true;
+            }
+            if matches!(key, gdk::Key::bracketright) {
+                self.controller.borrow_mut().rotate_transform_right();
+                return true;
+            }
+            if matches!(key, gdk::Key::F12) {
+                self.controller.borrow_mut().scale_transform_x_up();
+                return true;
+            }
+            if matches!(key, gdk::Key::F13) {
+                self.controller.borrow_mut().scale_transform_y_up();
+                return true;
+            }
 
             match key_char {
                 Some('x') => {
@@ -1759,6 +1962,7 @@ impl ShellUiState {
         match key_char {
             Some('v') => self.controller.borrow_mut().select_tool(ShellToolKind::Move),
             Some('m') => self.controller.borrow_mut().select_tool(ShellToolKind::RectangularMarquee),
+            Some('l') => self.controller.borrow_mut().select_tool(ShellToolKind::Lasso),
             Some('t') => self.controller.borrow_mut().select_tool(ShellToolKind::Transform),
             Some('b') => self.controller.borrow_mut().select_tool(ShellToolKind::Brush),
             Some('e') => self.controller.borrow_mut().select_tool(ShellToolKind::Eraser),
@@ -2065,6 +2269,10 @@ impl ShellUiState {
                     "Disabled"
                 }
             ),
+            format!("Brush Radius: {} px", snapshot.brush_radius),
+            format!("Brush Hardness: {}%", snapshot.brush_hardness_percent),
+            format!("Brush Spacing: {} px", snapshot.brush_spacing),
+            format!("Brush Flow: {}%", snapshot.brush_flow_percent),
         ] {
             let label = Label::new(Some(&row));
             label.set_xalign(0.0);
@@ -2154,13 +2362,26 @@ impl ShellUiState {
 
             if snapshot.transform_active {
                 let label = Label::new(Some(&format!(
-                    "Transform: {}%",
-                    snapshot.transform_scale_percent
+                    "Transform: {}% | X {}% | Y {}% | {}deg",
+                    snapshot.transform_scale_percent,
+                    snapshot.transform_scale_x_percent,
+                    snapshot.transform_scale_y_percent,
+                    snapshot.transform_rotation_degrees
                 )));
                 label.set_xalign(0.0);
                 label.add_css_class("panel-row");
                 self.properties_body.append(&label);
             }
+
+            let guides_label = Label::new(Some(&format!(
+                "Guides: {} ({}) | Snapping {}",
+                snapshot.guide_count,
+                if snapshot.guides_visible { "Visible" } else { "Hidden" },
+                if snapshot.snapping_enabled { "On" } else { "Off" }
+            )));
+            guides_label.set_xalign(0.0);
+            guides_label.add_css_class("panel-row");
+            self.properties_body.append(&guides_label);
         }
 
         let controls = GtkBox::new(Orientation::Horizontal, 6);
@@ -2277,6 +2498,152 @@ impl ShellUiState {
         selection_controls.append(&invert_selection);
         self.properties_body.append(&selection_controls);
 
+        let brush_controls_row_one = GtkBox::new(Orientation::Horizontal, 6);
+
+        let radius_down = Button::with_label("Radius -");
+        radius_down.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            radius_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_radius());
+        }
+        brush_controls_row_one.append(&radius_down);
+
+        let radius_up = Button::with_label("Radius +");
+        radius_up.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            radius_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_radius());
+        }
+        brush_controls_row_one.append(&radius_up);
+
+        let hardness_down = Button::with_label("Hardness -");
+        hardness_down.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            hardness_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_hardness());
+        }
+        brush_controls_row_one.append(&hardness_down);
+
+        let hardness_up = Button::with_label("Hardness +");
+        hardness_up.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            hardness_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_hardness());
+        }
+        brush_controls_row_one.append(&hardness_up);
+
+        self.properties_body.append(&brush_controls_row_one);
+
+        let brush_controls_row_two = GtkBox::new(Orientation::Horizontal, 6);
+
+        let spacing_down = Button::with_label("Spacing -");
+        spacing_down.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            spacing_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_spacing());
+        }
+        brush_controls_row_two.append(&spacing_down);
+
+        let spacing_up = Button::with_label("Spacing +");
+        spacing_up.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            spacing_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_spacing());
+        }
+        brush_controls_row_two.append(&spacing_up);
+
+        let flow_down = Button::with_label("Flow -");
+        flow_down.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            flow_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_flow());
+        }
+        brush_controls_row_two.append(&flow_down);
+
+        let flow_up = Button::with_label("Flow +");
+        flow_up.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            flow_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_flow());
+        }
+        brush_controls_row_two.append(&flow_up);
+
+        self.properties_body.append(&brush_controls_row_two);
+
+        let pressure_controls = GtkBox::new(Orientation::Horizontal, 6);
+
+        let pressure_size = Button::with_label(if snapshot.pressure_size_enabled {
+            "Pressure Size On"
+        } else {
+            "Pressure Size Off"
+        });
+        pressure_size.add_css_class("tool-chip");
+        pressure_size.set_tooltip_text(Some("Toggle pressure-to-size mapping"));
+        {
+            let controller = self.controller.clone();
+            pressure_size.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_size_enabled());
+        }
+        pressure_controls.append(&pressure_size);
+
+        let pressure_opacity = Button::with_label(if snapshot.pressure_opacity_enabled {
+            "Pressure Opacity On"
+        } else {
+            "Pressure Opacity Off"
+        });
+        pressure_opacity.add_css_class("tool-chip");
+        pressure_opacity.set_tooltip_text(Some("Toggle pressure-to-opacity mapping"));
+        {
+            let controller = self.controller.clone();
+            pressure_opacity.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_opacity_enabled());
+        }
+        pressure_controls.append(&pressure_opacity);
+
+        self.properties_body.append(&pressure_controls);
+
+        let guide_controls = GtkBox::new(Orientation::Horizontal, 6);
+
+        let add_h_guide = Button::with_label("Guide H");
+        add_h_guide.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            add_h_guide.connect_clicked(move |_| controller.borrow_mut().add_horizontal_guide());
+        }
+        guide_controls.append(&add_h_guide);
+
+        let add_v_guide = Button::with_label("Guide V");
+        add_v_guide.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            add_v_guide.connect_clicked(move |_| controller.borrow_mut().add_vertical_guide());
+        }
+        guide_controls.append(&add_v_guide);
+
+        let toggle_guides = Button::with_label(if snapshot.guides_visible { "Hide Guides" } else { "Show Guides" });
+        toggle_guides.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            toggle_guides.connect_clicked(move |_| controller.borrow_mut().toggle_guides_visible());
+        }
+        guide_controls.append(&toggle_guides);
+
+        let remove_guide = Button::with_label("Remove Guide");
+        remove_guide.add_css_class("tool-chip");
+        remove_guide.set_sensitive(snapshot.guide_count > 0);
+        {
+            let controller = self.controller.clone();
+            remove_guide.connect_clicked(move |_| controller.borrow_mut().remove_last_guide());
+        }
+        guide_controls.append(&remove_guide);
+
+        let toggle_snapping = Button::with_label(if snapshot.snapping_enabled { "Snap On" } else { "Snap Off" });
+        toggle_snapping.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            toggle_snapping.connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
+        }
+        guide_controls.append(&toggle_snapping);
+        self.properties_body.append(&guide_controls);
+
         let transform_controls = GtkBox::new(Orientation::Horizontal, 6);
 
         let begin_transform = Button::with_label("Start Xform");
@@ -2309,6 +2676,66 @@ impl ShellUiState {
         }
         transform_controls.append(&scale_up);
         self.properties_body.append(&transform_controls);
+
+        let transform_axis_controls = GtkBox::new(Orientation::Horizontal, 6);
+
+        let scale_x_down = Button::with_label("Scale X-");
+        scale_x_down.add_css_class("tool-chip");
+        scale_x_down.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_x_down.connect_clicked(move |_| controller.borrow_mut().scale_transform_x_down());
+        }
+        transform_axis_controls.append(&scale_x_down);
+
+        let scale_x_up = Button::with_label("Scale X+");
+        scale_x_up.add_css_class("tool-chip");
+        scale_x_up.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_x_up.connect_clicked(move |_| controller.borrow_mut().scale_transform_x_up());
+        }
+        transform_axis_controls.append(&scale_x_up);
+
+        let scale_y_down = Button::with_label("Scale Y-");
+        scale_y_down.add_css_class("tool-chip");
+        scale_y_down.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_y_down.connect_clicked(move |_| controller.borrow_mut().scale_transform_y_down());
+        }
+        transform_axis_controls.append(&scale_y_down);
+
+        let scale_y_up = Button::with_label("Scale Y+");
+        scale_y_up.add_css_class("tool-chip");
+        scale_y_up.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            scale_y_up.connect_clicked(move |_| controller.borrow_mut().scale_transform_y_up());
+        }
+        transform_axis_controls.append(&scale_y_up);
+
+        self.properties_body.append(&transform_axis_controls);
+
+        let transform_rotate_controls = GtkBox::new(Orientation::Horizontal, 6);
+        let rotate_left = Button::with_label("Rotate L");
+        rotate_left.add_css_class("tool-chip");
+        rotate_left.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            rotate_left.connect_clicked(move |_| controller.borrow_mut().rotate_transform_left());
+        }
+        transform_rotate_controls.append(&rotate_left);
+
+        let rotate_right = Button::with_label("Rotate R");
+        rotate_right.add_css_class("tool-chip");
+        rotate_right.set_sensitive(snapshot.transform_active);
+        {
+            let controller = self.controller.clone();
+            rotate_right.connect_clicked(move |_| controller.borrow_mut().rotate_transform_right());
+        }
+        transform_rotate_controls.append(&rotate_right);
+        self.properties_body.append(&transform_rotate_controls);
 
         let transform_commit_row = GtkBox::new(Orientation::Horizontal, 6);
         let commit_transform = Button::with_label("Commit Xform");
@@ -2696,6 +3123,7 @@ fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
     match tool {
         ShellToolKind::Move => "drag-move-line.svg",
         ShellToolKind::RectangularMarquee => "focus-3-line.svg",
+        ShellToolKind::Lasso => "focus-3-line.svg",
         ShellToolKind::Transform => "expand-diagonal-2-line.svg",
         ShellToolKind::Brush => "brush-2-line.svg",
         ShellToolKind::Eraser => "eraser-line.svg",
@@ -2708,6 +3136,7 @@ fn shell_tool_shortcut(tool: ShellToolKind) -> &'static str {
     match tool {
         ShellToolKind::Move => "V",
         ShellToolKind::RectangularMarquee => "M",
+        ShellToolKind::Lasso => "L",
         ShellToolKind::Transform => "T",
         ShellToolKind::Brush => "B",
         ShellToolKind::Eraser => "E",
@@ -2718,11 +3147,51 @@ fn shell_tool_shortcut(tool: ShellToolKind) -> &'static str {
 
 fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
     let tool_hint = format!("Tool: {} ({})", snapshot.active_tool_name, shell_tool_shortcut(snapshot.active_tool));
+    if matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser)
+        && (snapshot.pressure_size_enabled || snapshot.pressure_opacity_enabled)
+    {
+        return format!(
+            "{} | Radius {} | Hardness {}% | Flow {}% | Pressure {}{}",
+            tool_hint,
+            snapshot.brush_radius,
+            snapshot.brush_hardness_percent,
+            snapshot.brush_flow_percent,
+            if snapshot.pressure_size_enabled { "size" } else { "" },
+            if snapshot.pressure_opacity_enabled {
+                if snapshot.pressure_size_enabled { " + opacity" } else { "opacity" }
+            } else {
+                ""
+            }
+        );
+    }
+    if matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser) {
+        return format!(
+            "{} | Radius {} | Hardness {}% | Flow {}%",
+            tool_hint,
+            snapshot.brush_radius,
+            snapshot.brush_hardness_percent,
+            snapshot.brush_flow_percent,
+        );
+    }
     if snapshot.active_edit_target_name == "Layer Mask" {
         return format!("{} | Editing mask | Brush hides | Eraser reveals", tool_hint);
     }
     if snapshot.transform_active {
+        if snapshot.snapping_enabled {
+            return format!(
+                "{} | Enter commit | Esc cancel | Snap {} | Hold Shift bypass",
+                tool_hint,
+                if snapshot.snapping_temporarily_bypassed { "bypassed" } else { "on" }
+            );
+        }
         return format!("{} | Enter commit | Esc cancel", tool_hint);
+    }
+    if matches!(snapshot.active_tool, ShellToolKind::Move) && snapshot.snapping_enabled {
+        return format!(
+            "{} | Snap {} | Hold Shift bypass",
+            tool_hint,
+            if snapshot.snapping_temporarily_bypassed { "bypassed" } else { "on" }
+        );
     }
     if snapshot.selection_rect.is_some() {
         return format!("{} | Ctrl+D clear | Ctrl+I invert", tool_hint);
@@ -2863,6 +3332,7 @@ fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, 
 
     let state = Rc::new(RefCell::new(CanvasHostState::new(picture.clone(), controller)));
     wire_canvas_drag(&picture, state.clone());
+    wire_canvas_stylus(&picture, state.clone());
     wire_canvas_scroll(&picture, state.clone());
 
     let tick_state = state.clone();
@@ -2879,15 +3349,17 @@ fn wire_canvas_drag(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
 
     {
         let state = state.clone();
-        drag.connect_drag_begin(move |_, start_x, start_y| {
-            state.borrow_mut().begin_drag(start_x as f32, start_y as f32);
+        drag.connect_drag_begin(move |gesture, start_x, start_y| {
+            let bypass = gesture.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
+            state.borrow_mut().begin_drag(start_x as f32, start_y as f32, bypass);
         });
     }
 
     {
         let state = state.clone();
-        drag.connect_drag_update(move |_, offset_x, offset_y| {
-            state.borrow_mut().drag_to(offset_x as f32, offset_y as f32);
+        drag.connect_drag_update(move |gesture, offset_x, offset_y| {
+            let bypass = gesture.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
+            state.borrow_mut().drag_to(offset_x as f32, offset_y as f32, bypass);
         });
     }
 
@@ -2915,6 +3387,40 @@ fn wire_canvas_scroll(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
     picture.add_controller(scroll);
 }
 
+fn wire_canvas_stylus(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
+    let stylus = GestureStylus::new();
+
+    {
+        let state = state.clone();
+        stylus.connect_down(move |gesture, _, _| {
+            state.borrow_mut().set_pointer_pressure(stylus_pressure(gesture));
+        });
+    }
+
+    {
+        let state = state.clone();
+        stylus.connect_motion(move |gesture, _, _| {
+            state.borrow_mut().set_pointer_pressure(stylus_pressure(gesture));
+        });
+    }
+
+    {
+        let state = state.clone();
+        stylus.connect_up(move |_, _, _| {
+            state.borrow_mut().clear_pointer_pressure();
+        });
+    }
+
+    picture.add_controller(stylus);
+}
+
+fn stylus_pressure(gesture: &GestureStylus) -> f32 {
+    gesture
+        .axis(gdk::AxisUse::Pressure)
+        .map(|pressure| pressure.clamp(0.0, 1.0) as f32)
+        .unwrap_or(1.0)
+}
+
 struct CanvasHostState {
     picture: Picture,
     controller: Rc<RefCell<dyn ShellController>>,
@@ -2924,11 +3430,16 @@ struct CanvasHostState {
     canvas_raster: Option<CanvasRaster>,
     drag_origin_pan: Option<(f32, f32)>,
     drag_start_screen: Option<(f32, f32)>,
+    pointer_pressure: f32,
     viewport_fitted: bool,
     last_logical_size: (u32, u32),
     last_canvas_revision: Option<u64>,
     last_active_layer_bounds: Option<CanvasRect>,
     last_selection_rect: Option<CanvasRect>,
+    last_selection_path: Option<Vec<(i32, i32)>>,
+    last_selection_preview_path: Option<Vec<(i32, i32)>>,
+    last_guides_visible: bool,
+    last_guides: Vec<ShellGuide>,
     last_selection_inverted: bool,
     dirty: bool,
 }
@@ -2952,11 +3463,16 @@ impl CanvasHostState {
             canvas_raster: None,
             drag_origin_pan: None,
             drag_start_screen: None,
+            pointer_pressure: 1.0,
             viewport_fitted: false,
             last_logical_size: (0, 0),
             last_canvas_revision: None,
             last_active_layer_bounds: None,
             last_selection_rect: None,
+            last_selection_path: None,
+            last_selection_preview_path: None,
+            last_guides_visible: true,
+            last_guides: Vec::new(),
             last_selection_inverted: false,
             dirty: true,
         }
@@ -2978,10 +3494,18 @@ impl CanvasHostState {
 
         if self.last_active_layer_bounds != snapshot.active_layer_bounds
             || self.last_selection_rect != snapshot.selection_rect
+            || self.last_selection_path != snapshot.selection_path
+            || self.last_selection_preview_path != snapshot.selection_preview_path
+            || self.last_guides_visible != snapshot.guides_visible
+            || self.last_guides != snapshot.guides
             || self.last_selection_inverted != snapshot.selection_inverted
         {
             self.last_active_layer_bounds = snapshot.active_layer_bounds;
             self.last_selection_rect = snapshot.selection_rect;
+            self.last_selection_path = snapshot.selection_path.clone();
+            self.last_selection_preview_path = snapshot.selection_preview_path.clone();
+            self.last_guides_visible = snapshot.guides_visible;
+            self.last_guides = snapshot.guides.clone();
             self.last_selection_inverted = snapshot.selection_inverted;
             self.dirty = true;
         }
@@ -3019,6 +3543,7 @@ impl CanvasHostState {
 
         let scale_factor = self.picture.scale_factor() as f64;
         let mut overlays = Vec::new();
+        let mut overlay_paths = Vec::new();
         if let Some(bounds) = snapshot.active_layer_bounds {
             overlays.push(CanvasOverlayRect {
                 rect: bounds,
@@ -3033,7 +3558,35 @@ impl CanvasHostState {
                 fill_rgba: Some([255, 170, 61, 28]),
             });
         }
-        if let Some(selection) = snapshot.selection_rect {
+        if snapshot.guides_visible {
+            for guide in &snapshot.guides {
+                match *guide {
+                    ShellGuide::Horizontal { y } => overlay_paths.push(CanvasOverlayPath {
+                        points: vec![(0, y), (self.canvas_size.width as i32 - 1, y)],
+                        stroke_rgba: [255, 72, 72, 220],
+                        closed: false,
+                    }),
+                    ShellGuide::Vertical { x } => overlay_paths.push(CanvasOverlayPath {
+                        points: vec![(x, 0), (x, self.canvas_size.height as i32 - 1)],
+                        stroke_rgba: [255, 72, 72, 220],
+                        closed: false,
+                    }),
+                }
+            }
+        }
+        if let Some(points) = snapshot.selection_preview_path.clone() {
+            overlay_paths.push(CanvasOverlayPath {
+                points,
+                stroke_rgba: [116, 167, 255, 255],
+                closed: false,
+            });
+        } else if let Some(points) = snapshot.selection_path.clone() {
+            overlay_paths.push(CanvasOverlayPath {
+                points,
+                stroke_rgba: [116, 167, 255, 255],
+                closed: true,
+            });
+        } else if let Some(selection) = snapshot.selection_rect {
             overlays.push(CanvasOverlayRect {
                 rect: selection,
                 stroke_rgba: [116, 167, 255, 255],
@@ -3048,6 +3601,7 @@ impl CanvasHostState {
             scale_factor,
             self.canvas_raster.as_ref(),
             &overlays,
+            &overlay_paths,
         ) {
             Ok(frame) => {
                 let bytes = glib::Bytes::from_owned(frame.pixels);
@@ -3067,7 +3621,7 @@ impl CanvasHostState {
         }
     }
 
-    fn begin_drag(&mut self, start_x: f32, start_y: f32) {
+    fn begin_drag(&mut self, start_x: f32, start_y: f32, snap_bypass: bool) {
         self.drag_start_screen = Some((start_x, start_y));
         let snapshot = self.controller.borrow().snapshot();
         match snapshot.active_tool {
@@ -3076,17 +3630,21 @@ impl CanvasHostState {
             }
             ShellToolKind::Move
             | ShellToolKind::RectangularMarquee
+            | ShellToolKind::Lasso
             | ShellToolKind::Transform
             | ShellToolKind::Brush
             | ShellToolKind::Eraser => {
                 let (canvas_x, canvas_y) = self.screen_to_canvas(start_x, start_y);
-                self.controller.borrow_mut().begin_canvas_interaction(canvas_x, canvas_y);
+                self.controller.borrow_mut().set_temporary_snap_bypass(snap_bypass);
+                self.controller
+                    .borrow_mut()
+                    .begin_canvas_interaction_with_pressure(canvas_x, canvas_y, self.pointer_pressure);
             }
             _ => {}
         }
     }
 
-    fn drag_to(&mut self, offset_x: f32, offset_y: f32) {
+    fn drag_to(&mut self, offset_x: f32, offset_y: f32, snap_bypass: bool) {
         let snapshot = self.controller.borrow().snapshot();
         match snapshot.active_tool {
             ShellToolKind::Hand => {
@@ -3098,12 +3656,16 @@ impl CanvasHostState {
             }
             ShellToolKind::Move
             | ShellToolKind::RectangularMarquee
+            | ShellToolKind::Lasso
             | ShellToolKind::Transform
             | ShellToolKind::Brush
             | ShellToolKind::Eraser => {
                 if let Some((start_x, start_y)) = self.drag_start_screen {
                     let (canvas_x, canvas_y) = self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
-                    self.controller.borrow_mut().update_canvas_interaction(canvas_x, canvas_y);
+                    self.controller.borrow_mut().set_temporary_snap_bypass(snap_bypass);
+                    self.controller
+                        .borrow_mut()
+                        .update_canvas_interaction_with_pressure(canvas_x, canvas_y, self.pointer_pressure);
                     self.dirty = true;
                     self.tick();
                 }
@@ -3115,9 +3677,18 @@ impl CanvasHostState {
     fn end_drag(&mut self) {
         self.drag_origin_pan = None;
         self.drag_start_screen = None;
+        self.controller.borrow_mut().set_temporary_snap_bypass(false);
         self.controller.borrow_mut().end_canvas_interaction();
         self.dirty = true;
         self.tick();
+    }
+
+    fn set_pointer_pressure(&mut self, pressure: f32) {
+        self.pointer_pressure = pressure.clamp(0.0, 1.0);
+    }
+
+    fn clear_pointer_pressure(&mut self) {
+        self.pointer_pressure = 1.0;
     }
 
     fn zoom(&mut self, delta_y: f64, focal_x: f32, focal_y: f32) {

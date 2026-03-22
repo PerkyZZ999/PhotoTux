@@ -2,8 +2,8 @@ use anyhow::Context;
 use color_math::{blend_rgba_over, BlendModeMath};
 use common::{CanvasSize, GroupId, LayerId};
 use doc_model::{
-	BlendMode, Document, LayerEditTarget, LayerGroup, LayerHierarchyNode, MaskTile, RasterLayer,
-	RasterTile, TileCoord,
+	BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerGroup,
+	LayerHierarchyNode, MaskTile, RasterLayer, RasterTile, TileCoord,
 };
 use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,10 @@ pub struct ProjectManifest {
 	pub layers: Vec<ManifestLayerRecord>,
 	#[serde(default)]
 	pub layer_hierarchy: Vec<ManifestHierarchyNode>,
+	#[serde(default)]
+	pub guides: Vec<ManifestGuideRecord>,
+	#[serde(default = "default_guides_visible")]
+	pub guides_visible: bool,
 }
 
 impl From<&Document> for ProjectManifest {
@@ -71,8 +75,14 @@ impl From<&Document> for ProjectManifest {
 				.iter()
 				.map(ManifestHierarchyNode::from)
 				.collect(),
+			guides: document.guides().iter().map(ManifestGuideRecord::from).collect(),
+			guides_visible: document.guides_visible(),
 		}
 	}
+}
+
+fn default_guides_visible() -> bool {
+	true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +97,30 @@ pub struct ManifestLayerRecord {
 	pub offset_y: i32,
 	pub payload_path: String,
 	pub mask_payload_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestGuideRecord {
+	pub orientation: GuideOrientation,
+	pub position: i32,
+}
+
+impl From<&Guide> for ManifestGuideRecord {
+	fn from(guide: &Guide) -> Self {
+		Self {
+			orientation: guide.orientation,
+			position: guide.position,
+		}
+	}
+}
+
+impl From<&ManifestGuideRecord> for Guide {
+	fn from(guide: &ManifestGuideRecord) -> Self {
+		Guide {
+			orientation: guide.orientation,
+			position: guide.position,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,6 +299,8 @@ impl TryFrom<ProjectFile> for Document {
 			tile_size: common::DEFAULT_TILE_SIZE,
 			selection: None,
 			selection_inverted: false,
+			guides: manifest.guides.iter().map(Guide::from).collect(),
+			guides_visible: manifest.guides_visible,
 		};
 		document
 			.set_layer_hierarchy(restored_hierarchy)
@@ -790,6 +826,28 @@ mod tests {
 		assert_eq!(restored.layers.len(), document.layers.len());
 		assert_eq!(restored.layers[1].name, "Ink");
 		assert_eq!(restored.layers[1].tiles.len(), 1);
+	}
+
+	#[test]
+	fn save_and_load_document_roundtrip_preserves_guides() {
+		let mut document = Document::new(512, 512);
+		document.add_guide(doc_model::Guide::horizontal(120));
+		document.add_guide(doc_model::Guide::vertical(256));
+		document.toggle_guides_visible();
+
+		let path = temporary_project_path();
+		save_document_to_path(&path, &document).expect("save should succeed");
+		let restored = load_document_from_path(&path).expect("load should succeed");
+		fs::remove_file(&path).expect("temporary project file should be removed");
+
+		assert_eq!(
+			restored.guides(),
+			&[
+				doc_model::Guide::horizontal(120),
+				doc_model::Guide::vertical(256),
+			]
+		);
+		assert!(!restored.guides_visible());
 	}
 
 	#[test]

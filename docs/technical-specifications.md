@@ -355,6 +355,15 @@ Use a tile-aware composition pipeline with dirty-tile invalidation and an offscr
 ### Post-MVP Document Extensions
 - `Mask` is now modeled as an optional embedded alpha-mask payload on each raster layer.
 - `LayerGroup` now exists as a document-owned hierarchy node for post-MVP structural workflows, with recursive `.ptx` hierarchy persistence and inherited visibility and opacity propagation during grouped flattening.
+- selection state now supports both rectangular and freeform polygon-backed shapes in the document model, with shared bounds queries, hit testing, and invert semantics.
+- lasso interaction now flows through generalized selection history records, and the viewport overlay path supports both rectangular and polyline selection visualization.
+- selected-area move and transform behavior now operate on the active selection instead of always applying to the full layer, so freeform selection affects direct manipulation workflows consistently with brush and mask edits.
+- transform workflows now support independent X/Y scale and quarter-turn rotation in addition to translation, while preserving the existing preview-versus-commit boundary and undoable layer-state history model.
+- guide state now lives in the document model as persisted horizontal and vertical guides with visibility state, and the shell renders them through viewport overlays instead of baking them into raster content or export output.
+- move and transform workflows now support guide snapping through controller-owned snapping state, with a persistent snap toggle and a temporary Shift bypass for direct-manipulation interactions.
+- the paint interaction path now carries normalized stylus pressure from `ui_shell` through `app_core` into `tool_system` sample interpolation, while preserving mouse fallback behavior as pressure `1.0`.
+- initial pressure support now includes controller-owned pressure-to-size and pressure-to-opacity toggles, with pressure applied at the per-dab brush-evaluation seam instead of in shell state or raster tile ownership.
+- brush dynamics now use controller-owned radius, hardness, spacing, and flow state, with validated ranges in `tool_system`, smoother soft-edge hardness falloff in `image_ops`, and shell-exposed parameter controls through the existing Properties panel.
 
 ### PSD Mapping Principle
 PSD interoperability must map into the PhotoTux document model without changing the internal architecture to mirror Photoshop-specific internals.

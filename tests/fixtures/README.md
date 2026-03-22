@@ -11,11 +11,18 @@ Current canonical fixture categories:
 - PNG export parity scene
 - large sparse document stress scene
 - autosave and crash recovery scene
+- masked compositing scene
+- grouped hierarchy scene
+- lasso-aware transform parity scene
+- guide-snapping interaction scene
 
 Current implementations:
 
 - `crates/file_io/src/lib.rs` builds representative compositing and large sparse persistence scenes for save/load and export validation
 - `crates/app_core/src/lib.rs` builds a representative controller-owned scene for viewport-versus-export parity and save/undo workflow checks
+- `crates/file_io/src/lib.rs` also builds masked and grouped persistence scenes used for roundtrip and flattened-output regressions
+- `crates/app_core/src/lib.rs` now includes dedicated upgraded-workflow fixtures for lasso-aware transform parity and guide-snapping interaction coverage
+- `docs/tests/post-mvp-editing-workflow-checklist.md` records the current manual validation checklist for masks, groups, lasso, transform, guides, and snapping behavior
 
 Fixture goals:
 
@@ -23,3 +30,11 @@ Fixture goals:
 - catch persistence regressions before they ship
 - exercise representative layered scenes instead of one-off ad hoc samples
 - provide a clear place to add checked-in `.ptx` and reference image assets later if programmatic fixtures stop being sufficient
+- keep post-MVP editing workflow regressions anchored to named representative scenes instead of drifting back toward one-off controller setup code
+
+Current upgraded-workflow coverage:
+
+- masked scene roundtrip and flattened-output coverage in `file_io`
+- grouped hierarchy roundtrip and flattened-output coverage in `file_io`
+- lasso-aware transform parity coverage in `app_core`
+- guide-snapping move and transform integration coverage in `app_core`

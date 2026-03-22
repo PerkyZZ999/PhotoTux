@@ -143,6 +143,137 @@ pub struct TileGridSize {
 pub type RectSelection = CanvasRect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectionPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl SelectionPoint {
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeformSelection {
+    pub points: Vec<SelectionPoint>,
+}
+
+impl FreeformSelection {
+    pub fn new(points: Vec<SelectionPoint>) -> Option<Self> {
+        if points.len() < 3 {
+            return None;
+        }
+
+        Some(Self { points })
+    }
+
+    pub fn bounds(&self) -> CanvasRect {
+        let mut min_x = self.points[0].x;
+        let mut max_x = self.points[0].x;
+        let mut min_y = self.points[0].y;
+        let mut max_y = self.points[0].y;
+
+        for point in &self.points[1..] {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+            min_y = min_y.min(point.y);
+            max_y = max_y.max(point.y);
+        }
+
+        CanvasRect::new(
+            min_x,
+            min_y,
+            (max_x - min_x + 1) as u32,
+            (max_y - min_y + 1) as u32,
+        )
+    }
+
+    pub fn contains_pixel(&self, pixel_x: i32, pixel_y: i32) -> bool {
+        let mut inside = false;
+        let mut previous = *self
+            .points
+            .last()
+            .expect("freeform selections always have at least three points");
+
+        for current in &self.points {
+            let intersects_scanline = (current.y > pixel_y) != (previous.y > pixel_y);
+            if intersects_scanline {
+                let delta_y = previous.y - current.y;
+                if delta_y != 0 {
+                    let x_intersection = current.x as f32
+                        + ((pixel_y - current.y) as f32 * (previous.x - current.x) as f32)
+                            / delta_y as f32;
+                    if pixel_x as f32 <= x_intersection {
+                        inside = !inside;
+                    }
+                }
+            }
+            previous = *current;
+        }
+
+        inside
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SelectionShape {
+    Rectangular(RectSelection),
+    Freeform(FreeformSelection),
+}
+
+impl SelectionShape {
+    pub fn bounds(&self) -> CanvasRect {
+        match self {
+            Self::Rectangular(selection) => *selection,
+            Self::Freeform(selection) => selection.bounds(),
+        }
+    }
+
+    pub fn contains_pixel(&self, pixel_x: i32, pixel_y: i32) -> bool {
+        match self {
+            Self::Rectangular(selection) => {
+                let right = selection.x + selection.width as i32;
+                let bottom = selection.y + selection.height as i32;
+                pixel_x >= selection.x
+                    && pixel_x < right
+                    && pixel_y >= selection.y
+                    && pixel_y < bottom
+            }
+            Self::Freeform(selection) => selection.contains_pixel(pixel_x, pixel_y),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuideOrientation {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guide {
+    pub orientation: GuideOrientation,
+    pub position: i32,
+}
+
+impl Guide {
+    pub const fn horizontal(position: i32) -> Self {
+        Self {
+            orientation: GuideOrientation::Horizontal,
+            position,
+        }
+    }
+
+    pub const fn vertical(position: i32) -> Self {
+        Self {
+            orientation: GuideOrientation::Vertical,
+            position,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerEditTarget {
     LayerPixels,
     LayerMask,
@@ -198,8 +329,10 @@ pub struct Document {
     pub active_layer_index: usize,
     pub active_edit_target: LayerEditTarget,
     pub tile_size: u32,
-    pub selection: Option<RectSelection>,
+    pub selection: Option<SelectionShape>,
     pub selection_inverted: bool,
+    pub guides: Vec<Guide>,
+    pub guides_visible: bool,
 }
 
 impl Document {
@@ -216,6 +349,8 @@ impl Document {
             tile_size: DEFAULT_TILE_SIZE,
             selection: None,
             selection_inverted: false,
+            guides: Vec::new(),
+            guides_visible: true,
         }
     }
 
@@ -248,6 +383,31 @@ impl Document {
 
     pub fn active_edit_target(&self) -> LayerEditTarget {
         self.active_edit_target
+    }
+
+    pub fn guides(&self) -> &[Guide] {
+        &self.guides
+    }
+
+    pub fn guides_visible(&self) -> bool {
+        self.guides_visible
+    }
+
+    pub fn add_guide(&mut self, guide: Guide) {
+        self.guides.push(guide);
+    }
+
+    pub fn remove_last_guide(&mut self) -> Option<Guide> {
+        self.guides.pop()
+    }
+
+    pub fn set_guides_state(&mut self, guides: Vec<Guide>, visible: bool) {
+        self.guides = guides;
+        self.guides_visible = visible;
+    }
+
+    pub fn toggle_guides_visible(&mut self) {
+        self.guides_visible = !self.guides_visible;
     }
 
     pub fn layer_hierarchy(&self) -> &[LayerHierarchyNode] {
@@ -710,24 +870,45 @@ impl Document {
     }
 
     pub fn selection(&self) -> Option<RectSelection> {
-        self.selection
+        self.selection.as_ref().map(SelectionShape::bounds)
+    }
+
+    pub fn selection_shape(&self) -> Option<&SelectionShape> {
+        self.selection.as_ref()
     }
 
     pub fn selection_inverted(&self) -> bool {
         self.selection_inverted
     }
 
-    pub fn set_selection_state(&mut self, selection: Option<RectSelection>, inverted: bool) {
+    pub fn set_selection_shape_state(&mut self, selection: Option<SelectionShape>, inverted: bool) {
         self.selection = selection;
-        self.selection_inverted = selection.is_some() && inverted;
+        self.selection_inverted = self.selection.is_some() && inverted;
+    }
+
+    pub fn set_selection_state(&mut self, selection: Option<RectSelection>, inverted: bool) {
+        self.set_selection_shape_state(selection.map(SelectionShape::Rectangular), inverted);
     }
 
     pub fn set_selection(&mut self, selection: RectSelection) {
         self.set_selection_state(Some(selection), false);
     }
 
+    pub fn set_freeform_selection_state(
+        &mut self,
+        selection: Option<FreeformSelection>,
+        inverted: bool,
+    ) {
+        self.set_selection_shape_state(selection.map(SelectionShape::Freeform), inverted);
+    }
+
+    pub fn set_freeform_selection(&mut self, selection: FreeformSelection) {
+        self.set_freeform_selection_state(Some(selection), false);
+    }
+
     pub fn clear_selection(&mut self) {
-        self.set_selection_state(None, false);
+        self.selection = None;
+        self.selection_inverted = false;
     }
 
     pub fn invert_selection(&mut self) -> bool {
@@ -740,13 +921,11 @@ impl Document {
     }
 
     pub fn selection_contains_pixel(&self, pixel_x: i32, pixel_y: i32) -> bool {
-        let Some(selection) = self.selection else {
+        let Some(selection) = self.selection.as_ref() else {
             return false;
         };
 
-        let right = selection.x + selection.width as i32;
-        let bottom = selection.y + selection.height as i32;
-        pixel_x >= selection.x && pixel_x < right && pixel_y >= selection.y && pixel_y < bottom
+        selection.contains_pixel(pixel_x, pixel_y)
     }
 
     pub fn allows_pixel_edit(&self, pixel_x: i32, pixel_y: i32) -> bool {
@@ -1107,8 +1286,8 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlendMode, Document, LayerEditTarget, LayerHierarchyNode, LayerHierarchyNodeRef,
-        RasterTile, TileCoord,
+        BlendMode, Document, FreeformSelection, Guide, LayerEditTarget, LayerHierarchyNode,
+        LayerHierarchyNodeRef, RasterTile, SelectionPoint, SelectionShape, TileCoord,
     };
     use common::CanvasRect;
 
@@ -1398,6 +1577,76 @@ mod tests {
 
         assert!(document.invert_selection());
         assert!(!document.selection_inverted());
+    }
+
+    #[test]
+    fn guides_can_be_added_removed_and_toggled() {
+        let mut document = Document::new(320, 240);
+
+        document.add_guide(Guide::horizontal(40));
+        document.add_guide(Guide::vertical(60));
+
+        assert_eq!(document.guides(), &[Guide::horizontal(40), Guide::vertical(60)]);
+        assert!(document.guides_visible());
+
+        document.toggle_guides_visible();
+        assert!(!document.guides_visible());
+
+        assert_eq!(document.remove_last_guide(), Some(Guide::vertical(60)));
+        assert_eq!(document.guides(), &[Guide::horizontal(40)]);
+    }
+
+    #[test]
+    fn freeform_selection_reports_bounds_and_shape() {
+        let mut document = Document::new(320, 240);
+        let freeform = FreeformSelection::new(vec![
+            SelectionPoint::new(12, 14),
+            SelectionPoint::new(30, 10),
+            SelectionPoint::new(24, 36),
+        ])
+        .expect("three points should define a freeform selection");
+
+        document.set_freeform_selection(freeform.clone());
+
+        assert_eq!(document.selection(), Some(CanvasRect::new(12, 10, 19, 27)));
+        assert_eq!(document.selection_shape(), Some(&SelectionShape::Freeform(freeform)));
+    }
+
+    #[test]
+    fn freeform_selection_contains_points_using_polygon_fill_rule() {
+        let mut document = Document::new(320, 240);
+        let freeform = FreeformSelection::new(vec![
+            SelectionPoint::new(10, 10),
+            SelectionPoint::new(40, 10),
+            SelectionPoint::new(25, 40),
+        ])
+        .expect("triangle selection should be valid");
+
+        document.set_freeform_selection(freeform);
+
+        assert!(document.selection_contains_pixel(25, 20));
+        assert!(!document.selection_contains_pixel(5, 5));
+        assert!(!document.selection_contains_pixel(25, 45));
+    }
+
+    #[test]
+    fn freeform_selection_respects_inverted_edit_queries() {
+        let mut document = Document::new(320, 240);
+        let freeform = FreeformSelection::new(vec![
+            SelectionPoint::new(10, 10),
+            SelectionPoint::new(30, 10),
+            SelectionPoint::new(30, 30),
+            SelectionPoint::new(10, 30),
+        ])
+        .expect("quad selection should be valid");
+
+        document.set_freeform_selection(freeform);
+        assert!(document.allows_pixel_edit(20, 20));
+        assert!(!document.allows_pixel_edit(5, 5));
+
+        assert!(document.invert_selection());
+        assert!(!document.allows_pixel_edit(20, 20));
+        assert!(document.allows_pixel_edit(5, 5));
     }
 
     #[test]
