@@ -9,11 +9,219 @@ use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub const PROJECT_FILE_EXTENSION: &str = "ptx";
 pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_PSD_IMPORT_MANIFEST_VERSION: u32 = 1;
 pub const RECOVERY_FILE_SUFFIX: &str = ".autosave";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PsdImportSourceKind {
+	Psd,
+	#[serde(other)]
+	Other,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PsdImportColorMode {
+	Rgb,
+	Grayscale,
+	Indexed,
+	Cmyk,
+	Multichannel,
+	Duotone,
+	Lab,
+	Bitmap,
+	#[serde(other)]
+	Other,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PsdImportLayerKind {
+	Raster,
+	Group,
+	Text,
+	SmartObject,
+	Adjustment,
+	ClippingMask,
+	#[serde(other)]
+	Other,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PsdImportDiagnosticSeverity {
+	Info,
+	Warning,
+	Error,
+	#[serde(other)]
+	Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportCanvasRecord {
+	pub width_px: u32,
+	pub height_px: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportOffsetRecord {
+	pub x: i32,
+	pub y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportBoundsRecord {
+	pub left: i32,
+	pub top: i32,
+	pub width: u32,
+	pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportCompositeRecord {
+	pub available: bool,
+	pub asset_relpath: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportDiagnostic {
+	pub severity: PsdImportDiagnosticSeverity,
+	pub code: String,
+	pub message: String,
+	pub source_index: Option<usize>,
+}
+
+impl PsdImportDiagnostic {
+	fn warning(code: impl Into<String>, message: impl Into<String>, source_index: Option<usize>) -> Self {
+		Self {
+			severity: PsdImportDiagnosticSeverity::Warning,
+			code: code.into(),
+			message: message.into(),
+			source_index,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportLayerRecord {
+	pub source_index: usize,
+	pub kind: PsdImportLayerKind,
+	pub name: String,
+	pub visible: bool,
+	pub opacity_0_255: u8,
+	pub blend_key: String,
+	pub offset_px: PsdImportOffsetRecord,
+	pub bounds_px: PsdImportBoundsRecord,
+	pub raster_asset_relpath: Option<String>,
+	#[serde(default)]
+	pub unsupported_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PsdImportManifest {
+	pub manifest_version: u32,
+	pub source_kind: PsdImportSourceKind,
+	pub source_color_mode: PsdImportColorMode,
+	pub source_depth_bits: u8,
+	pub canvas: PsdImportCanvasRecord,
+	pub composite: PsdImportCompositeRecord,
+	#[serde(default)]
+	pub diagnostics: Vec<PsdImportDiagnostic>,
+	#[serde(default)]
+	pub layers: Vec<PsdImportLayerRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PsdImportResult {
+	pub document: Document,
+	pub diagnostics: Vec<PsdImportDiagnostic>,
+	pub used_flattened_fallback: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PsdImportSidecar {
+	executable_path: PathBuf,
+	base_args: Vec<OsString>,
+}
+
+impl PsdImportSidecar {
+	pub fn new(executable_path: impl Into<PathBuf>) -> Self {
+		Self {
+			executable_path: executable_path.into(),
+			base_args: Vec::new(),
+		}
+	}
+
+	pub fn with_arg(mut self, arg: impl Into<OsString>) -> Self {
+		self.base_args.push(arg.into());
+		self
+	}
+
+	pub fn with_args<I, S>(mut self, args: I) -> Self
+	where
+		I: IntoIterator<Item = S>,
+		S: Into<OsString>,
+	{
+		self.base_args.extend(args.into_iter().map(Into::into));
+		self
+	}
+
+	pub fn executable_path(&self) -> &Path {
+		&self.executable_path
+	}
+
+	pub fn base_args(&self) -> &[OsString] {
+		&self.base_args
+	}
+	}
+
+#[derive(Debug)]
+struct PsdImportWorkspace {
+	root_dir: PathBuf,
+	manifest_path: PathBuf,
+}
+
+impl PsdImportWorkspace {
+	fn create() -> anyhow::Result<Self> {
+		let unique_suffix = format!(
+			"{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.expect("system time should be after epoch")
+				.as_nanos()
+		);
+		let root_dir = std::env::temp_dir().join(format!("phototux-psd-import-{unique_suffix}"));
+		fs::create_dir_all(&root_dir).with_context(|| {
+			format!("failed to create PSD import workspace {}", root_dir.display())
+		})?;
+		let manifest_path = root_dir.join("manifest.json");
+		Ok(Self {
+			root_dir,
+			manifest_path,
+		})
+	}
+
+	fn root_dir(&self) -> &Path {
+		&self.root_dir
+	}
+
+	fn manifest_path(&self) -> &Path {
+		&self.manifest_path
+	}
+}
+
+impl Drop for PsdImportWorkspace {
+	fn drop(&mut self) {
+		let _ = fs::remove_dir_all(&self.root_dir);
+	}
+}
 
 pub fn recovery_path_for_project_path(path: &Path) -> std::path::PathBuf {
 	let mut file_name = OsString::from(path.as_os_str());
@@ -343,6 +551,73 @@ pub fn load_document_from_path(path: &Path) -> anyhow::Result<Document> {
 	project_file.try_into()
 }
 
+pub fn load_psd_import_manifest_from_path(path: &Path) -> anyhow::Result<PsdImportManifest> {
+	let bytes = fs::read(path)
+		.with_context(|| format!("failed to read PSD import manifest from {}", path.display()))?;
+	serde_json::from_slice(&bytes)
+		.with_context(|| format!("failed to parse PSD import manifest from {}", path.display()))
+}
+
+pub fn import_psd_from_manifest_path(path: &Path) -> anyhow::Result<PsdImportResult> {
+	let manifest = load_psd_import_manifest_from_path(path)?;
+	let manifest_dir = path.parent().ok_or_else(|| {
+		anyhow::anyhow!("PSD import manifest path {} has no parent directory", path.display())
+	})?;
+
+	validate_psd_import_manifest(&manifest)?;
+
+	let mut diagnostics = manifest.diagnostics.clone();
+	let layered_limitations = collect_psd_layered_import_limitations(&manifest);
+	if layered_limitations.is_empty() {
+		let document = import_psd_layers_from_manifest(&manifest, manifest_dir)?;
+		return Ok(PsdImportResult {
+			document,
+			diagnostics,
+			used_flattened_fallback: false,
+		});
+	}
+
+	diagnostics.extend(layered_limitations.iter().cloned());
+	if manifest.composite.available {
+		let document = import_psd_composite_fallback(&manifest, manifest_dir)?;
+		diagnostics.push(PsdImportDiagnostic::warning(
+			"flattened_fallback_used",
+			"Imported the flattened PSD composite because the source exceeded PhotoTux's currently supported layered PSD subset.",
+			None,
+		));
+		return Ok(PsdImportResult {
+			document,
+			diagnostics,
+			used_flattened_fallback: true,
+		});
+	}
+
+	anyhow::bail!(
+		"PSD import exceeds the supported subset and no flattened composite fallback is available: {}",
+		summarize_psd_diagnostics(&layered_limitations)
+	);
+}
+
+pub fn import_psd_from_path_with_sidecar(
+	psd_path: &Path,
+	sidecar: &PsdImportSidecar,
+) -> anyhow::Result<PsdImportResult> {
+	if !psd_path.exists() {
+		anyhow::bail!("PSD source file does not exist: {}", psd_path.display());
+	}
+
+	let workspace = PsdImportWorkspace::create()?;
+	run_psd_import_sidecar(sidecar, psd_path, &workspace)?;
+	if !workspace.manifest_path().exists() {
+		anyhow::bail!(
+			"PSD sidecar completed without producing a manifest at {}",
+			workspace.manifest_path().display()
+		);
+	}
+
+	import_psd_from_manifest_path(workspace.manifest_path())
+}
+
 pub fn export_png_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
 	let flattened = flatten_document_rgba(document);
 	let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
@@ -437,6 +712,317 @@ fn import_raster_document_from_path(path: &Path) -> anyhow::Result<Document> {
 	Ok(document)
 }
 
+fn validate_psd_import_manifest(manifest: &PsdImportManifest) -> anyhow::Result<()> {
+	if manifest.manifest_version != CURRENT_PSD_IMPORT_MANIFEST_VERSION {
+		anyhow::bail!(
+			"unsupported PSD import manifest version: expected {}, got {}",
+			CURRENT_PSD_IMPORT_MANIFEST_VERSION,
+			manifest.manifest_version
+		);
+	}
+	if manifest.source_kind != PsdImportSourceKind::Psd {
+		anyhow::bail!("unsupported PSD import manifest source kind");
+	}
+	if manifest.canvas.width_px == 0 || manifest.canvas.height_px == 0 {
+		anyhow::bail!("PSD import manifest canvas dimensions must be non-zero");
+	}
+	if manifest.composite.available && manifest.composite.asset_relpath.is_none() {
+		anyhow::bail!("PSD import manifest marks a composite fallback as available but omits its asset path");
+	}
+	Ok(())
+}
+
+fn run_psd_import_sidecar(
+	sidecar: &PsdImportSidecar,
+	psd_path: &Path,
+	workspace: &PsdImportWorkspace,
+) -> anyhow::Result<()> {
+	let output = Command::new(sidecar.executable_path())
+		.args(sidecar.base_args())
+		.arg(psd_path)
+		.arg(workspace.root_dir())
+		.arg(workspace.manifest_path())
+		.output()
+		.with_context(|| {
+			format!(
+				"failed to start PSD import sidecar {}",
+				sidecar.executable_path().display()
+			)
+		})?;
+
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+		let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+		let detail = if !stderr.is_empty() {
+			stderr
+		} else if !stdout.is_empty() {
+			stdout
+		} else {
+			format!("process exited with status {}", output.status)
+		};
+		anyhow::bail!(
+			"PSD import sidecar failed for {}: {}",
+			psd_path.display(),
+			detail
+		);
+	}
+
+	Ok(())
+}
+
+fn collect_psd_layered_import_limitations(manifest: &PsdImportManifest) -> Vec<PsdImportDiagnostic> {
+	let mut diagnostics = Vec::new();
+
+	if manifest.source_color_mode != PsdImportColorMode::Rgb {
+		diagnostics.push(PsdImportDiagnostic::warning(
+			"unsupported_color_mode",
+			format!(
+				"Unsupported PSD color mode {:?}; current layered PSD import supports RGB only.",
+				manifest.source_color_mode
+			),
+			None,
+		));
+	}
+	if manifest.source_depth_bits != 8 {
+		diagnostics.push(PsdImportDiagnostic::warning(
+			"unsupported_bit_depth",
+			format!(
+				"Unsupported PSD bit depth {}; current layered PSD import supports 8-bit documents only.",
+				manifest.source_depth_bits
+			),
+			None,
+		));
+	}
+	if manifest.layers.is_empty() {
+		diagnostics.push(PsdImportDiagnostic::warning(
+			"no_raster_layers_available",
+			"The PSD manifest does not expose any importable layers for the current subset.",
+			None,
+		));
+	}
+
+	for layer in &manifest.layers {
+		if layer.kind != PsdImportLayerKind::Raster {
+			diagnostics.push(PsdImportDiagnostic::warning(
+				"unsupported_layer_kind",
+				format!(
+					"Layer '{}' uses unsupported kind {:?} for the current layered PSD subset.",
+					layer.name, layer.kind
+				),
+				Some(layer.source_index),
+			));
+		}
+		if !layer.unsupported_features.is_empty() {
+			diagnostics.push(PsdImportDiagnostic::warning(
+				"unsupported_layer_features",
+				format!(
+					"Layer '{}' includes unsupported features: {}.",
+					layer.name,
+					layer.unsupported_features.join(", ")
+				),
+				Some(layer.source_index),
+			));
+		}
+		if map_psd_blend_key(&layer.blend_key).is_none() {
+			diagnostics.push(PsdImportDiagnostic::warning(
+				"unsupported_blend_mode",
+				format!(
+					"Layer '{}' uses unsupported PSD blend key '{}'.",
+					layer.name, layer.blend_key
+				),
+				Some(layer.source_index),
+			));
+		}
+	}
+
+	diagnostics
+}
+
+fn summarize_psd_diagnostics(diagnostics: &[PsdImportDiagnostic]) -> String {
+	diagnostics
+		.iter()
+		.map(|diagnostic| diagnostic.message.clone())
+		.collect::<Vec<_>>()
+		.join("; ")
+}
+
+fn import_psd_layers_from_manifest(
+	manifest: &PsdImportManifest,
+	manifest_dir: &Path,
+) -> anyhow::Result<Document> {
+	let mut document = Document::new(manifest.canvas.width_px, manifest.canvas.height_px);
+	for (layer_position, layer_record) in manifest.layers.iter().enumerate() {
+		let layer_index = ensure_import_layer_slot(&mut document, layer_position, &layer_record.name)?;
+		let blend_mode = map_psd_blend_key(&layer_record.blend_key).ok_or_else(|| {
+			anyhow::anyhow!(
+				"layer '{}' uses unsupported PSD blend key '{}'",
+				layer_record.name,
+				layer_record.blend_key
+			)
+		})?;
+		let raster_asset_relpath = layer_record.raster_asset_relpath.as_ref().ok_or_else(|| {
+			anyhow::anyhow!(
+				"layer '{}' is missing its raster asset path in the PSD import manifest",
+				layer_record.name
+			)
+		})?;
+		let raster_asset_path = manifest_dir.join(raster_asset_relpath);
+		let decoded = image::open(&raster_asset_path)
+			.with_context(|| format!("failed to load PSD layer asset {}", raster_asset_path.display()))?
+			.to_rgba8();
+		let (asset_width, asset_height) = decoded.dimensions();
+		validate_psd_layer_asset_bounds(layer_record, asset_width, asset_height)?;
+
+		document.rename_layer(layer_index, layer_record.name.clone());
+		document.set_layer_visibility(layer_index, layer_record.visible);
+		document.set_layer_opacity(layer_index, psd_opacity_to_percent(layer_record.opacity_0_255));
+		document.set_layer_blend_mode(layer_index, blend_mode);
+		let _ = document.set_layer_offset(layer_index, layer_record.offset_px.x, layer_record.offset_px.y);
+		write_rgba_image_into_layer_local(
+			&mut document,
+			layer_index,
+			asset_width,
+			asset_height,
+			decoded.as_raw(),
+		)?;
+	}
+
+	let top_index = manifest.layers.len().saturating_sub(1);
+	let _ = document.set_active_layer(top_index);
+	Ok(document)
+}
+
+fn import_psd_composite_fallback(
+	manifest: &PsdImportManifest,
+	manifest_dir: &Path,
+) -> anyhow::Result<Document> {
+	let composite_relpath = manifest.composite.asset_relpath.as_ref().ok_or_else(|| {
+		anyhow::anyhow!("PSD import manifest requested composite fallback but omitted its asset path")
+	})?;
+	let composite_path = manifest_dir.join(composite_relpath);
+	let decoded = image::open(&composite_path)
+		.with_context(|| format!("failed to load PSD composite fallback {}", composite_path.display()))?
+		.to_rgba8();
+	let (width, height) = decoded.dimensions();
+	if width != manifest.canvas.width_px || height != manifest.canvas.height_px {
+		anyhow::bail!(
+			"PSD composite fallback dimensions {}x{} do not match manifest canvas {}x{}",
+			width,
+			height,
+			manifest.canvas.width_px,
+			manifest.canvas.height_px
+		);
+	}
+
+	let mut document = Document::new(width, height);
+	document.rename_layer(0, "Flattened PSD Import");
+	write_rgba_image_into_layer_local(&mut document, 0, width, height, decoded.as_raw())?;
+	Ok(document)
+}
+
+fn ensure_import_layer_slot(
+	document: &mut Document,
+	layer_position: usize,
+	layer_name: &str,
+) -> anyhow::Result<usize> {
+	if layer_position == 0 {
+		return Ok(0);
+	}
+
+	let active_index = layer_position - 1;
+	if !document.set_active_layer(active_index) {
+		anyhow::bail!("failed to select layer {} before inserting PSD layer '{}'", active_index, layer_name);
+	}
+	document.add_layer(layer_name.to_string());
+	Ok(document.active_layer_index())
+}
+
+fn validate_psd_layer_asset_bounds(
+	layer_record: &PsdImportLayerRecord,
+	asset_width: u32,
+	asset_height: u32,
+) -> anyhow::Result<()> {
+	if layer_record.bounds_px.left != layer_record.offset_px.x
+		|| layer_record.bounds_px.top != layer_record.offset_px.y
+	{
+		anyhow::bail!(
+			"layer '{}' has inconsistent offset and bounds origin in the PSD import manifest",
+			layer_record.name
+		);
+	}
+	if layer_record.bounds_px.width != asset_width || layer_record.bounds_px.height != asset_height {
+		anyhow::bail!(
+			"layer '{}' asset dimensions {}x{} do not match manifest bounds {}x{}",
+			layer_record.name,
+			asset_width,
+			asset_height,
+			layer_record.bounds_px.width,
+			layer_record.bounds_px.height
+		);
+	}
+	Ok(())
+}
+
+fn write_rgba_image_into_layer_local(
+	document: &mut Document,
+	layer_index: usize,
+	width: u32,
+	height: u32,
+	pixels: &[u8],
+) -> anyhow::Result<()> {
+	let expected_len = (width as usize)
+		.checked_mul(height as usize)
+		.and_then(|pixel_count| pixel_count.checked_mul(4))
+		.ok_or_else(|| anyhow::anyhow!("PSD raster asset dimensions overflowed pixel buffer sizing"))?;
+	if pixels.len() != expected_len {
+		anyhow::bail!(
+			"PSD raster asset buffer length {} does not match expected RGBA length {}",
+			pixels.len(),
+			expected_len
+		);
+	}
+
+	let tile_size = document.tile_size;
+	for pixel_y in 0..height {
+		for pixel_x in 0..width {
+			let source_index = ((pixel_y * width + pixel_x) as usize) * 4;
+			let rgba = &pixels[source_index..source_index + 4];
+			if rgba[3] == 0 {
+				continue;
+			}
+
+			let coord = TileCoord::new(pixel_x / tile_size, pixel_y / tile_size);
+			let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
+			let local_x = (pixel_x - tile_origin_x) as usize;
+			let local_y = (pixel_y - tile_origin_y) as usize;
+			let pixel_index = (local_y * tile_size as usize + local_x) * 4;
+			let layer = document.layer_mut(layer_index).ok_or_else(|| {
+				anyhow::anyhow!("PSD import target layer {} is unavailable", layer_index)
+			})?;
+			let tile = layer.ensure_tile(coord, tile_size);
+			tile.pixels[pixel_index..pixel_index + 4].copy_from_slice(rgba);
+		}
+	}
+
+	Ok(())
+}
+
+fn map_psd_blend_key(key: &str) -> Option<BlendMode> {
+	match key.trim_end() {
+		"norm" => Some(BlendMode::Normal),
+		"mul" => Some(BlendMode::Multiply),
+		"scrn" => Some(BlendMode::Screen),
+		"over" => Some(BlendMode::Overlay),
+		"dark" => Some(BlendMode::Darken),
+		"lite" => Some(BlendMode::Lighten),
+		_ => None,
+	}
+}
+
+fn psd_opacity_to_percent(opacity_0_255: u8) -> u8 {
+	((u16::from(opacity_0_255) * 100 + 127) / 255) as u8
+}
+
 pub fn flatten_document_rgba(document: &Document) -> Vec<u8> {
 	let mut output = vec![0_u8; (document.canvas_size.width * document.canvas_size.height * 4) as usize];
 	composite_hierarchy_into(document, &mut output, None);
@@ -505,15 +1091,25 @@ fn composite_pixel(destination: &mut [u8], source: &[u8], layer_opacity: f32, bl
 mod tests {
 	use super::{
 		export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
-		import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
+		import_jpeg_from_path, import_png_from_path, import_psd_from_manifest_path,
+		import_psd_from_path_with_sidecar, import_webp_from_path, load_document_from_path,
 		recovery_path_for_project_path, save_document_to_path, update_flattened_region_rgba,
-		ManifestHierarchyNode, ProjectFile, ProjectManifest,
-		CURRENT_PROJECT_FORMAT_VERSION,
+		ManifestHierarchyNode, ProjectFile, ProjectManifest, PsdImportBoundsRecord,
+		PsdImportCanvasRecord, PsdImportColorMode, PsdImportCompositeRecord,
+		PsdImportDiagnostic, PsdImportDiagnosticSeverity, PsdImportLayerKind,
+		PsdImportLayerRecord, PsdImportManifest, PsdImportOffsetRecord,
+		PsdImportSidecar, PsdImportSourceKind, CURRENT_PROJECT_FORMAT_VERSION,
+		CURRENT_PSD_IMPORT_MANIFEST_VERSION,
 	};
 	use color_math::{blend_rgba_over, BlendModeMath};
 	use doc_model::{BlendMode, Document, LayerGroup, LayerHierarchyNode, TileCoord};
+	use image::{ImageBuffer, ImageFormat, Rgba};
+	#[cfg(unix)]
+	use std::os::unix::fs::PermissionsExt;
 	use std::fs;
-	use std::path::PathBuf;
+	use std::path::{Path, PathBuf};
+	#[cfg(unix)]
+	use std::process::Command;
 	use std::time::{SystemTime, UNIX_EPOCH};
 
 	fn set_pixel(document: &mut Document, layer_index: usize, x: u32, y: u32, rgba: [u8; 4]) {
@@ -1278,6 +1874,568 @@ mod tests {
 	fn temporary_project_path() -> PathBuf {
 		let unique = temporary_suffix();
 		std::env::temp_dir().join(format!("phototux-{unique}.ptx"))
+	}
+
+	fn temporary_workspace_path(prefix: &str) -> PathBuf {
+		let unique = temporary_suffix();
+		std::env::temp_dir().join(format!("phototux-{prefix}-{unique}"))
+	}
+
+	fn create_psd_import_workspace(manifest: &PsdImportManifest) -> PathBuf {
+		let workspace = temporary_workspace_path("psd-import");
+		fs::create_dir_all(&workspace).expect("PSD import workspace should be created");
+		let manifest_path = workspace.join("manifest.json");
+		let json = serde_json::to_vec_pretty(manifest).expect("PSD import manifest should serialize");
+		fs::write(&manifest_path, json).expect("PSD import manifest should be written");
+		manifest_path
+	}
+
+	#[cfg(unix)]
+	fn write_shell_script(path: &Path, contents: &str) {
+		fs::write(path, contents).expect("shell script should be written");
+		let mut permissions = fs::metadata(path)
+			.expect("shell script metadata should exist")
+			.permissions();
+		permissions.set_mode(0o755);
+		fs::set_permissions(path, permissions).expect("shell script permissions should be updated");
+	}
+
+	fn write_rgba_asset(path: &Path, width: u32, height: u32, pixels: Vec<u8>) {
+		if let Some(parent) = path.parent() {
+			fs::create_dir_all(parent).expect("PSD asset directory should be created");
+		}
+		let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)
+			.expect("RGBA asset buffer should match dimensions");
+		image
+			.save_with_format(path, ImageFormat::Png)
+			.expect("PSD asset PNG should be written");
+	}
+
+	fn build_supported_psd_manifest() -> PsdImportManifest {
+		PsdImportManifest {
+			manifest_version: CURRENT_PSD_IMPORT_MANIFEST_VERSION,
+			source_kind: PsdImportSourceKind::Psd,
+			source_color_mode: PsdImportColorMode::Rgb,
+			source_depth_bits: 8,
+			canvas: PsdImportCanvasRecord {
+				width_px: 6,
+				height_px: 6,
+			},
+			composite: PsdImportCompositeRecord {
+				available: false,
+				asset_relpath: None,
+			},
+			diagnostics: vec![PsdImportDiagnostic {
+				severity: PsdImportDiagnosticSeverity::Info,
+				code: "source_loaded".to_string(),
+				message: "PSD manifest decoded successfully.".to_string(),
+				source_index: None,
+			}],
+			layers: vec![
+				PsdImportLayerRecord {
+					source_index: 0,
+					kind: PsdImportLayerKind::Raster,
+					name: "Background".to_string(),
+					visible: true,
+					opacity_0_255: 255,
+					blend_key: "norm".to_string(),
+					offset_px: PsdImportOffsetRecord { x: 0, y: 0 },
+					bounds_px: PsdImportBoundsRecord {
+						left: 0,
+						top: 0,
+						width: 3,
+						height: 3,
+					},
+					raster_asset_relpath: Some("layers/000-background.png".to_string()),
+					unsupported_features: Vec::new(),
+				},
+				PsdImportLayerRecord {
+					source_index: 1,
+					kind: PsdImportLayerKind::Raster,
+					name: "Screen Accent".to_string(),
+					visible: true,
+					opacity_0_255: 128,
+					blend_key: "scrn".to_string(),
+					offset_px: PsdImportOffsetRecord { x: 2, y: 1 },
+					bounds_px: PsdImportBoundsRecord {
+						left: 2,
+						top: 1,
+						width: 2,
+						height: 2,
+					},
+					raster_asset_relpath: Some("layers/001-screen.png".to_string()),
+					unsupported_features: Vec::new(),
+				},
+			],
+		}
+	}
+
+	fn build_expected_supported_psd_document() -> Document {
+		let mut document = Document::new(6, 6);
+		document.rename_layer(0, "Background");
+		for y in 0..3 {
+			for x in 0..3 {
+				set_pixel(&mut document, 0, x, y, [20, 40, 80, 255]);
+			}
+		}
+
+		document.add_layer("Screen Accent");
+		let top_index = document.active_layer_index();
+		document.set_layer_blend_mode(top_index, BlendMode::Screen);
+		document.set_layer_opacity(top_index, 50);
+		assert!(document.set_layer_offset(top_index, 2, 1));
+		for y in 0..2 {
+			for x in 0..2 {
+				set_pixel(&mut document, top_index, x, y, [240, 180, 100, 255]);
+			}
+		}
+		document
+	}
+
+	#[cfg(unix)]
+	fn repo_root() -> PathBuf {
+		PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+			.join("../..")
+			.canonicalize()
+			.expect("repository root should resolve from the file_io crate")
+	}
+
+	#[cfg(unix)]
+	fn repo_psd_fixture_path(file_name: &str) -> PathBuf {
+		repo_root().join("tests/fixtures/psd").join(file_name)
+	}
+
+	#[cfg(unix)]
+	fn repo_psd_sidecar_script_path() -> PathBuf {
+		repo_root()
+			.join("tools/psd_import_sidecar/phototux_psd_sidecar.py")
+	}
+
+	#[cfg(unix)]
+	fn repo_psd_sidecar_runtime_available() -> bool {
+		if !repo_psd_sidecar_script_path().is_file() {
+			return false;
+		}
+
+		match Command::new("python3")
+			.args(["-c", "import psd_tools"])
+			.output()
+		{
+			Ok(output) => output.status.success(),
+			Err(_) => false,
+		}
+	}
+
+	#[test]
+	fn psd_manifest_import_builds_supported_layer_stack() {
+		let manifest = build_supported_psd_manifest();
+		let manifest_path = create_psd_import_workspace(&manifest);
+		let workspace_dir = manifest_path.parent().expect("manifest should have a parent").to_path_buf();
+		write_rgba_asset(
+			&workspace_dir.join("layers/000-background.png"),
+			3,
+			3,
+			vec![
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+			],
+		);
+		write_rgba_asset(
+			&workspace_dir.join("layers/001-screen.png"),
+			2,
+			2,
+			vec![
+				240, 180, 100, 255, 240, 180, 100, 255,
+				240, 180, 100, 255, 240, 180, 100, 255,
+			],
+		);
+
+		let imported = import_psd_from_manifest_path(&manifest_path).expect("supported PSD manifest should import");
+		let expected = build_expected_supported_psd_document();
+
+		assert!(!imported.used_flattened_fallback);
+		assert_eq!(imported.document.layers.len(), 2);
+		assert_eq!(imported.document.layers[0].name, "Background");
+		assert_eq!(imported.document.layers[1].name, "Screen Accent");
+		assert_eq!(imported.document.layers[1].blend_mode, BlendMode::Screen);
+		assert_eq!(imported.document.layers[1].opacity_percent, 50);
+		assert_eq!(imported.document.layer_offset(1), Some((2, 1)));
+		assert_eq!(flatten_document_rgba(&imported.document), flatten_document_rgba(&expected));
+		assert_eq!(imported.diagnostics.len(), 1);
+
+		fs::remove_dir_all(workspace_dir).expect("PSD import workspace should be removed");
+	}
+
+	#[test]
+	fn psd_manifest_import_uses_flattened_fallback_for_unsupported_structure() {
+		let mut manifest = build_supported_psd_manifest();
+		manifest.composite = PsdImportCompositeRecord {
+			available: true,
+			asset_relpath: Some("composite.png".to_string()),
+		};
+		manifest.layers[1].kind = PsdImportLayerKind::Text;
+		manifest.layers[1].unsupported_features = vec!["text_engine_data".to_string()];
+
+		let manifest_path = create_psd_import_workspace(&manifest);
+		let workspace_dir = manifest_path.parent().expect("manifest should have a parent").to_path_buf();
+		write_rgba_asset(
+			&workspace_dir.join("composite.png"),
+			6,
+			6,
+			vec![
+				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 15, 25, 35, 255, 45, 55, 65, 255, 75, 85, 95, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 20, 30, 40, 255, 50, 60, 70, 255, 80, 90, 100, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			],
+		);
+
+		let imported = import_psd_from_manifest_path(&manifest_path).expect("unsupported PSD manifest should fall back to composite");
+
+		assert!(imported.used_flattened_fallback);
+		assert_eq!(imported.document.layers.len(), 1);
+		assert_eq!(imported.document.layers[0].name, "Flattened PSD Import");
+		assert!(imported
+			.diagnostics
+			.iter()
+			.any(|diagnostic| diagnostic.code == "flattened_fallback_used"));
+
+		fs::remove_dir_all(workspace_dir).expect("PSD import workspace should be removed");
+	}
+
+	#[test]
+	fn psd_manifest_import_fails_without_truthful_fallback() {
+		let mut manifest = build_supported_psd_manifest();
+		manifest.source_color_mode = PsdImportColorMode::Cmyk;
+
+		let manifest_path = create_psd_import_workspace(&manifest);
+		let workspace_dir = manifest_path.parent().expect("manifest should have a parent").to_path_buf();
+		let error = import_psd_from_manifest_path(&manifest_path).expect_err("unsupported PSD manifest should fail without fallback");
+		assert!(error.to_string().contains("supported subset"));
+		assert!(error.to_string().contains("RGB only"));
+
+		fs::remove_dir_all(workspace_dir).expect("PSD import workspace should be removed");
+	}
+
+	#[test]
+	fn psd_manifest_import_rejects_unknown_manifest_version() {
+		let mut manifest = build_supported_psd_manifest();
+		manifest.manifest_version = 99;
+
+		let manifest_path = create_psd_import_workspace(&manifest);
+		let workspace_dir = manifest_path.parent().expect("manifest should have a parent").to_path_buf();
+		let error = import_psd_from_manifest_path(&manifest_path).expect_err("unknown PSD manifest version should fail");
+		assert!(error.to_string().contains("unsupported PSD import manifest version"));
+
+		fs::remove_dir_all(workspace_dir).expect("PSD import workspace should be removed");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_sidecar_runtime_imports_manifest_and_cleans_workspace() {
+		let manifest = build_supported_psd_manifest();
+		let fixture_dir = temporary_workspace_path("psd-sidecar-fixture");
+		fs::create_dir_all(&fixture_dir).expect("fixture dir should exist");
+		let fixture_manifest = fixture_dir.join("fixture-manifest.json");
+		fs::write(
+			&fixture_manifest,
+			serde_json::to_vec_pretty(&manifest).expect("fixture manifest should serialize"),
+		)
+		.expect("fixture manifest should be written");
+		write_rgba_asset(
+			&fixture_dir.join("layers/000-background.png"),
+			3,
+			3,
+			vec![
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+				20, 40, 80, 255, 20, 40, 80, 255, 20, 40, 80, 255,
+			],
+		);
+		write_rgba_asset(
+			&fixture_dir.join("layers/001-screen.png"),
+			2,
+			2,
+			vec![
+				240, 180, 100, 255, 240, 180, 100, 255,
+				240, 180, 100, 255, 240, 180, 100, 255,
+			],
+		);
+		let source_psd = fixture_dir.join("source.psd");
+		fs::write(&source_psd, b"placeholder psd source").expect("source psd should be written");
+		let workspace_log = fixture_dir.join("workspace-path.txt");
+		let script_path = fixture_dir.join("sidecar.sh");
+		write_shell_script(
+			&script_path,
+			&format!(
+				"#!/bin/sh\nset -eu\nSOURCE=\"$1\"\nWORKSPACE=\"$2\"\nMANIFEST=\"$3\"\nprintf '%s' \"$WORKSPACE\" > \"{}\"\ncp \"{}\" \"$MANIFEST\"\nmkdir -p \"$WORKSPACE/layers\"\ncp \"{}\" \"$WORKSPACE/layers/000-background.png\"\ncp \"{}\" \"$WORKSPACE/layers/001-screen.png\"\n[ -f \"$SOURCE\" ]\n",
+				workspace_log.display(),
+				fixture_manifest.display(),
+				fixture_dir.join("layers/000-background.png").display(),
+				fixture_dir.join("layers/001-screen.png").display(),
+			),
+		);
+
+		let result = import_psd_from_path_with_sidecar(
+			&source_psd,
+			&PsdImportSidecar::new("/bin/sh").with_arg(script_path.as_os_str()),
+		)
+		.expect("sidecar-driven PSD import should succeed");
+		let expected = build_expected_supported_psd_document();
+		let workspace_path = fs::read_to_string(&workspace_log)
+			.expect("workspace path log should be written");
+		let workspace_path = PathBuf::from(workspace_path);
+
+		assert_eq!(flatten_document_rgba(&result.document), flatten_document_rgba(&expected));
+		assert!(!result.used_flattened_fallback);
+		assert!(!workspace_path.exists());
+
+		fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_sidecar_runtime_reports_process_failure_and_cleans_workspace() {
+		let fixture_dir = temporary_workspace_path("psd-sidecar-failure");
+		fs::create_dir_all(&fixture_dir).expect("fixture dir should exist");
+		let source_psd = fixture_dir.join("source.psd");
+		fs::write(&source_psd, b"placeholder psd source").expect("source psd should be written");
+		let workspace_log = fixture_dir.join("workspace-path.txt");
+		let script_path = fixture_dir.join("sidecar-fail.sh");
+		write_shell_script(
+			&script_path,
+			&format!(
+				"#!/bin/sh\nset -eu\nprintf '%s' \"$2\" > \"{}\"\necho 'simulated sidecar failure' >&2\nexit 7\n",
+				workspace_log.display(),
+			),
+		);
+
+		let error = import_psd_from_path_with_sidecar(
+			&source_psd,
+			&PsdImportSidecar::new("/bin/sh").with_arg(script_path.as_os_str()),
+		)
+		.expect_err("failing sidecar should surface an error");
+		let workspace_path = fs::read_to_string(&workspace_log)
+			.expect("workspace path log should be written");
+		let workspace_path = PathBuf::from(workspace_path);
+
+		assert!(error.to_string().contains("simulated sidecar failure"));
+		assert!(!workspace_path.exists());
+
+		fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_supported_layers_import_through_real_sidecar() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture import test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let fixture_path = repo_psd_fixture_path("supported-simple-layers.psd");
+		let result = import_psd_from_path_with_sidecar(
+			&fixture_path,
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("repo PSD fixture should import through the real sidecar");
+		let expected = build_expected_supported_psd_document();
+
+		assert!(!result.used_flattened_fallback);
+		assert_eq!(result.document.layers.len(), 2);
+		assert_eq!(result.document.layers[0].name, "Background");
+		assert_eq!(result.document.layers[1].name, "Screen Accent");
+		assert_eq!(result.document.layers[1].blend_mode, BlendMode::Screen);
+		assert_eq!(result.document.layers[1].opacity_percent, 50);
+		assert_eq!(result.document.layer_offset(1), Some((2, 1)));
+		assert_eq!(flatten_document_rgba(&result.document), flatten_document_rgba(&expected));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_visibility_and_blend_subset_preserve_import_metadata() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture metadata test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let visibility_result = import_psd_from_path_with_sidecar(
+			&repo_psd_fixture_path("supported-visibility-opacity.psd"),
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("visibility PSD fixture should import through the real sidecar");
+		assert!(!visibility_result.used_flattened_fallback);
+		assert_eq!(visibility_result.document.layers.len(), 3);
+		assert_eq!(visibility_result.document.layers[0].name, "Base Fill");
+		assert!(visibility_result.document.layers[0].visible);
+		assert_eq!(visibility_result.document.layers[1].name, "Hidden Accent");
+		assert!(!visibility_result.document.layers[1].visible);
+		assert_eq!(visibility_result.document.layers[2].name, "Soft Overlay");
+		assert_eq!(visibility_result.document.layers[2].opacity_percent, 38);
+
+		let blend_result = import_psd_from_path_with_sidecar(
+			&repo_psd_fixture_path("supported-blend-subset.psd"),
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("blend subset PSD fixture should import through the real sidecar");
+		assert!(!blend_result.used_flattened_fallback);
+		assert_eq!(
+			blend_result
+				.document
+				.layers
+				.iter()
+				.map(|layer| layer.blend_mode)
+				.collect::<Vec<_>>(),
+			vec![
+				BlendMode::Normal,
+				BlendMode::Multiply,
+				BlendMode::Screen,
+				BlendMode::Overlay,
+				BlendMode::Darken,
+				BlendMode::Lighten,
+			],
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_grouped_structure_uses_flattened_fallback() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture fallback test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let result = import_psd_from_path_with_sidecar(
+			&repo_psd_fixture_path("flattened-fallback-group.psd"),
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("grouped PSD fixture should import through the real sidecar");
+
+		assert!(result.used_flattened_fallback);
+		assert_eq!(result.document.layers.len(), 1);
+		assert_eq!(result.document.layers[0].name, "Flattened PSD Import");
+		assert!(result
+			.diagnostics
+			.iter()
+			.any(|diagnostic| diagnostic.code == "flattened_fallback_used"));
+		assert!(result
+			.diagnostics
+			.iter()
+			.any(|diagnostic| diagnostic.code == "unsupported_layer_kind"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_cmyk_source_reports_unsupported_color_mode() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture CMYK test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let result = import_psd_from_path_with_sidecar(
+			&repo_psd_fixture_path("unsupported-cmyk-fallback.psd"),
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("CMYK PSD fixture should import through the real sidecar");
+
+		assert!(result.used_flattened_fallback);
+		assert_eq!(result.document.layers.len(), 1);
+		assert_eq!(result.document.layers[0].name, "Flattened PSD Import");
+		assert!(result
+			.diagnostics
+			.iter()
+			.any(|diagnostic| diagnostic.code == "unsupported_color_mode"));
+		assert!(result
+			.diagnostics
+			.iter()
+			.any(|diagnostic| diagnostic.code == "flattened_fallback_used"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_unsupported_feature_sources_use_flattened_fallback() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture unsupported-feature test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let test_cases = [
+			(
+				"unsupported-text-fallback.psd",
+				"unsupported_layer_kind",
+				"unsupported kind",
+			),
+			(
+				"unsupported-smart-object-fallback.psd",
+				"unsupported_layer_kind",
+				"unsupported kind",
+			),
+			(
+				"unsupported-clipping-fallback.psd",
+				"unsupported_layer_features",
+				"clipping_mask",
+			),
+			(
+				"unsupported-mask-fallback.psd",
+				"unsupported_layer_features",
+				"mask",
+			),
+		];
+
+		for (fixture_name, expected_code, expected_message_fragment) in test_cases {
+			let result = import_psd_from_path_with_sidecar(
+				&repo_psd_fixture_path(fixture_name),
+				&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+			)
+			.expect("unsupported PSD fixture should import through the real sidecar");
+
+			assert!(result.used_flattened_fallback, "{fixture_name} should use flattened fallback");
+			assert_eq!(result.document.layers.len(), 1, "{fixture_name} should flatten to one layer");
+			assert!(result
+				.diagnostics
+				.iter()
+				.any(|diagnostic| diagnostic.code == "flattened_fallback_used"), "{fixture_name} should report flattened fallback");
+			assert!(result
+				.diagnostics
+				.iter()
+				.any(|diagnostic| diagnostic.code == expected_code), "{fixture_name} should report {expected_code}");
+			assert!(result
+				.diagnostics
+				.iter()
+				.any(|diagnostic| diagnostic.message.contains(expected_message_fragment)), "{fixture_name} should mention {expected_message_fragment}");
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn psd_repo_fixture_supported_layers_export_png_matches_flattened_document() {
+		if !repo_psd_sidecar_runtime_available() {
+			eprintln!("skipping PSD repo fixture export parity test: python3 with psd_tools is unavailable");
+			return;
+		}
+
+		let result = import_psd_from_path_with_sidecar(
+			&repo_psd_fixture_path("supported-simple-layers.psd"),
+			&PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str()),
+		)
+		.expect("supported PSD fixture should import through the real sidecar");
+		let workspace_dir = temporary_workspace_path("psd-export-parity");
+		fs::create_dir_all(&workspace_dir).expect("temporary export workspace should be created");
+		let export_path = workspace_dir.join("imported-scene.png");
+
+		export_png_to_path(&export_path, &result.document)
+			.expect("imported PSD document should export to PNG");
+		let exported_pixels = image::open(&export_path)
+			.expect("exported PNG should decode")
+			.to_rgba8()
+			.into_raw();
+
+		assert_eq!(exported_pixels, flatten_document_rgba(&result.document));
+
+		fs::remove_dir_all(&workspace_dir).expect("temporary export workspace should be removed");
 	}
 
 	#[test]

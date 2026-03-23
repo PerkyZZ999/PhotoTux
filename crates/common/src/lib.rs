@@ -80,3 +80,18 @@ pub struct CanvasRaster {
     pub size: CanvasSize,
     pub pixels: Vec<u8>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DestructiveFilterKind {
+    InvertColors,
+    Desaturate,
+}
+
+impl DestructiveFilterKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InvertColors => "Invert Colors",
+            Self::Desaturate => "Desaturate",
+        }
+    }
+}

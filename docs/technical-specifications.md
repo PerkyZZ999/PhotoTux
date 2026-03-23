@@ -364,9 +364,72 @@ Use a tile-aware composition pipeline with dirty-tile invalidation and an offscr
 - the paint interaction path now carries normalized stylus pressure from `ui_shell` through `app_core` into `tool_system` sample interpolation, while preserving mouse fallback behavior as pressure `1.0`.
 - initial pressure support now includes controller-owned pressure-to-size and pressure-to-opacity toggles, with pressure applied at the per-dab brush-evaluation seam instead of in shell state or raster tile ownership.
 - brush dynamics now use controller-owned radius, hardness, spacing, and flow state, with validated ranges in `tool_system`, smoother soft-edge hardness falloff in `image_ops`, and shell-exposed parameter controls through the existing Properties panel.
+- brush hover preview now stays shell-local in `ui_shell`, where GTK motion and stylus updates drive overlay-only cursor feedback for radius, hardness, spacing, and pressure-sized previews without mutating document state or canvas revision on hover.
+- built-in brush presets now live in the controller layer as named parameter bundles surfaced through the shell snapshot; because they are shipped defaults rather than user-authored assets, they currently do not participate in document persistence.
+- destructive filters now route through `app_core` as worker-backed commands with revision-guarded completion, snapshot-based undo/redo, and an intentionally narrow initial scope of active-layer pixel operations only.
 
 ### PSD Mapping Principle
 PSD interoperability must map into the PhotoTux document model without changing the internal architecture to mirror Photoshop-specific internals.
+
+### Initial PSD Parser Strategy
+- the initial PSD import path should use a dedicated `psd-tools` sidecar importer rather than a Rust-native parser foundation
+- the sidecar must emit a versioned intermediate manifest plus extracted raster assets, with normalization, subset enforcement, and fallback policy remaining in `file_io` so `.ptx` stays the only authoritative project format
+- the Adobe PSD specification is a standing reference for validating file structure, blend keys, tagged blocks, masks, and future expansion decisions, but it is not the sole implementation strategy
+- the importer boundary must remain swappable and must not require `doc_model` or `ui_shell` to understand Photoshop-native binary structures
+- PhotoTux should control the importer runtime rather than assume a user-managed system Python environment
+
+### Initial PSD Sidecar Manifest Contract
+The first PSD sidecar contract should be a JSON manifest plus sibling raster assets written into a temporary import workspace.
+
+Example shape:
+
+```json
+{
+   "manifest_version": 1,
+   "source_kind": "psd",
+   "source_color_mode": "rgb",
+   "source_depth_bits": 8,
+   "canvas": {
+      "width_px": 1920,
+      "height_px": 1080
+   },
+   "composite": {
+      "available": true,
+      "asset_relpath": "composite.png"
+   },
+   "diagnostics": [
+      {
+         "severity": "warning",
+         "code": "unsupported_text_layer",
+         "message": "Text layer will require flattened fallback.",
+         "source_index": 4
+      }
+   ],
+   "layers": [
+      {
+         "source_index": 0,
+         "kind": "raster",
+         "name": "Background",
+         "visible": true,
+         "opacity_0_255": 255,
+         "blend_key": "norm",
+         "offset_px": { "x": 0, "y": 0 },
+         "bounds_px": { "left": 0, "top": 0, "width": 1920, "height": 1080 },
+         "raster_asset_relpath": "layers/000-background.png",
+         "unsupported_features": []
+      }
+   ]
+}
+```
+
+Contract rules:
+
+- asset paths are relative to the manifest directory so the temp workspace can be moved or cleaned as one unit
+- the sidecar reports source facts and extracted assets; `file_io` owns final subset enforcement, blend mapping into PhotoTux enums, fallback selection, and hard-failure decisions
+- every layer entry must include a structural `kind` so unsupported entries such as text, smart object, adjustment, group, or clipped layers can be diagnosed explicitly instead of disappearing silently
+- `composite.available = true` is required before `file_io` may choose a warned flattened fallback import
+- unknown manifest versions must fail clearly rather than being parsed speculatively
+- the sidecar must never write `.ptx` directly or bypass the native import normalization path
 
 ### Rule
 The document model must be testable without initializing the UI or GPU.
@@ -405,6 +468,10 @@ Use a hybrid history model.
 - flow
 - spacing
 - round tip
+- normalized pressure-to-size and pressure-to-opacity mapping
+- live hover preview for brush and eraser cursors
+- built-in brush presets for fast return to common setups
+- minimal destructive filters: invert colors and desaturate
 
 ### Stroke Pipeline
 1. collect pointer samples
@@ -423,10 +490,11 @@ Use a hybrid history model.
 - direct-manipulation paths such as brush preview, pan, zoom, selection drag, and transform preview must favor low-latency incremental updates over heavyweight background scheduling
 
 ### Deferred Features
-- pressure sensitivity
 - tilt
 - textured brushes
 - scatter and dynamics
+- advanced pressure curves and preset libraries
+- broader filter families, selection-aware filter previews, and non-destructive adjustment stacks
 
 ---
 
@@ -521,13 +589,11 @@ PSD support must remain an import and export adapter concern. The native `.ptx` 
 - Unsupported features must surface warnings or partial-import diagnostics.
 
 ### Expected First PSD Subset
-- raster layers
-- layer order
-- visibility
-- opacity
-- a limited blend mode subset
-- canvas size
-- flattened composite fallback when needed
+- RGB 8-bit raster layers imported into PhotoTux's native document model
+- top-level layer order, names, visibility, opacity, and offsets
+- one-to-one blend mapping for `Normal`, `Multiply`, `Screen`, `Overlay`, `Darken`, and `Lighten`
+- canvas size preservation
+- flattened composite fallback when unsupported PSD structure is present but a truthful composite image is available
 
 ### Explicitly Unsupported in Early PSD Support
 - smart objects
@@ -536,6 +602,13 @@ PSD support must remain an import and export adapter concern. The native `.ptx` 
 - layer effects fidelity guarantees
 - advanced masks and clipping behavior with exact parity
 - CMYK and print-oriented semantics
+- silent coercion of unsupported blend modes into misleading PhotoTux equivalents
+- silent preservation claims for unsupported hierarchy or structure
+
+### Early PSD Import Result Rules
+- if the PSD stays inside the documented first subset, PhotoTux should import it as editable native layers
+- if the PSD exceeds that subset but exposes a valid flattened composite that is more truthful than partial structural import, PhotoTux may import the composite with explicit diagnostics
+- if neither faithful layered import nor truthful composite fallback is possible, the import must fail clearly
 
 ---
 

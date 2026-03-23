@@ -154,3 +154,20 @@ The current chosen direction remains sound:
 - no Skia, Halide, or GEGL in MVP
 
 This gives PhotoTux a strong Linux-native architecture without taking on avoidable systems complexity too early.
+
+## Post-MVP PSD Interoperability Direction
+
+PhotoTux should not treat a Rust-native PSD parser as the default path for the first interoperability pass.
+
+Accepted direction:
+
+- use `psd-tools` as a sidecar importer behind the `file_io` boundary
+- emit a versioned intermediate manifest plus extracted raster assets
+- keep Rust responsible for normalization into the native document model, supported-subset enforcement, fallback rules, and diagnostics
+- use the Adobe PSD specification as the standing reference for validating file structure and guiding future PSD support expansion
+
+Rejected or deferred for the current phase:
+
+- `rawpsd` as the primary foundation, because maintenance and fidelity risk are too high for the planned subset
+- ImageMagick or GraphicsMagick as the main importer path, because flatten-first behavior is too lossy for reconstructive layered import
+- direct Krita or `libkritapsd` integration for now, because the dependency and build surface are too heavy for the current Rust-first implementation path even though the fidelity potential is strong

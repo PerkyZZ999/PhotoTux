@@ -178,7 +178,7 @@ Progress notes:
 
 ### SHELL10 - Validate Linux-native workflow behavior
 
-- [ ] Status: not started
+- [x] Status: completed
 - Outcome: shell polish is verified on the target platform rather than assumed
 - Includes:
   - Wayland dialog and focus checks
@@ -186,9 +186,11 @@ Progress notes:
 
 Progress notes:
 - an attempted KWin MCP validation run on 2026-03-16 could not start an isolated session in this environment because the host lacked a reachable `org.kde.KWin` D-Bus service, so `SHELL10` remains blocked rather than partially validated
-- the shell code is ready for this validation pass, but the actual dialog, focus, and scaling checks still need to be run on a KDE Plasma Wayland setup with working KWin MCP session support
-  - shortcut and menu validation
-  - recovery and close-prompt manual checks
+- a fresh 2026-03-23 rerun succeeded once the current `app_core` binary was rebuilt from source before automation; earlier close and recovery mismatches were stale-binary artifacts, not current-source shell behavior.
+- native Wayland dialog behavior is now validated on the rebuilt binary: `Save As...` opened through the GTK file dialog, the dialog cancelled cleanly, the main window regained focus, and tool shortcuts still worked immediately afterward.
+- unsaved-close protection is now validated end to end on the rebuilt binary: a dirty document surfaced the native close prompt from the titlebar close path, cancel kept the session open, and shortcut input still worked after dismissing the prompt.
+- startup recovery behavior is now validated end to end by writing an autosave in a dedicated temporary working directory, stopping the KWin session, relaunching the rebuilt binary from the same directory, and accepting the recovery prompt to restore the autosaved stroke and history entry.
+- non-integer scaling was validated with `GDK_SCALE=1` and `GDK_DPI_SCALE=1.25` in a fresh KWin session; shell layout remained stable and brush interaction coordinates still aligned with the visible canvas content.
 - Depends on: SHELL04, SHELL05, SHELL06, SHELL09
 - Done when:
   - daily-use shell behavior feels native enough for repeated use

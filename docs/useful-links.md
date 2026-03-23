@@ -18,6 +18,11 @@ https://docs.rs/wgpu/latest/wgpu/
 ### `Image` Crate Documentations
 https://docs.rs/image/latest/image/
 
+### PSD Interoperability References
+https://www.adobe.com/devnet-apps/photoshop/fileformatashtml/
+https://github.com/psd-tools/psd-tools
+https://invent.kde.org/graphics/krita/-/tree/master/plugins/impex/psd
+
 ### CSS STYLING FOR `GTK4-RS`
 https://github.com/jbenner-radham/rust-gtk4-css-styling
 

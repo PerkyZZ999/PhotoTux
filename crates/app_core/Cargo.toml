@@ -9,6 +9,7 @@ common = { path = "../common" }
 doc_model = { path = "../doc_model" }
 file_io = { path = "../file_io" }
 history_engine = { path = "../history_engine" }
+image_ops = { path = "../image_ops" }
 tool_system = { path = "../tool_system" }
 tracing.workspace = true
 tracing-subscriber.workspace = true

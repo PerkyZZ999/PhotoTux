@@ -1,4 +1,4 @@
-use common::CanvasRect;
+use common::{CanvasRect, DestructiveFilterKind};
 
 pub fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
@@ -173,6 +173,41 @@ pub fn apply_round_eraser_dab_clipped(
         clip_rect,
         clip_inverted,
     )
+}
+
+pub fn apply_destructive_filter_rgba(pixels: &mut [u8], filter: DestructiveFilterKind) -> bool {
+    if pixels.len() % 4 != 0 {
+        return false;
+    }
+
+    let mut changed = false;
+    for rgba in pixels.chunks_exact_mut(4) {
+        if rgba[3] == 0 {
+            continue;
+        }
+
+        let before = [rgba[0], rgba[1], rgba[2]];
+        match filter {
+            DestructiveFilterKind::InvertColors => {
+                rgba[0] = 255_u8.saturating_sub(rgba[0]);
+                rgba[1] = 255_u8.saturating_sub(rgba[1]);
+                rgba[2] = 255_u8.saturating_sub(rgba[2]);
+            }
+            DestructiveFilterKind::Desaturate => {
+                let luminance = (rgba[0] as f32 * 0.299
+                    + rgba[1] as f32 * 0.587
+                    + rgba[2] as f32 * 0.114)
+                    .round() as u8;
+                rgba[0] = luminance;
+                rgba[1] = luminance;
+                rgba[2] = luminance;
+            }
+        }
+
+        changed |= before != [rgba[0], rgba[1], rgba[2]];
+    }
+
+    changed
 }
 
 fn apply_round_dab(
@@ -379,11 +414,11 @@ fn erase_pixel(destination: &mut [u8], alpha: f32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_round_brush_dab, apply_round_brush_dab_clipped, apply_round_eraser_dab,
-        apply_round_eraser_dab_clipped, apply_round_mask_hide_dab_clipped,
-        apply_round_mask_reveal_dab_clipped, BrushDab,
+        apply_destructive_filter_rgba, apply_round_brush_dab, apply_round_brush_dab_clipped,
+        apply_round_eraser_dab, apply_round_eraser_dab_clipped,
+        apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped, BrushDab,
     };
-    use common::CanvasRect;
+    use common::{CanvasRect, DestructiveFilterKind};
 
     #[test]
     fn brush_dab_changes_pixels_inside_radius() {
@@ -552,5 +587,27 @@ mod tests {
 
         assert!(changed);
         assert_eq!(alpha[center], 255);
+    }
+
+    #[test]
+    fn invert_filter_changes_visible_rgb_without_touching_alpha() {
+        let mut pixels = vec![10_u8, 20, 30, 255, 0, 0, 0, 0];
+
+        let changed = apply_destructive_filter_rgba(&mut pixels, DestructiveFilterKind::InvertColors);
+
+        assert!(changed);
+        assert_eq!(&pixels[0..4], &[245, 235, 225, 255]);
+        assert_eq!(&pixels[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn desaturate_filter_converts_visible_pixels_to_luminance() {
+        let mut pixels = vec![50_u8, 150, 200, 255];
+
+        let changed = apply_destructive_filter_rgba(&mut pixels, DestructiveFilterKind::Desaturate);
+
+        assert!(changed);
+        assert_eq!(&pixels[0..3], &[126, 126, 126]);
+        assert_eq!(pixels[3], 255);
     }
 }

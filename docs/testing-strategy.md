@@ -105,6 +105,7 @@ Current manual validation companion docs:
 
 - MVP shell checklist in `docs/tests/kwin-mcp-test-checklist.md`
 - post-MVP editing workflow checklist in `docs/tests/post-mvp-editing-workflow-checklist.md`
+- post-MVP painting checklist in `docs/tests/post-mvp-painting-checklist.md`
 
 These should be used repeatedly for regressions instead of inventing new ad hoc files every time.
 
@@ -118,6 +119,18 @@ Must verify:
 - strokes commit as one history action
 - undo restores the exact previous result
 - eraser behavior follows alpha rules
+- brush preview reflects active size and softness settings without requiring document mutation for hover-only updates
+- repeated medium-canvas strokes preserve viewport-versus-flattened parity under pressure-enabled painting
+
+### Filters
+
+Must verify:
+
+- destructive filters run through the worker/job path rather than blocking the UI thread
+- undo restores the exact pre-filter layer state
+- redo reapplies the same filtered result deterministically
+- save, reopen, and export preserve the filtered result without viewport mismatch
+- stale worker results do not overwrite newer document edits
 
 ### Layers
 

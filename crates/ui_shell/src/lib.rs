@@ -1,11 +1,12 @@
 use anyhow::Result;
-use common::{CanvasRaster, CanvasRect, CanvasSize, GroupId, APP_NAME};
+use common::{CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId, APP_NAME};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
     gdk, Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
     CssProvider, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
-    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, GestureStylus, HeaderBar, Image, Label,
+    EventControllerMotion, FileChooserAction, FileChooserNative, FileFilter, GestureDrag,
+    GestureStylus, HeaderBar, Image, Label,
     MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
     ResponseType, Separator,
 };
@@ -66,6 +67,21 @@ impl ShellToolKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellImportDiagnostic {
+    pub severity_label: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellImportReport {
+    pub id: u64,
+    pub title: String,
+    pub summary: String,
+    pub diagnostics: Vec<ShellImportDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSnapshot {
     pub document_title: String,
     pub project_path: Option<PathBuf>,
@@ -73,6 +89,7 @@ pub struct ShellSnapshot {
     pub recovery_offer_pending: bool,
     pub recovery_path: Option<PathBuf>,
     pub status_message: String,
+    pub latest_import_report: Option<ShellImportReport>,
     pub canvas_size: CanvasSize,
     pub canvas_revision: u64,
     pub active_tool_name: String,
@@ -98,6 +115,9 @@ pub struct ShellSnapshot {
     pub transform_scale_x_percent: u32,
     pub transform_scale_y_percent: u32,
     pub transform_rotation_degrees: i32,
+    pub can_apply_destructive_filters: bool,
+    pub filter_job_active: bool,
+    pub brush_preset_name: String,
     pub brush_radius: u32,
     pub brush_hardness_percent: u32,
     pub brush_spacing: u32,
@@ -164,6 +184,8 @@ pub trait ShellController {
     fn decrease_brush_spacing(&mut self);
     fn increase_brush_flow(&mut self);
     fn decrease_brush_flow(&mut self);
+    fn next_brush_preset(&mut self);
+    fn previous_brush_preset(&mut self);
     fn set_temporary_snap_bypass(&mut self, bypassed: bool);
     fn begin_transform(&mut self);
     fn scale_transform_up(&mut self);
@@ -185,6 +207,7 @@ pub trait ShellController {
     fn open_document(&mut self, path: PathBuf);
     fn import_image(&mut self, path: PathBuf);
     fn export_document(&mut self, path: PathBuf);
+    fn apply_destructive_filter(&mut self, filter: DestructiveFilterKind);
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
@@ -782,12 +805,45 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&previous_blend);
 
+    let filter_separator = Separator::new(Orientation::Horizontal);
+    menu.append(&filter_separator);
+
+    let invert_colors = build_icon_label_button("refresh-line.svg", "Invert Colors");
+    invert_colors.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        invert_colors.connect_clicked(move |_| {
+            popover.popdown();
+            controller
+                .borrow_mut()
+                .apply_destructive_filter(DestructiveFilterKind::InvertColors);
+        });
+    }
+    menu.append(&invert_colors);
+
+    let desaturate = build_icon_label_button("contrast-drop-2-line.svg", "Desaturate");
+    desaturate.add_css_class("menu-dropdown-item");
+    {
+        let controller = shell_state.controller.clone();
+        let popover = popover.clone();
+        desaturate.connect_clicked(move |_| {
+            popover.popdown();
+            controller
+                .borrow_mut()
+                .apply_destructive_filter(DestructiveFilterKind::Desaturate);
+        });
+    }
+    menu.append(&desaturate);
+
     {
         let shell_state = shell_state.clone();
         let opacity_up = opacity_up.clone();
         let opacity_down = opacity_down.clone();
         let next_blend = next_blend.clone();
         let previous_blend = previous_blend.clone();
+        let invert_colors = invert_colors.clone();
+        let desaturate = desaturate.clone();
         popover.connect_show(move |_| {
             let snapshot = shell_state.controller.borrow().snapshot();
             let has_layer = !snapshot.layers.is_empty();
@@ -796,6 +852,8 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             opacity_down.set_sensitive(has_layer && snapshot.active_layer_opacity_percent > 0);
             next_blend.set_sensitive(has_layer);
             previous_blend.set_sensitive(has_layer);
+            invert_colors.set_sensitive(snapshot.can_apply_destructive_filters);
+            desaturate.set_sensitive(snapshot.can_apply_destructive_filters);
         });
     }
 
@@ -939,7 +997,7 @@ fn build_file_menu_button(
     }
     menu.append(&open_project);
 
-    let import_image = build_icon_label_button("image-add-line.svg", "Import Image...");
+    let import_image = build_icon_label_button("image-add-line.svg", "Import Image Or PSD...");
     import_image.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
@@ -1282,13 +1340,13 @@ fn choose_open_project(parent: &ApplicationWindow, controller: Rc<RefCell<dyn Sh
 fn choose_import_image(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
     choose_path(
         parent,
-        "Import Image",
+        "Import Image Or PSD",
         FileChooserAction::Open,
         "Import",
         None,
         &[build_extension_filter(
-            "Supported Images",
-            &["*.png", "*.jpg", "*.jpeg", "*.webp"],
+            "Supported Imports",
+            &["*.png", "*.jpg", "*.jpeg", "*.webp", "*.psd"],
         )],
         move |path| controller.borrow_mut().import_image(path),
     );
@@ -1681,9 +1739,11 @@ struct ShellUiState {
     window: RefCell<Option<ApplicationWindow>>,
     recovery_prompt_visible: Cell<bool>,
     close_prompt_visible: Cell<bool>,
+    import_report_visible: Cell<bool>,
     pending_close_after_save: Cell<bool>,
     allow_close_once: Cell<bool>,
     prompted_recovery_path: RefCell<Option<PathBuf>>,
+    presented_import_report_id: Cell<Option<u64>>,
     canvas_state: Rc<RefCell<CanvasHostState>>,
     automation_shortcuts_enabled: bool,
     tool_options_bar: GtkBox,
@@ -1747,9 +1807,11 @@ impl ShellUiState {
             window: RefCell::new(None),
             recovery_prompt_visible: Cell::new(false),
             close_prompt_visible: Cell::new(false),
+            import_report_visible: Cell::new(false),
             pending_close_after_save: Cell::new(false),
             allow_close_once: Cell::new(false),
             prompted_recovery_path: RefCell::new(None),
+            presented_import_report_id: Cell::new(None),
             canvas_state,
             automation_shortcuts_enabled,
             tool_options_bar,
@@ -2072,6 +2134,32 @@ impl ShellUiState {
         dialog.show();
     }
 
+    fn present_import_report(self: &Rc<Self>, report: &ShellImportReport) {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            return;
+        };
+        if self.import_report_visible.replace(true) {
+            return;
+        }
+
+        let dialog = MessageDialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .message_type(MessageType::Info)
+            .buttons(ButtonsType::Close)
+            .text(&report.title)
+            .secondary_text(format_import_report_details(report))
+            .build();
+
+        let shell_state = self.clone();
+        dialog.connect_response(move |dialog, _| {
+            shell_state.import_report_visible.set(false);
+            dialog.destroy();
+        });
+
+        dialog.show();
+    }
+
     fn handle_close_request(self: &Rc<Self>) -> bool {
         if self.allow_close_once.replace(false) {
             return false;
@@ -2203,6 +2291,14 @@ impl ShellUiState {
             self.present_recovery_prompt(&current_snapshot);
         }
 
+        if let Some(report) = current_snapshot.latest_import_report.as_ref() {
+            let already_presented = self.presented_import_report_id.get() == Some(report.id);
+            if !already_presented && !self.import_report_visible.get() {
+                self.presented_import_report_id.set(Some(report.id));
+                self.present_import_report(report);
+            }
+        }
+
         self.last_zoom_percent.replace(zoom_percent);
     }
 
@@ -2269,6 +2365,7 @@ impl ShellUiState {
                     "Disabled"
                 }
             ),
+            format!("Brush Preset: {}", snapshot.brush_preset_name),
             format!("Brush Radius: {} px", snapshot.brush_radius),
             format!("Brush Hardness: {}%", snapshot.brush_hardness_percent),
             format!("Brush Spacing: {} px", snapshot.brush_spacing),
@@ -2497,6 +2594,31 @@ impl ShellUiState {
         }
         selection_controls.append(&invert_selection);
         self.properties_body.append(&selection_controls);
+
+        let brush_preset_controls = GtkBox::new(Orientation::Horizontal, 6);
+
+        let preset_prev = Button::with_label("Preset -");
+        preset_prev.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            preset_prev.connect_clicked(move |_| controller.borrow_mut().previous_brush_preset());
+        }
+        brush_preset_controls.append(&preset_prev);
+
+        let preset_current = Label::new(Some(&format!("Preset: {}", snapshot.brush_preset_name)));
+        preset_current.set_xalign(0.0);
+        preset_current.add_css_class("panel-row");
+        brush_preset_controls.append(&preset_current);
+
+        let preset_next = Button::with_label("Preset +");
+        preset_next.add_css_class("tool-chip");
+        {
+            let controller = self.controller.clone();
+            preset_next.connect_clicked(move |_| controller.borrow_mut().next_brush_preset());
+        }
+        brush_preset_controls.append(&preset_next);
+
+        self.properties_body.append(&brush_preset_controls);
 
         let brush_controls_row_one = GtkBox::new(Orientation::Horizontal, 6);
 
@@ -3151,10 +3273,11 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
         && (snapshot.pressure_size_enabled || snapshot.pressure_opacity_enabled)
     {
         return format!(
-            "{} | Radius {} | Hardness {}% | Flow {}% | Pressure {}{}",
+            "{} | Radius {} | Hardness {}% | Spacing {} | Flow {}% | Pressure {}{}",
             tool_hint,
             snapshot.brush_radius,
             snapshot.brush_hardness_percent,
+            snapshot.brush_spacing,
             snapshot.brush_flow_percent,
             if snapshot.pressure_size_enabled { "size" } else { "" },
             if snapshot.pressure_opacity_enabled {
@@ -3166,10 +3289,11 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
     }
     if matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser) {
         return format!(
-            "{} | Radius {} | Hardness {}% | Flow {}%",
+            "{} | Radius {} | Hardness {}% | Spacing {} | Flow {}%",
             tool_hint,
             snapshot.brush_radius,
             snapshot.brush_hardness_percent,
+            snapshot.brush_spacing,
             snapshot.brush_flow_percent,
         );
     }
@@ -3209,6 +3333,20 @@ fn shell_notice_text(snapshot: &ShellSnapshot) -> String {
     } else {
         snapshot.status_message.clone()
     }
+}
+
+fn format_import_report_details(report: &ShellImportReport) -> String {
+    let mut details = report.summary.clone();
+    if !report.diagnostics.is_empty() {
+        details.push_str("\n\nDetails:");
+        for diagnostic in &report.diagnostics {
+            details.push_str("\n- ");
+            details.push_str(&diagnostic.severity_label);
+            details.push_str(": ");
+            details.push_str(&diagnostic.message);
+        }
+    }
+    details
 }
 
 fn apply_status_notice_style(label: &Label, message: &str) {
@@ -3331,6 +3469,7 @@ fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, 
     picture.add_css_class("frame");
 
     let state = Rc::new(RefCell::new(CanvasHostState::new(picture.clone(), controller)));
+    wire_canvas_motion(&picture, state.clone());
     wire_canvas_drag(&picture, state.clone());
     wire_canvas_stylus(&picture, state.clone());
     wire_canvas_scroll(&picture, state.clone());
@@ -3342,6 +3481,30 @@ fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, 
     });
 
     (picture, state)
+}
+
+fn wire_canvas_motion(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
+    let motion = EventControllerMotion::new();
+
+    {
+        let state = state.clone();
+        motion.connect_enter(move |_, x, y| {
+            state.borrow_mut().update_hover_position(x as f32, y as f32);
+        });
+    }
+
+    {
+        let state = state.clone();
+        motion.connect_motion(move |_, x, y| {
+            state.borrow_mut().update_hover_position(x as f32, y as f32);
+        });
+    }
+
+    motion.connect_leave(move |_| {
+        state.borrow_mut().clear_hover_position();
+    });
+
+    picture.add_controller(motion);
 }
 
 fn wire_canvas_drag(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
@@ -3430,10 +3593,12 @@ struct CanvasHostState {
     canvas_raster: Option<CanvasRaster>,
     drag_origin_pan: Option<(f32, f32)>,
     drag_start_screen: Option<(f32, f32)>,
+    hovered_canvas_position: Option<(i32, i32)>,
     pointer_pressure: f32,
     viewport_fitted: bool,
     last_logical_size: (u32, u32),
     last_canvas_revision: Option<u64>,
+    last_brush_preview_signature: Option<BrushPreviewSignature>,
     last_active_layer_bounds: Option<CanvasRect>,
     last_selection_rect: Option<CanvasRect>,
     last_selection_path: Option<Vec<(i32, i32)>>,
@@ -3463,10 +3628,12 @@ impl CanvasHostState {
             canvas_raster: None,
             drag_origin_pan: None,
             drag_start_screen: None,
+            hovered_canvas_position: None,
             pointer_pressure: 1.0,
             viewport_fitted: false,
             last_logical_size: (0, 0),
             last_canvas_revision: None,
+            last_brush_preview_signature: None,
             last_active_layer_bounds: None,
             last_selection_rect: None,
             last_selection_path: None,
@@ -3483,6 +3650,12 @@ impl CanvasHostState {
         if self.canvas_size != snapshot.canvas_size {
             self.canvas_size = snapshot.canvas_size;
             self.viewport_fitted = false;
+            self.dirty = true;
+        }
+
+        let preview_signature = brush_preview_signature(&snapshot);
+        if self.last_brush_preview_signature != preview_signature {
+            self.last_brush_preview_signature = preview_signature;
             self.dirty = true;
         }
 
@@ -3593,6 +3766,7 @@ impl CanvasHostState {
                 fill_rgba: Some([79, 140, 255, 36]),
             });
         }
+        overlay_paths.extend(self.build_active_brush_preview_paths(&snapshot));
         match renderer.render(
             self.canvas_size,
             self.viewport_state,
@@ -3623,6 +3797,7 @@ impl CanvasHostState {
 
     fn begin_drag(&mut self, start_x: f32, start_y: f32, snap_bypass: bool) {
         self.drag_start_screen = Some((start_x, start_y));
+        self.update_hover_position(start_x, start_y);
         let snapshot = self.controller.borrow().snapshot();
         match snapshot.active_tool {
             ShellToolKind::Hand => {
@@ -3661,6 +3836,7 @@ impl CanvasHostState {
             | ShellToolKind::Brush
             | ShellToolKind::Eraser => {
                 if let Some((start_x, start_y)) = self.drag_start_screen {
+                    self.update_hover_position(start_x + offset_x, start_y + offset_y);
                     let (canvas_x, canvas_y) = self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
                     self.controller.borrow_mut().set_temporary_snap_bypass(snap_bypass);
                     self.controller
@@ -3684,11 +3860,64 @@ impl CanvasHostState {
     }
 
     fn set_pointer_pressure(&mut self, pressure: f32) {
-        self.pointer_pressure = pressure.clamp(0.0, 1.0);
+        let pressure = pressure.clamp(0.0, 1.0);
+        if (self.pointer_pressure - pressure).abs() > f32::EPSILON {
+            self.pointer_pressure = pressure;
+            self.dirty = true;
+        }
     }
 
     fn clear_pointer_pressure(&mut self) {
-        self.pointer_pressure = 1.0;
+        if (self.pointer_pressure - 1.0).abs() > f32::EPSILON {
+            self.pointer_pressure = 1.0;
+            self.dirty = true;
+        }
+    }
+
+    fn update_hover_position(&mut self, screen_x: f32, screen_y: f32) {
+        let canvas_position = self.screen_to_canvas(screen_x, screen_y);
+        if self.hovered_canvas_position != Some(canvas_position) {
+            self.hovered_canvas_position = Some(canvas_position);
+            self.dirty = true;
+        }
+    }
+
+    fn clear_hover_position(&mut self) {
+        if self.hovered_canvas_position.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    fn build_active_brush_preview_paths(&self, snapshot: &ShellSnapshot) -> Vec<CanvasOverlayPath> {
+        if !matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser) {
+            return Vec::new();
+        }
+
+        let Some((center_x, center_y)) = self.hovered_canvas_position else {
+            return Vec::new();
+        };
+        if center_x < 0
+            || center_y < 0
+            || center_x >= self.canvas_size.width as i32
+            || center_y >= self.canvas_size.height as i32
+        {
+            return Vec::new();
+        }
+
+        let radius = brush_preview_radius(
+            snapshot.brush_radius,
+            snapshot.pressure_size_enabled,
+            self.pointer_pressure,
+        );
+        let spacing = brush_preview_spacing(radius, snapshot.brush_spacing);
+        build_brush_preview_paths(
+            snapshot.active_tool,
+            (center_x, center_y),
+            radius,
+            snapshot.brush_hardness_percent,
+            spacing,
+            self.viewport_state.zoom,
+        )
     }
 
     fn zoom(&mut self, delta_y: f64, focal_x: f32, focal_y: f32) {
@@ -3745,6 +3974,136 @@ impl CanvasHostState {
         let canvas_x = ((screen_x - self.viewport_state.pan_x) / self.viewport_state.zoom).round() as i32;
         let canvas_y = ((screen_y - self.viewport_state.pan_y) / self.viewport_state.zoom).round() as i32;
         (canvas_x, canvas_y)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrushPreviewSignature {
+    active_tool: ShellToolKind,
+    brush_radius: u32,
+    brush_hardness_percent: u32,
+    brush_spacing: u32,
+    pressure_size_enabled: bool,
+}
+
+fn brush_preview_signature(snapshot: &ShellSnapshot) -> Option<BrushPreviewSignature> {
+    match snapshot.active_tool {
+        ShellToolKind::Brush | ShellToolKind::Eraser => Some(BrushPreviewSignature {
+            active_tool: snapshot.active_tool,
+            brush_radius: snapshot.brush_radius,
+            brush_hardness_percent: snapshot.brush_hardness_percent,
+            brush_spacing: snapshot.brush_spacing,
+            pressure_size_enabled: snapshot.pressure_size_enabled,
+        }),
+        _ => None,
+    }
+}
+
+fn brush_preview_radius(base_radius: u32, pressure_size_enabled: bool, pressure: f32) -> f32 {
+    let base_radius = base_radius.max(1) as f32;
+    if pressure_size_enabled {
+        base_radius * (0.35 + 0.65 * pressure.clamp(0.0, 1.0))
+    } else {
+        base_radius
+    }
+}
+
+fn brush_preview_spacing(radius: f32, spacing: u32) -> f32 {
+    (spacing.max(1) as f32).clamp(1.0, (radius * 1.5).max(1.0))
+}
+
+fn build_brush_preview_paths(
+    tool: ShellToolKind,
+    center: (i32, i32),
+    radius: f32,
+    hardness_percent: u32,
+    spacing: f32,
+    zoom: f32,
+) -> Vec<CanvasOverlayPath> {
+    let mut paths = vec![CanvasOverlayPath {
+        points: brush_preview_circle_points(center, radius, zoom),
+        stroke_rgba: brush_preview_outer_color(tool),
+        closed: true,
+    }];
+
+    let hardness_radius = radius * (hardness_percent.clamp(0, 100) as f32 / 100.0);
+    if hardness_radius >= 2.0 && (radius - hardness_radius) >= 1.0 {
+        paths.push(CanvasOverlayPath {
+            points: brush_preview_circle_points(center, hardness_radius, zoom),
+            stroke_rgba: brush_preview_detail_color(tool),
+            closed: true,
+        });
+    }
+
+    let crosshair_extent = (radius * 0.35).clamp(2.0, 8.0).round() as i32;
+    paths.push(CanvasOverlayPath {
+        points: vec![(center.0 - crosshair_extent, center.1), (center.0 + crosshair_extent, center.1)],
+        stroke_rgba: brush_preview_detail_color(tool),
+        closed: false,
+    });
+    paths.push(CanvasOverlayPath {
+        points: vec![(center.0, center.1 - crosshair_extent), (center.0, center.1 + crosshair_extent)],
+        stroke_rgba: brush_preview_detail_color(tool),
+        closed: false,
+    });
+
+    let spacing_marker_center = (center.0 + spacing.round() as i32, center.1);
+    let spacing_marker_radius = (radius * 0.16).clamp(1.0, 3.0);
+    if spacing >= spacing_marker_radius * 2.0 {
+        paths.push(CanvasOverlayPath {
+            points: brush_preview_circle_points(spacing_marker_center, spacing_marker_radius, zoom),
+            stroke_rgba: brush_preview_spacing_color(tool),
+            closed: true,
+        });
+    }
+
+    paths
+}
+
+fn brush_preview_circle_points(center: (i32, i32), radius: f32, zoom: f32) -> Vec<(i32, i32)> {
+    let screen_radius = (radius * zoom.max(0.1)).max(1.0);
+    let segments = (screen_radius.round() as usize).clamp(18, 48);
+    let mut points = Vec::with_capacity(segments);
+    for index in 0..segments {
+        let angle = (index as f32 / segments as f32) * std::f32::consts::TAU;
+        points.push((
+            (center.0 as f32 + radius * angle.cos()).round() as i32,
+            (center.1 as f32 + radius * angle.sin()).round() as i32,
+        ));
+    }
+    points.dedup();
+    if points.len() < 3 {
+        return vec![
+            (center.0 - 1, center.1 - 1),
+            (center.0 + 1, center.1 - 1),
+            (center.0 + 1, center.1 + 1),
+            (center.0 - 1, center.1 + 1),
+        ];
+    }
+    points
+}
+
+fn brush_preview_outer_color(tool: ShellToolKind) -> [u8; 4] {
+    match tool {
+        ShellToolKind::Brush => [245, 247, 250, 228],
+        ShellToolKind::Eraser => [255, 212, 160, 228],
+        _ => [245, 247, 250, 228],
+    }
+}
+
+fn brush_preview_detail_color(tool: ShellToolKind) -> [u8; 4] {
+    match tool {
+        ShellToolKind::Brush => [116, 167, 255, 196],
+        ShellToolKind::Eraser => [255, 150, 92, 196],
+        _ => [116, 167, 255, 196],
+    }
+}
+
+fn brush_preview_spacing_color(tool: ShellToolKind) -> [u8; 4] {
+    match tool {
+        ShellToolKind::Brush => [136, 203, 255, 170],
+        ShellToolKind::Eraser => [255, 186, 120, 170],
+        _ => [136, 203, 255, 170],
     }
 }
 
@@ -4422,4 +4781,121 @@ paned > separator:hover {
     background-color: #4a4a4a;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        brush_preview_radius, build_brush_preview_paths, format_import_report_details,
+        shell_status_hint, LayerPanelItem, ShellGuide, ShellImportDiagnostic,
+        ShellImportReport, ShellSnapshot, ShellToolKind,
+    };
+    use common::CanvasSize;
+
+    fn snapshot_for_tool(tool: ShellToolKind) -> ShellSnapshot {
+        ShellSnapshot {
+            document_title: "untitled.ptx".to_string(),
+            project_path: None,
+            dirty: false,
+            recovery_offer_pending: false,
+            recovery_path: None,
+            status_message: String::new(),
+            latest_import_report: None,
+            canvas_size: CanvasSize::new(640, 480),
+            canvas_revision: 1,
+            active_tool_name: tool.label().to_string(),
+            active_tool: tool,
+            layers: Vec::<LayerPanelItem>::new(),
+            active_layer_name: "Layer 1".to_string(),
+            active_layer_opacity_percent: 100,
+            active_layer_visible: true,
+            active_layer_blend_mode: "Normal".to_string(),
+            active_layer_has_mask: false,
+            active_layer_mask_enabled: false,
+            active_edit_target_name: "Layer Pixels".to_string(),
+            selected_structure_name: "Layer 1".to_string(),
+            selected_structure_is_group: false,
+            can_create_group_from_active_layer: false,
+            can_ungroup_selected_group: false,
+            can_move_active_layer_into_selected_group: false,
+            can_move_active_layer_out_of_group: false,
+            active_layer_bounds: None,
+            transform_preview_rect: None,
+            transform_active: false,
+            transform_scale_percent: 100,
+            transform_scale_x_percent: 100,
+            transform_scale_y_percent: 100,
+            transform_rotation_degrees: 0,
+            can_apply_destructive_filters: false,
+            filter_job_active: false,
+            brush_preset_name: "Balanced Round".to_string(),
+            brush_radius: 12,
+            brush_hardness_percent: 72,
+            brush_spacing: 5,
+            brush_flow_percent: 82,
+            pressure_size_enabled: false,
+            pressure_opacity_enabled: false,
+            snapping_enabled: true,
+            snapping_temporarily_bypassed: false,
+            guides_visible: false,
+            guide_count: 0,
+            guides: Vec::<ShellGuide>::new(),
+            selection_rect: None,
+            selection_path: None,
+            selection_preview_path: None,
+            selection_inverted: false,
+            foreground_color: [255, 255, 255, 255],
+            background_color: [0, 0, 0, 255],
+            can_undo: false,
+            can_redo: false,
+            history_entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn brush_preview_radius_matches_pressure_mapping() {
+        assert_eq!(brush_preview_radius(12, false, 0.2), 12.0);
+        assert!((brush_preview_radius(12, true, 0.25) - 6.15).abs() < 0.001);
+        assert!((brush_preview_radius(12, true, 1.0) - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn brush_preview_paths_include_softness_and_spacing_markers() {
+        let paths = build_brush_preview_paths(ShellToolKind::Brush, (120, 80), 12.0, 50, 5.0, 1.0);
+
+        assert_eq!(paths.len(), 5);
+        assert!(paths[0].closed);
+        assert!(paths[1].closed);
+        assert!(!paths[2].closed);
+        assert!(!paths[3].closed);
+        assert!(paths[4].closed);
+    }
+
+    #[test]
+    fn brush_status_hint_reports_spacing() {
+        let mut snapshot = snapshot_for_tool(ShellToolKind::Brush);
+        snapshot.pressure_size_enabled = true;
+
+        let hint = shell_status_hint(&snapshot);
+        assert!(hint.contains("Spacing 5"));
+        assert!(hint.contains("Pressure size"));
+    }
+
+    #[test]
+    fn import_report_details_include_summary_and_diagnostics() {
+        let details = format_import_report_details(&ShellImportReport {
+            id: 1,
+            title: "PSD Imported With Warnings".to_string(),
+            summary: "PhotoTux imported a flattened composite because the PSD exceeded the current layered subset.".to_string(),
+            diagnostics: vec![ShellImportDiagnostic {
+                severity_label: "Warning".to_string(),
+                code: "unsupported_layer_kind".to_string(),
+                message: "Source layer 1: Layer 'Title' uses unsupported kind Text for the current layered PSD subset.".to_string(),
+            }],
+        });
+
+        assert!(details.contains("flattened composite"));
+        assert!(details.contains("Details:"));
+        assert!(details.contains("Warning: Source layer 1"));
+    }
+}
 

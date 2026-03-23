@@ -47,6 +47,7 @@ dependencies = [
  "doc_model",
  "file_io",
  "history_engine",
+ "image_ops",
  "tool_system",
  "tracing",
  "tracing-subscriber",

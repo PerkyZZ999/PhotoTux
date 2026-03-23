@@ -70,6 +70,36 @@ Use this order:
 
 ## Current Test Run Notes
 
+### 2026-03-23 - SHELL10 Linux Workflow Validation Pass
+
+Completed so far:
+
+- rebuilt `app_core` from current source before automation so the KWin run exercised the actual repository state instead of a stale binary
+- validated native `Save Project As` dialog appearance, dialog dismissal, focus return to the main window, and immediate shortcut usability after the dialog closed
+- validated unsaved-close protection on the rebuilt binary: a dirty document opened the close-confirmation dialog, cancelling preserved the session, and shortcuts still worked after the prompt was dismissed
+- validated crash-recovery startup behavior on the rebuilt binary: an autosaved working state written in a dedicated temporary directory was rediscovered on relaunch, and choosing `Recover` restored the autosaved document state and history entry
+- validated a non-integer scaling pass with `GDK_SCALE=1` and `GDK_DPI_SCALE=1.25`, with stable shell layout and no obvious brush-coordinate drift in the canvas interaction slice
+
+Environment notes:
+
+- a rebuild mattered for this pass: earlier close and recovery anomalies were caused by validating an older binary after source changes, not by the current shell code
+- the scaling pass used GTK non-integer DPI scaling in the KWin session rather than compositor-level display scaling, which is sufficient for current shell sanity validation but may still merit a real desktop spot-check if future coordinate regressions appear
+
+### 2026-03-23 - KWin Mouse Paint Regression Pass
+
+Completed so far:
+
+- started a fresh isolated `kwin-mcp` session successfully in this environment
+- launched the already built PhotoTux binary with `PHOTOTUX_ENABLE_TEST_SHORTCUTS=1` from a dedicated temporary working directory instead of invoking Cargo inside the isolated session
+- re-validated mouse brush painting, eraser workflow, and undo/redo routing on the live canvas through real KWin pointer and keyboard injection
+- confirmed the History panel recorded `Brush Stroke` and `Erase Stroke` entries as expected during the pass
+- observed no crash, hang, or new app-log errors during the interaction slice
+
+Environment notes:
+
+- the current startup document still opens with an active rectangular selection overlay in this run, so the mouse paint regression slice was exercised inside the visible selection bounds
+- stylus and pressure ergonomics remain out of scope for `kwin-mcp` alone here because this environment does not expose a pressure-capable tablet device
+
 ### 2026-03-16 - KWin MCP Follow-up Attempt Blocked By Host Environment
 
 Attempted so far:
@@ -495,19 +525,19 @@ Current test-only shortcuts:
 
 ### LNX01 - Focus And Windowing
 
-- [ ] Verify the main window can regain focus cleanly after dialogs or menus.
-- [ ] Verify keyboard shortcuts still work after focus changes.
+- [x] Verify the main window can regain focus cleanly after dialogs or menus.
+- [x] Verify keyboard shortcuts still work after focus changes.
 
 ### LNX02 - Wayland Visual Sanity
 
-- [ ] Verify no obvious coordinate drift appears during selection or move interactions.
-- [ ] Verify canvas interactions do not show severe offset mismatch under the normal scale factor.
+- [x] Verify no obvious coordinate drift appears during selection or move interactions.
+- [x] Verify canvas interactions do not show severe offset mismatch under the normal scale factor.
 
 ### LNX03 - Fractional-Scaling Validation
 
-- [ ] Run the app under a non-integer scale factor if available.
-- [ ] Verify shell layout still looks stable.
-- [ ] Verify canvas interaction coordinates still appear correct.
+- [x] Run the app under a non-integer scale factor if available.
+- [x] Verify shell layout still looks stable.
+- [x] Verify canvas interaction coordinates still appear correct.
 
 ## 13. Representative End-To-End Scenarios
 

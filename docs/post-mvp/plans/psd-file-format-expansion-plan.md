@@ -49,12 +49,22 @@ Enable users to bring common layered PSD files into PhotoTux safely, inspect wha
 3. fixture-driven compatibility pass
 4. optional PSD export subset later
 
+## Parser And Importer Strategy
+
+- use a `psd-tools` sidecar importer for the first serious PSD pass instead of owning a Rust-native PSD parser foundation immediately
+- keep the sidecar behind the `file_io` boundary so the rest of the application still works only with native PhotoTux document structures
+- have the sidecar emit a versioned intermediate manifest plus extracted raster assets rather than letting UI or document crates understand Photoshop-native binary structures directly
+- treat the Adobe PSD specification as the standing validation and expansion reference for blend keys, tagged blocks, masks, compression details, and future parser upgrades
+- do not depend on an arbitrary system Python installation; the importer runtime should be controlled, bundled, or otherwise managed by PhotoTux
+
 ## Work Breakdown
 
 ### Phase 1: Import Adapter Foundation
 
 Deliverables:
 
+- bundleable or repo-managed PSD sidecar entrypoint
+- versioned intermediate manifest for PSD scene description
 - PSD adapter layer in `file_io`
 - normalized import into existing `doc_model` structures
 - mapping for the supported initial blend subset
@@ -63,6 +73,7 @@ Deliverables:
 Key design rules:
 
 - PSD support is an adapter concern, not a new source-of-truth format
+- the parser runtime must be replaceable without changing `doc_model`, `ui_shell`, or the `.ptx` format
 - imported content must be normalized into the existing raster document model
 - if fidelity is unknown, import must report a warning or fail clearly
 
@@ -126,6 +137,7 @@ Exit criteria:
 - PSD complexity can sprawl quickly if the subset is not held tightly
 - partial import can create user trust problems if diagnostics are weak
 - blend, mask, and clipping semantics can diverge subtly from Photoshop behavior
+- sidecar packaging and invocation can become fragile if the importer runtime is treated as an external system prerequisite instead of a managed project dependency
 
 ## Validation Requirements
 

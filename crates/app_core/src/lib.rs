@@ -7,24 +7,29 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::{CanvasRaster, CanvasRect};
+use common::{CanvasRaster, CanvasRect, DestructiveFilterKind};
 use doc_model::{
     BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerHierarchyNode,
     LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape,
 };
 use file_io::{
     export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
-    import_jpeg_from_path, import_png_from_path, import_webp_from_path, load_document_from_path,
-    recovery_path_for_project_path, remove_file_if_exists, save_document_to_path,
-    PROJECT_FILE_EXTENSION,
+    import_jpeg_from_path, import_png_from_path, import_psd_from_path_with_sidecar,
+    import_webp_from_path, load_document_from_path, recovery_path_for_project_path,
+    remove_file_if_exists, save_document_to_path, PsdImportDiagnostic,
+    PsdImportDiagnosticSeverity, PsdImportResult, PsdImportSidecar, PROJECT_FILE_EXTENSION,
 };
 use history_engine::HistoryStack;
+use image_ops::apply_destructive_filter_rgba;
 use tool_system::{
     BrushChange, BrushSample, BrushStrokeRecord, BrushSettings, BrushTool, BrushToolMode,
     LayerTransformRecord, LassoTool, MoveLayerRecord, RectangularMarqueeTool, SelectionRecord,
     SimpleTransformTool,
 };
-use ui_shell::{LayerPanelItem, ShellController, ShellGuide, ShellSnapshot, ShellToolKind};
+use ui_shell::{
+    LayerPanelItem, ShellController, ShellGuide, ShellImportDiagnostic,
+    ShellImportReport, ShellSnapshot, ShellToolKind,
+};
 
 pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
     Rc::new(RefCell::new(PhotoTuxController::new()))
@@ -32,6 +37,8 @@ pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
 
 const AUTOSAVE_IDLE_INTERVAL: Duration = Duration::from_secs(2);
 const GUIDE_SNAP_THRESHOLD: i32 = 8;
+const PSD_IMPORT_SIDECAR_PATH_ENV: &str = "PHOTOTUX_PSD_IMPORT_SIDECAR";
+const PSD_IMPORT_SIDECAR_ARGS_ENV: &str = "PHOTOTUX_PSD_IMPORT_SIDECAR_ARGS";
 
 #[derive(Debug)]
 struct PhotoTuxController {
@@ -46,6 +53,9 @@ struct PhotoTuxController {
     recovery_path: Option<PathBuf>,
     recovery_offer_pending: bool,
     working_directory: PathBuf,
+    psd_import_sidecar: Option<PsdImportSidecar>,
+    latest_import_report: Option<ShellImportReport>,
+    next_import_report_id: u64,
     next_layer_number: usize,
     active_tool: ShellToolKind,
     canvas_revision: u64,
@@ -57,6 +67,7 @@ struct PhotoTuxController {
     pending_recovery_load_job: Option<u64>,
     pending_document_load_job: Option<u64>,
     pending_export_job: Option<u64>,
+    pending_filter_job: Option<PendingFilterJob>,
     jobs: JobSystem,
     cached_canvas_raster: Option<Vec<u8>>,
     transform_session: Option<TransformSession>,
@@ -65,10 +76,48 @@ struct PhotoTuxController {
     temporary_snap_bypass: bool,
     pressure_size_enabled: bool,
     pressure_opacity_enabled: bool,
+    active_brush_preset: Option<BrushPreset>,
     brush_radius: f32,
     brush_hardness: f32,
     brush_spacing: f32,
     brush_flow: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrushPreset {
+    BalancedRound,
+    SoftShade,
+    InkTaper,
+}
+
+impl BrushPreset {
+    const ALL: [Self; 3] = [Self::BalancedRound, Self::SoftShade, Self::InkTaper];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BalancedRound => "Balanced Round",
+            Self::SoftShade => "Soft Shade",
+            Self::InkTaper => "Ink Taper",
+        }
+    }
+
+    const fn settings(self) -> (f32, f32, f32, f32, bool, bool) {
+        match self {
+            Self::BalancedRound => (12.0, 0.72, 5.0, 0.82, false, false),
+            Self::SoftShade => (24.0, 0.35, 12.0, 0.4, true, true),
+            Self::InkTaper => (7.0, 1.0, 3.0, 0.28, true, false),
+        }
+    }
+
+    fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|preset| *preset == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    fn previous(self) -> Self {
+        let index = Self::ALL.iter().position(|preset| *preset == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +176,7 @@ enum EditorOperation {
     Guides(GuideStateRecord),
     MaskState(MaskStateRecord),
     LayerHierarchy(LayerHierarchyRecord),
+    DestructiveFilter(DestructiveFilterRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +204,36 @@ struct LayerHierarchyRecord {
     after_active_layer_id: common::LayerId,
     before_selected_target: LayerHierarchyNodeRef,
     after_selected_target: LayerHierarchyNodeRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DestructiveFilterRecord {
+    layer_id: common::LayerId,
+    filter: DestructiveFilterKind,
+    before: LayerStateSnapshot,
+    after: LayerStateSnapshot,
+}
+
+impl DestructiveFilterRecord {
+    fn undo(&self, document: &mut Document) {
+        let _ = document.apply_layer_state_snapshot(self.layer_id, self.before.clone());
+    }
+
+    fn redo(&self, document: &mut Document) {
+        let _ = document.apply_layer_state_snapshot(self.layer_id, self.after.clone());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingFilterJob {
+    job_id: u64,
+    requested_canvas_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PsdImportJobReport {
+    diagnostics: Vec<PsdImportDiagnostic>,
+    used_flattened_fallback: bool,
 }
 
 impl LayerHierarchyRecord {
@@ -245,6 +325,7 @@ enum SaveKind {
 enum DocumentLoadKind {
     Project,
     RasterImport,
+    PsdImport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,12 +355,19 @@ enum JobRequest {
         job_id: u64,
         path: PathBuf,
         kind: DocumentLoadKind,
+        psd_import_sidecar: Option<PsdImportSidecar>,
     },
     ExportDocument {
         job_id: u64,
         path: PathBuf,
         document: Document,
         format: RasterFileFormat,
+    },
+    ApplyDestructiveFilter {
+        job_id: u64,
+        layer_id: common::LayerId,
+        filter: DestructiveFilterKind,
+        before: LayerStateSnapshot,
     },
 }
 
@@ -313,6 +401,8 @@ enum JobResult {
         path: PathBuf,
         kind: DocumentLoadKind,
         document: Document,
+        import_notice: Option<String>,
+        psd_import_report: Option<PsdImportJobReport>,
     },
     DocumentLoadFailed {
         job_id: u64,
@@ -328,6 +418,18 @@ enum JobResult {
         job_id: u64,
         path: PathBuf,
         format: RasterFileFormat,
+        error: String,
+    },
+    DestructiveFilterApplied {
+        job_id: u64,
+        layer_id: common::LayerId,
+        filter: DestructiveFilterKind,
+        before: LayerStateSnapshot,
+        after: LayerStateSnapshot,
+    },
+    DestructiveFilterFailed {
+        job_id: u64,
+        filter: DestructiveFilterKind,
         error: String,
     },
 }
@@ -347,6 +449,70 @@ fn raster_format_from_path(path: &Path) -> Option<RasterFileFormat> {
         "webp" => Some(RasterFileFormat::Webp),
         _ => None,
     }
+}
+
+fn psd_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("psd"))
+        .unwrap_or(false)
+}
+
+fn default_psd_import_sidecar() -> Option<PsdImportSidecar> {
+    let executable_path = std::env::var_os(PSD_IMPORT_SIDECAR_PATH_ENV)?;
+    if executable_path.is_empty() {
+        return None;
+    }
+
+    let mut sidecar = PsdImportSidecar::new(PathBuf::from(executable_path));
+    if let Some(base_args) = std::env::var_os(PSD_IMPORT_SIDECAR_ARGS_ENV) {
+        let parsed_args = base_args
+            .to_string_lossy()
+            .split_whitespace()
+            .filter(|argument| !argument.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !parsed_args.is_empty() {
+            sidecar = sidecar.with_args(parsed_args);
+        }
+    }
+
+    Some(sidecar)
+}
+
+fn apply_destructive_filter_to_layer_snapshot(
+    before: LayerStateSnapshot,
+    filter: DestructiveFilterKind,
+) -> anyhow::Result<LayerStateSnapshot> {
+    let mut after = before.clone();
+    let mut changed = false;
+
+    for tile in after.tiles.values_mut() {
+        changed |= apply_destructive_filter_rgba(&mut tile.pixels, filter);
+    }
+
+    if !changed {
+        anyhow::bail!("filter had no visible effect on the active layer")
+    }
+
+    Ok(after)
+}
+
+fn build_psd_import_job_report(imported: &PsdImportResult) -> Option<PsdImportJobReport> {
+    let diagnostics = imported
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| !matches!(diagnostic.severity, PsdImportDiagnosticSeverity::Info))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !imported.used_flattened_fallback && diagnostics.is_empty() {
+        return None;
+    }
+
+    Some(PsdImportJobReport {
+        diagnostics,
+        used_flattened_fallback: imported.used_flattened_fallback,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -486,10 +652,16 @@ fn worker_main(
                     error: error.to_string(),
                 },
             },
-            JobRequest::LoadDocument { job_id, path, kind } => {
+            JobRequest::LoadDocument {
+                job_id,
+                path,
+                kind,
+                psd_import_sidecar,
+            } => {
                 let result = match kind {
                     DocumentLoadKind::Project => load_document_from_path(&path)
-                        .with_context(|| format!("failed to open project from {}", path.display())),
+                        .with_context(|| format!("failed to open project from {}", path.display()))
+                        .map(|document| (document, None, None)),
                     DocumentLoadKind::RasterImport => match raster_format_from_path(&path) {
                         Some(RasterFileFormat::Png) => import_png_from_path(&path),
                         Some(RasterFileFormat::Jpeg) => import_jpeg_from_path(&path),
@@ -498,15 +670,37 @@ fn worker_main(
                             "unsupported import format for {}",
                             path.display()
                         )),
-                    },
+                    }
+                    .map(|document| (document, None, None)),
+                    DocumentLoadKind::PsdImport => psd_import_sidecar.map_or_else(
+                        || {
+                            Err(anyhow::anyhow!(
+                                "PSD import sidecar is not configured; set {} to an executable path",
+                                PSD_IMPORT_SIDECAR_PATH_ENV
+                            ))
+                        },
+                        |sidecar| {
+                            import_psd_from_path_with_sidecar(&path, &sidecar)
+                                .with_context(|| format!("failed to import PSD from {}", path.display()))
+                                .map(|imported| {
+                                    let psd_import_report = build_psd_import_job_report(&imported);
+                                    let import_notice = imported
+                                        .used_flattened_fallback
+                                        .then(|| "flattened PSD fallback used".to_string());
+                                    (imported.document, import_notice, psd_import_report)
+                                })
+                        },
+                    ),
                 };
 
                 match result {
-                    Ok(document) => JobResult::DocumentLoaded {
+                    Ok((document, import_notice, psd_import_report)) => JobResult::DocumentLoaded {
                         job_id,
                         path,
                         kind,
                         document,
+                        import_notice,
+                        psd_import_report,
                     },
                     Err(error) => JobResult::DocumentLoadFailed {
                         job_id,
@@ -542,6 +736,25 @@ fn worker_main(
                     },
                 }
             },
+            JobRequest::ApplyDestructiveFilter {
+                job_id,
+                layer_id,
+                filter,
+                before,
+            } => match apply_destructive_filter_to_layer_snapshot(before.clone(), filter) {
+                Ok(after) => JobResult::DestructiveFilterApplied {
+                    job_id,
+                    layer_id,
+                    filter,
+                    before,
+                    after,
+                },
+                Err(error) => JobResult::DestructiveFilterFailed {
+                    job_id,
+                    filter,
+                    error: error.to_string(),
+                },
+            },
         };
 
         if result_sender.send(result).is_err() {
@@ -557,6 +770,16 @@ impl PhotoTuxController {
     }
 
     fn new_with_working_directory(working_directory: PathBuf) -> Self {
+        Self::new_with_working_directory_and_psd_sidecar(
+            working_directory,
+            default_psd_import_sidecar(),
+        )
+    }
+
+    fn new_with_working_directory_and_psd_sidecar(
+        working_directory: PathBuf,
+        psd_import_sidecar: Option<PsdImportSidecar>,
+    ) -> Self {
         let mut document = Document::new(1920, 1080);
         document.rename_layer(0, "Background");
         let background_tile = document
@@ -597,6 +820,9 @@ impl PhotoTuxController {
             recovery_path: None,
             recovery_offer_pending: false,
             working_directory,
+            psd_import_sidecar,
+            latest_import_report: None,
+            next_import_report_id: 1,
             next_layer_number: 4,
             active_tool: ShellToolKind::Brush,
             canvas_revision: 1,
@@ -608,6 +834,7 @@ impl PhotoTuxController {
             pending_recovery_load_job: None,
             pending_document_load_job: None,
             pending_export_job: None,
+            pending_filter_job: None,
             jobs: JobSystem::new(),
             cached_canvas_raster: None,
             transform_session: None,
@@ -616,6 +843,7 @@ impl PhotoTuxController {
             temporary_snap_bypass: false,
             pressure_size_enabled: false,
             pressure_opacity_enabled: false,
+            active_brush_preset: Some(BrushPreset::BalancedRound),
             brush_radius: 12.0,
             brush_hardness: 0.72,
             brush_spacing: 5.0,
@@ -633,6 +861,13 @@ impl PhotoTuxController {
 
     fn active_layer_name(&self) -> String {
         self.document.active_layer().name.clone()
+    }
+
+    fn can_apply_destructive_filters(&self) -> bool {
+        self.pending_filter_job.is_none()
+            && self.transform_session.is_none()
+            && self.document.active_edit_target() == LayerEditTarget::LayerPixels
+            && self.document.layer(self.document.active_layer_index()).is_some()
     }
 
     fn selection_path_points(&self) -> Option<Vec<(i32, i32)>> {
@@ -838,6 +1073,65 @@ impl PhotoTuxController {
         self.canvas_revision = self.canvas_revision.saturating_add(1);
     }
 
+    fn clear_latest_import_report(&mut self) {
+        self.latest_import_report = None;
+    }
+
+    fn shell_import_report_for_path(
+        &mut self,
+        path: &Path,
+        report: PsdImportJobReport,
+    ) -> ShellImportReport {
+        let report_id = self.next_import_report_id;
+        self.next_import_report_id = self.next_import_report_id.saturating_add(1);
+
+        let title = if report.used_flattened_fallback {
+            "PSD Imported As Flattened Composite".to_string()
+        } else {
+            "PSD Imported With Warnings".to_string()
+        };
+        let summary = if report.used_flattened_fallback {
+            format!(
+                "PhotoTux imported {} as a flattened composite because the source exceeded the current editable layered PSD subset.",
+                path.display()
+            )
+        } else {
+            format!(
+                "PhotoTux imported {}, but some PSD features were not preserved as editable PhotoTux structure.",
+                path.display()
+            )
+        };
+        let diagnostics = report
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                let severity_label = match diagnostic.severity {
+                    PsdImportDiagnosticSeverity::Info => "Info",
+                    PsdImportDiagnosticSeverity::Warning => "Warning",
+                    PsdImportDiagnosticSeverity::Error => "Error",
+                    PsdImportDiagnosticSeverity::Other => "Notice",
+                }
+                .to_string();
+                let message = match diagnostic.source_index {
+                    Some(source_index) => format!("Source layer {}: {}", source_index, diagnostic.message),
+                    None => diagnostic.message,
+                };
+                ShellImportDiagnostic {
+                    severity_label,
+                    code: diagnostic.code,
+                    message,
+                }
+            })
+            .collect();
+
+        ShellImportReport {
+            id: report_id,
+            title,
+            summary,
+            diagnostics,
+        }
+    }
+
     fn current_brush_settings(&self, mode: BrushToolMode) -> BrushSettings {
         BrushSettings {
             radius: self.brush_radius,
@@ -852,6 +1146,22 @@ impl PhotoTuxController {
             pressure_size_enabled: self.pressure_size_enabled,
             pressure_opacity_enabled: self.pressure_opacity_enabled,
         }
+    }
+
+    fn clear_active_brush_preset(&mut self) {
+        self.active_brush_preset = None;
+    }
+
+    fn apply_brush_preset(&mut self, preset: BrushPreset) {
+        let (radius, hardness, spacing, flow, pressure_size_enabled, pressure_opacity_enabled) = preset.settings();
+        self.brush_radius = radius;
+        self.brush_hardness = hardness;
+        self.brush_spacing = spacing;
+        self.brush_flow = flow;
+        self.pressure_size_enabled = pressure_size_enabled;
+        self.pressure_opacity_enabled = pressure_opacity_enabled;
+        self.active_brush_preset = Some(preset);
+        self.status_message = format!("Brush preset {}", preset.label());
     }
 
     fn apply_active_layer_stroke_segment(
@@ -1386,6 +1696,8 @@ impl PhotoTuxController {
                 path,
                 kind,
                 document,
+                import_notice,
+                psd_import_report,
             } => {
                 if self.pending_document_load_job == Some(job_id) {
                     self.pending_document_load_job = None;
@@ -1396,6 +1708,7 @@ impl PhotoTuxController {
 
                     match kind {
                         DocumentLoadKind::Project => {
+                            self.clear_latest_import_report();
                             let document_title = path
                                 .file_name()
                                 .and_then(|name| name.to_str())
@@ -1413,11 +1726,21 @@ impl PhotoTuxController {
                                 format!("Opened {}", path.display()),
                             );
                         }
-                        DocumentLoadKind::RasterImport => {
+                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
+                            self.clear_latest_import_report();
                             let stem = path
                                 .file_stem()
                                 .and_then(|name| name.to_str())
                                 .unwrap_or("imported");
+                            let history_label = match kind {
+                                DocumentLoadKind::RasterImport => "Import Image",
+                                DocumentLoadKind::PsdImport => "Import PSD",
+                                DocumentLoadKind::Project => unreachable!("project handled above"),
+                            };
+                            let status_message = match import_notice {
+                                Some(notice) => format!("Imported {} ({})", path.display(), notice),
+                                None => format!("Imported {}", path.display()),
+                            };
                             self.replace_document_after_load(
                                 document,
                                 format!("{}.{}", stem, PROJECT_FILE_EXTENSION),
@@ -1426,9 +1749,14 @@ impl PhotoTuxController {
                                 true,
                                 true,
                                 Some(Instant::now()),
-                                "Import Image",
-                                format!("Imported {}", path.display()),
+                                history_label,
+                                status_message,
                             );
+                            if let Some(psd_import_report) = psd_import_report {
+                                self.latest_import_report = Some(
+                                    self.shell_import_report_for_path(&path, psd_import_report),
+                                );
+                            }
                         }
                     }
                 }
@@ -1444,7 +1772,9 @@ impl PhotoTuxController {
                     tracing::error!(%error, path = %path.display(), ?kind, "document load failed");
                     self.status_message = match kind {
                         DocumentLoadKind::Project => format!("Open failed: {}", error),
-                        DocumentLoadKind::RasterImport => format!("Import failed: {}", error),
+                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
+                            format!("Import failed: {}", error)
+                        }
                     };
                 }
             }
@@ -1469,6 +1799,57 @@ impl PhotoTuxController {
                     self.status_message = format!("Export failed: {}", error);
                 }
             }
+            JobResult::DestructiveFilterApplied {
+                job_id,
+                layer_id,
+                filter,
+                before,
+                after,
+            } => {
+                if self.pending_filter_job.as_ref().map(|pending| pending.job_id) == Some(job_id) {
+                    let requested_canvas_revision = self
+                        .pending_filter_job
+                        .as_ref()
+                        .map(|pending| pending.requested_canvas_revision)
+                        .unwrap_or(self.canvas_revision);
+                    self.pending_filter_job = None;
+
+                    if self.canvas_revision != requested_canvas_revision {
+                        self.status_message = format!(
+                            "{} discarded because the document changed before it finished",
+                            filter.label()
+                        );
+                        return;
+                    }
+
+                    if self.document.apply_layer_state_snapshot(layer_id, after.clone()) {
+                        self.bump_canvas_revision();
+                        self.mark_document_dirty();
+                        self.push_operation(
+                            format!("Filter {}", filter.label()),
+                            EditorOperation::DestructiveFilter(DestructiveFilterRecord {
+                                layer_id,
+                                filter,
+                                before,
+                                after,
+                            }),
+                        );
+                        self.status_message = format!("Applied {}", filter.label());
+                    } else {
+                        self.status_message = format!("{} failed: layer is no longer available", filter.label());
+                    }
+                }
+            }
+            JobResult::DestructiveFilterFailed {
+                job_id,
+                filter,
+                error,
+            } => {
+                if self.pending_filter_job.as_ref().map(|pending| pending.job_id) == Some(job_id) {
+                    self.pending_filter_job = None;
+                    self.status_message = format!("{} failed: {}", filter.label(), error);
+                }
+            }
         }
     }
 
@@ -1480,6 +1861,7 @@ impl PhotoTuxController {
         if self.pending_primary_save_job.is_none()
             && self.pending_recovery_load_job.is_none()
             && self.pending_document_load_job.is_none()
+            && self.pending_filter_job.is_none()
             && self.dirty_since_autosave
             && self.pending_autosave_job.is_none()
             && self
@@ -1617,6 +1999,7 @@ impl ShellController for PhotoTuxController {
             recovery_offer_pending: self.recovery_offer_pending,
             recovery_path: self.recovery_path.clone(),
             status_message: self.status_message.clone(),
+            latest_import_report: self.latest_import_report.clone(),
             canvas_size: self.document.canvas_size,
             canvas_revision: self.canvas_revision,
             active_tool_name: self.active_tool.label().to_string(),
@@ -1661,6 +2044,13 @@ impl ShellController for PhotoTuxController {
                 .as_ref()
                 .map(|session| session.rotate_quadrants.rem_euclid(4) as i32 * 90)
                 .unwrap_or(0),
+            can_apply_destructive_filters: self.can_apply_destructive_filters(),
+            filter_job_active: self.pending_filter_job.is_some(),
+            brush_preset_name: self
+                .active_brush_preset
+                .map(BrushPreset::label)
+                .unwrap_or("Custom")
+                .to_string(),
             brush_radius: self.brush_radius.round() as u32,
             brush_hardness_percent: (self.brush_hardness * 100.0).round() as u32,
             brush_spacing: self.brush_spacing.round() as u32,
@@ -2009,6 +2399,7 @@ impl ShellController for PhotoTuxController {
 
     fn toggle_pressure_size_enabled(&mut self) {
         self.pressure_size_enabled = !self.pressure_size_enabled;
+        self.clear_active_brush_preset();
         self.status_message = if self.pressure_size_enabled {
             "Pressure-to-size enabled".to_string()
         } else {
@@ -2018,6 +2409,7 @@ impl ShellController for PhotoTuxController {
 
     fn toggle_pressure_opacity_enabled(&mut self) {
         self.pressure_opacity_enabled = !self.pressure_opacity_enabled;
+        self.clear_active_brush_preset();
         self.status_message = if self.pressure_opacity_enabled {
             "Pressure-to-opacity enabled".to_string()
         } else {
@@ -2027,42 +2419,66 @@ impl ShellController for PhotoTuxController {
 
     fn increase_brush_radius(&mut self) {
         self.brush_radius = (self.brush_radius + 2.0).clamp(1.0, 128.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush radius {} px", self.brush_radius.round() as u32);
     }
 
     fn decrease_brush_radius(&mut self) {
         self.brush_radius = (self.brush_radius - 2.0).clamp(1.0, 128.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush radius {} px", self.brush_radius.round() as u32);
     }
 
     fn increase_brush_hardness(&mut self) {
         self.brush_hardness = (self.brush_hardness + 0.05).clamp(0.0, 1.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush hardness {}%", (self.brush_hardness * 100.0).round() as u32);
     }
 
     fn decrease_brush_hardness(&mut self) {
         self.brush_hardness = (self.brush_hardness - 0.05).clamp(0.0, 1.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush hardness {}%", (self.brush_hardness * 100.0).round() as u32);
     }
 
     fn increase_brush_spacing(&mut self) {
         self.brush_spacing = (self.brush_spacing + 1.0).clamp(1.0, 64.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush spacing {} px", self.brush_spacing.round() as u32);
     }
 
     fn decrease_brush_spacing(&mut self) {
         self.brush_spacing = (self.brush_spacing - 1.0).clamp(1.0, 64.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush spacing {} px", self.brush_spacing.round() as u32);
     }
 
     fn increase_brush_flow(&mut self) {
         self.brush_flow = (self.brush_flow + 0.05).clamp(0.05, 1.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush flow {}%", (self.brush_flow * 100.0).round() as u32);
     }
 
     fn decrease_brush_flow(&mut self) {
         self.brush_flow = (self.brush_flow - 0.05).clamp(0.05, 1.0);
+        self.clear_active_brush_preset();
         self.status_message = format!("Brush flow {}%", (self.brush_flow * 100.0).round() as u32);
+    }
+
+    fn next_brush_preset(&mut self) {
+        let next = self
+            .active_brush_preset
+            .map(BrushPreset::next)
+            .unwrap_or(BrushPreset::BalancedRound);
+        self.apply_brush_preset(next);
+    }
+
+    fn previous_brush_preset(&mut self) {
+        let previous = self
+            .active_brush_preset
+            .map(BrushPreset::previous)
+            .unwrap_or(BrushPreset::InkTaper);
+        self.apply_brush_preset(previous);
     }
 
     fn set_temporary_snap_bypass(&mut self, bypassed: bool) {
@@ -2218,6 +2634,11 @@ impl ShellController for PhotoTuxController {
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
+                EditorOperation::DestructiveFilter(record) => {
+                    record.undo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
             }
         }
     }
@@ -2259,6 +2680,11 @@ impl ShellController for PhotoTuxController {
                 }
                 EditorOperation::LayerHierarchy(record) => {
                     record.redo(self);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
+                EditorOperation::DestructiveFilter(record) => {
+                    record.redo(&mut self.document);
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
@@ -2353,11 +2779,13 @@ impl ShellController for PhotoTuxController {
         }
 
         self.status_message = format!("Opening {}", path.display());
+        self.clear_latest_import_report();
         self.pending_document_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
             JobRequest::LoadDocument {
                 job_id,
                 path,
                 kind: DocumentLoadKind::Project,
+                psd_import_sidecar: None,
             }
         }));
     }
@@ -2368,17 +2796,31 @@ impl ShellController for PhotoTuxController {
             return;
         }
 
-        if raster_format_from_path(&path).is_none() {
-            self.status_message = "Import failed: unsupported image format".to_string();
+        let kind = if raster_format_from_path(&path).is_some() {
+            DocumentLoadKind::RasterImport
+        } else if psd_file_path(&path) {
+            if self.psd_import_sidecar.is_none() {
+                self.status_message = format!(
+                    "Import failed: PSD import sidecar is not configured; set {}",
+                    PSD_IMPORT_SIDECAR_PATH_ENV
+                );
+                return;
+            }
+            DocumentLoadKind::PsdImport
+        } else {
+            self.status_message = "Import failed: unsupported import format".to_string();
             return;
-        }
+        };
 
         self.status_message = format!("Importing {}", path.display());
+        self.clear_latest_import_report();
+        let psd_import_sidecar = self.psd_import_sidecar.clone();
         self.pending_document_load_job = Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
             JobRequest::LoadDocument {
                 job_id,
                 path,
-                kind: DocumentLoadKind::RasterImport,
+                kind,
+                psd_import_sidecar,
             }
         }));
     }
@@ -2404,6 +2846,43 @@ impl ShellController for PhotoTuxController {
                 format,
             }
         }));
+    }
+
+    fn apply_destructive_filter(&mut self, filter: DestructiveFilterKind) {
+        if self.pending_filter_job.is_some() {
+            self.status_message = "Another filter is already in progress".to_string();
+            return;
+        }
+        if self.transform_session.is_some() {
+            self.status_message = "Commit or cancel the active transform before applying a filter".to_string();
+            return;
+        }
+        if self.document.active_edit_target() != LayerEditTarget::LayerPixels {
+            self.status_message = "Destructive filters currently apply to layer pixels only".to_string();
+            return;
+        }
+
+        let layer_index = self.document.active_layer_index();
+        let layer_id = self.document.active_layer().id;
+        let Some(before) = self.document.layer_state_snapshot(layer_index) else {
+            self.status_message = format!("{} failed: active layer is unavailable", filter.label());
+            return;
+        };
+
+        let requested_canvas_revision = self.canvas_revision;
+        self.status_message = format!("Applying {}", filter.label());
+        let pending_job_id = self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
+            JobRequest::ApplyDestructiveFilter {
+                job_id,
+                layer_id,
+                filter,
+                before,
+            }
+        });
+        self.pending_filter_job = Some(PendingFilterJob {
+            job_id: pending_job_id,
+            requested_canvas_revision,
+        });
     }
 
     fn poll_background_tasks(&mut self) {
@@ -2772,12 +3251,17 @@ impl ShellController for PhotoTuxController {
 #[cfg(test)]
 mod tests {
     use super::{PhotoTuxController, AUTOSAVE_IDLE_INTERVAL};
-    use common::CanvasRect;
+    use common::{CanvasRect, DestructiveFilterKind};
     use file_io::{
-        flatten_document_rgba, load_document_from_path,
-        recovery_path_for_project_path, save_document_to_path,
+        export_png_to_path, flatten_document_rgba, load_document_from_path,
+        recovery_path_for_project_path, save_document_to_path, PsdImportSidecar,
     };
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
     use ui_shell::{ShellController, ShellGuide, ShellToolKind};
@@ -2913,6 +3397,160 @@ mod tests {
         document
     }
 
+    fn build_medium_paint_fixture_document() -> doc_model::Document {
+        let mut document = doc_model::Document::new(1024, 768);
+        document.rename_layer(0, "Background");
+
+        for y in 0..96 {
+            for x in 0..96 {
+                set_pixel(&mut document, 0, x, y, [28, 32, 40, 255]);
+            }
+        }
+
+        document.add_layer("Paint");
+        document
+    }
+
+        fn build_supported_psd_import_document() -> doc_model::Document {
+                let mut document = doc_model::Document::new(6, 6);
+                document.rename_layer(0, "Background");
+                for y in 0..3 {
+                        for x in 0..3 {
+                                set_pixel(&mut document, 0, x, y, [20, 40, 80, 255]);
+                        }
+                }
+
+                document.add_layer("Screen Accent");
+                let top_index = document.active_layer_index();
+                document.set_layer_blend_mode(top_index, doc_model::BlendMode::Screen);
+                document.set_layer_opacity(top_index, 50);
+                assert!(document.set_layer_offset(top_index, 2, 1));
+                for y in 0..2 {
+                        for x in 0..2 {
+                                set_pixel(&mut document, top_index, x, y, [240, 180, 100, 255]);
+                        }
+                }
+
+                document
+        }
+
+        fn write_rgba_document_png(path: &Path, width: u32, height: u32, pixels: &[[u8; 4]]) {
+                let mut document = doc_model::Document::new(width, height);
+                for y in 0..height {
+                        for x in 0..width {
+                                let pixel = pixels[(y * width + x) as usize];
+                                if pixel[3] > 0 {
+                                        set_pixel(&mut document, 0, x, y, pixel);
+                                }
+                        }
+                }
+                export_png_to_path(path, &document).expect("PNG asset should be exported");
+        }
+
+        fn supported_psd_manifest_json() -> String {
+                r#"{
+    "manifest_version": 1,
+    "source_kind": "psd",
+    "source_color_mode": "rgb",
+    "source_depth_bits": 8,
+    "canvas": {
+        "width_px": 6,
+        "height_px": 6
+    },
+    "composite": {
+        "available": false,
+        "asset_relpath": null
+    },
+    "diagnostics": [
+        {
+            "severity": "info",
+            "code": "source_loaded",
+            "message": "PSD manifest decoded successfully.",
+            "source_index": null
+        }
+    ],
+    "layers": [
+        {
+            "source_index": 0,
+            "kind": "raster",
+            "name": "Background",
+            "visible": true,
+            "opacity_0_255": 255,
+            "blend_key": "norm",
+            "offset_px": { "x": 0, "y": 0 },
+            "bounds_px": { "left": 0, "top": 0, "width": 3, "height": 3 },
+            "raster_asset_relpath": "layers/000-background.png",
+            "unsupported_features": []
+        },
+        {
+            "source_index": 1,
+            "kind": "raster",
+            "name": "Screen Accent",
+            "visible": true,
+            "opacity_0_255": 128,
+            "blend_key": "scrn",
+            "offset_px": { "x": 2, "y": 1 },
+            "bounds_px": { "left": 2, "top": 1, "width": 2, "height": 2 },
+            "raster_asset_relpath": "layers/001-screen.png",
+            "unsupported_features": []
+        }
+    ]
+}"#
+                        .to_string()
+        }
+
+        #[cfg(unix)]
+        fn write_shell_script(path: &Path, contents: &str) {
+                fs::write(path, contents).expect("shell script should be written");
+                let mut permissions = fs::metadata(path)
+                        .expect("shell script metadata should exist")
+                        .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(path, permissions).expect("shell script permissions should be updated");
+        }
+
+    #[cfg(unix)]
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root should resolve from the app_core crate")
+    }
+
+    #[cfg(unix)]
+    fn repo_psd_fixture_path(file_name: &str) -> PathBuf {
+        repo_root().join("tests/fixtures/psd").join(file_name)
+    }
+
+    #[cfg(unix)]
+    fn repo_psd_sidecar_script_path() -> PathBuf {
+        repo_root()
+            .join("tools/psd_import_sidecar/phototux_psd_sidecar.py")
+    }
+
+    #[cfg(unix)]
+    fn repo_psd_sidecar_runtime_available() -> bool {
+        if !repo_psd_sidecar_script_path().is_file() {
+            return false;
+        }
+
+        match Command::new("python3")
+            .args(["-c", "import psd_tools"])
+            .output()
+        {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("phototux-{prefix}-{}-{nanos}", std::process::id()))
+    }
+
     fn first_group_id(document: &doc_model::Document) -> common::GroupId {
         document
             .layer_hierarchy()
@@ -2924,6 +3562,46 @@ mod tests {
             .expect("expected a top-level group")
     }
 
+        fn flattened_fallback_psd_manifest_json() -> String {
+                r#"{
+    "manifest_version": 1,
+    "source_kind": "psd",
+    "source_color_mode": "rgb",
+    "source_depth_bits": 8,
+    "canvas": {
+        "width_px": 6,
+        "height_px": 6
+    },
+    "composite": {
+        "available": true,
+        "asset_relpath": "composite.png"
+    },
+    "diagnostics": [
+        {
+            "severity": "info",
+            "code": "source_loaded",
+            "message": "PSD manifest decoded successfully.",
+            "source_index": null
+        }
+    ],
+    "layers": [
+        {
+            "source_index": 0,
+            "kind": "text",
+            "name": "Title",
+            "visible": true,
+            "opacity_0_255": 255,
+            "blend_key": "norm",
+            "offset_px": { "x": 1, "y": 1 },
+            "bounds_px": { "left": 1, "top": 1, "width": 4, "height": 2 },
+            "raster_asset_relpath": null,
+            "unsupported_features": ["text_engine_data"]
+        }
+    ]
+}"#
+                        .to_string()
+        }
+
     fn wait_for_background_jobs(controller: &mut PhotoTuxController) {
         for _ in 0..50 {
             controller.poll_background_tasks_at(Instant::now());
@@ -2932,6 +3610,7 @@ mod tests {
                 && controller.pending_recovery_load_job.is_none()
                 && controller.pending_document_load_job.is_none()
                 && controller.pending_export_job.is_none()
+                && controller.pending_filter_job.is_none()
             {
                 return;
             }
@@ -3236,6 +3915,276 @@ mod tests {
     }
 
     #[test]
+    fn psd_import_requires_configured_sidecar() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-psd-missing-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary PSD directory should exist");
+        let source_path = working_directory.join("scene.psd");
+        fs::write(&source_path, b"placeholder psd source").expect("PSD source should be written");
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            None,
+        );
+        controller.import_image(source_path.clone());
+
+        assert!(controller.pending_document_load_job.is_none());
+        assert!(controller.status_message.contains("PSD import sidecar is not configured"));
+
+        fs::remove_file(&source_path).expect("PSD source should be removed");
+        fs::remove_dir(&working_directory).expect("temporary PSD directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_import_roundtrips_through_background_jobs() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-psd-import-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary PSD directory should exist");
+        let fixture_dir = working_directory.join("fixture");
+        fs::create_dir_all(fixture_dir.join("layers")).expect("fixture layers should exist");
+
+        let manifest_path = fixture_dir.join("fixture-manifest.json");
+        fs::write(&manifest_path, supported_psd_manifest_json()).expect("PSD manifest should be written");
+        write_rgba_document_png(
+            &fixture_dir.join("layers/000-background.png"),
+            3,
+            3,
+            &[
+                [20, 40, 80, 255], [20, 40, 80, 255], [20, 40, 80, 255],
+                [20, 40, 80, 255], [20, 40, 80, 255], [20, 40, 80, 255],
+                [20, 40, 80, 255], [20, 40, 80, 255], [20, 40, 80, 255],
+            ],
+        );
+        write_rgba_document_png(
+            &fixture_dir.join("layers/001-screen.png"),
+            2,
+            2,
+            &[
+                [240, 180, 100, 255], [240, 180, 100, 255],
+                [240, 180, 100, 255], [240, 180, 100, 255],
+            ],
+        );
+
+        let source_path = working_directory.join("scene.psd");
+        fs::write(&source_path, b"placeholder psd source").expect("PSD source should be written");
+        let script_path = working_directory.join("psd-sidecar.sh");
+        write_shell_script(
+            &script_path,
+            &format!(
+                "#!/bin/sh\nset -eu\nSOURCE=\"$1\"\nWORKSPACE=\"$2\"\nMANIFEST=\"$3\"\n[ -f \"$SOURCE\" ]\ncp \"{}\" \"$MANIFEST\"\nmkdir -p \"$WORKSPACE/layers\"\ncp \"{}\" \"$WORKSPACE/layers/000-background.png\"\ncp \"{}\" \"$WORKSPACE/layers/001-screen.png\"\n",
+                manifest_path.display(),
+                fixture_dir.join("layers/000-background.png").display(),
+                fixture_dir.join("layers/001-screen.png").display(),
+            ),
+        );
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new(script_path.clone())),
+        );
+        controller.import_image(source_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        let expected = build_supported_psd_import_document();
+        assert_eq!(flatten_document_rgba(&controller.document), flatten_document_rgba(&expected));
+        assert!(controller.document_path.is_none());
+        assert!(controller.dirty_since_primary_save);
+        assert!(controller.dirty_since_autosave);
+        assert!(controller.status_message.contains("Imported"));
+        assert_eq!(controller.snapshot().history_entries, vec!["Import PSD".to_string()]);
+        assert!(controller.snapshot().latest_import_report.is_none());
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_import_surfaces_flattened_fallback_report() {
+        let working_directory = std::env::temp_dir().join(format!("phototux-psd-fallback-{}", std::process::id()));
+        fs::create_dir_all(&working_directory).expect("temporary PSD fallback directory should exist");
+        let fixture_dir = working_directory.join("fixture");
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should exist");
+
+        let manifest_path = fixture_dir.join("fixture-manifest.json");
+        fs::write(&manifest_path, flattened_fallback_psd_manifest_json()).expect("PSD fallback manifest should be written");
+        write_rgba_document_png(
+            &fixture_dir.join("composite.png"),
+            6,
+            6,
+            &[
+                [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+                [0, 0, 0, 0], [30, 40, 60, 255], [30, 40, 60, 255], [30, 40, 60, 255], [30, 40, 60, 255], [0, 0, 0, 0],
+                [0, 0, 0, 0], [30, 40, 60, 255], [50, 80, 120, 255], [50, 80, 120, 255], [30, 40, 60, 255], [0, 0, 0, 0],
+                [0, 0, 0, 0], [30, 40, 60, 255], [50, 80, 120, 255], [50, 80, 120, 255], [30, 40, 60, 255], [0, 0, 0, 0],
+                [0, 0, 0, 0], [30, 40, 60, 255], [30, 40, 60, 255], [30, 40, 60, 255], [30, 40, 60, 255], [0, 0, 0, 0],
+                [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+            ],
+        );
+
+        let source_path = working_directory.join("fallback.psd");
+        fs::write(&source_path, b"placeholder psd source").expect("PSD source should be written");
+        let script_path = working_directory.join("psd-sidecar-fallback.sh");
+        write_shell_script(
+            &script_path,
+            &format!(
+                "#!/bin/sh\nset -eu\nSOURCE=\"$1\"\nWORKSPACE=\"$2\"\nMANIFEST=\"$3\"\n[ -f \"$SOURCE\" ]\ncp \"{}\" \"$MANIFEST\"\ncp \"{}\" \"$WORKSPACE/composite.png\"\n",
+                manifest_path.display(),
+                fixture_dir.join("composite.png").display(),
+            ),
+        );
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new(script_path.clone())),
+        );
+        controller.import_image(source_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(controller.document.layer_count(), 1);
+        assert!(snapshot.status_message.contains("flattened PSD fallback used"));
+        let report = snapshot
+            .latest_import_report
+            .expect("flattened fallback should surface an import report");
+        assert!(report.title.contains("Flattened Composite"));
+        assert!(report.summary.contains("flattened composite"));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unsupported kind")));
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD fallback directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_repo_fixture_supported_layers_import_updates_controller_state() {
+        if !repo_psd_sidecar_runtime_available() {
+            eprintln!("skipping app_core PSD repo fixture import test: python3 with psd_tools is unavailable");
+            return;
+        }
+
+        let working_directory = unique_temp_dir("psd-repo-import");
+        fs::create_dir_all(&working_directory).expect("temporary PSD repo import directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str())),
+        );
+        controller.import_image(repo_psd_fixture_path("supported-simple-layers.psd"));
+        wait_for_background_jobs(&mut controller);
+
+        let expected = build_supported_psd_import_document();
+        let snapshot = controller.snapshot();
+        assert_eq!(flatten_document_rgba(&controller.document), flatten_document_rgba(&expected));
+        assert!(controller.document_path.is_none());
+        assert!(controller.dirty_since_primary_save);
+        assert!(controller.dirty_since_autosave);
+        assert!(snapshot.status_message.contains("Imported"));
+        assert_eq!(snapshot.history_entries, vec!["Import PSD".to_string()]);
+        assert!(snapshot.latest_import_report.is_none());
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD repo import directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_repo_fixture_cmyk_import_surfaces_controller_report() {
+        if !repo_psd_sidecar_runtime_available() {
+            eprintln!("skipping app_core PSD repo fixture CMYK test: python3 with psd_tools is unavailable");
+            return;
+        }
+
+        let working_directory = unique_temp_dir("psd-repo-cmyk");
+        fs::create_dir_all(&working_directory).expect("temporary PSD repo CMYK directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str())),
+        );
+        controller.import_image(repo_psd_fixture_path("unsupported-cmyk-fallback.psd"));
+        wait_for_background_jobs(&mut controller);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(controller.document.layer_count(), 1);
+        assert!(snapshot.status_message.contains("flattened PSD fallback used"));
+        assert_eq!(snapshot.history_entries, vec!["Import PSD".to_string()]);
+        let report = snapshot
+            .latest_import_report
+            .expect("CMYK fallback should surface an import report");
+        assert!(report.title.contains("Flattened Composite"));
+        assert!(report.summary.contains("flattened composite"));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_color_mode"));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "flattened_fallback_used"));
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD repo CMYK directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_repo_fixture_export_roundtrip_matches_imported_document() {
+        if !repo_psd_sidecar_runtime_available() {
+            eprintln!("skipping app_core PSD repo export parity test: python3 with psd_tools is unavailable");
+            return;
+        }
+
+        let working_directory = unique_temp_dir("psd-repo-export");
+        fs::create_dir_all(&working_directory).expect("temporary PSD repo export directory should exist");
+        let export_path = working_directory.join("imported-scene.png");
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str())),
+        );
+        controller.import_image(repo_psd_fixture_path("supported-simple-layers.psd"));
+        wait_for_background_jobs(&mut controller);
+
+        let imported_pixels = flatten_document_rgba(&controller.document);
+        controller.export_document(export_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        let mut import_controller = PhotoTuxController::new();
+        import_controller.import_image(export_path.clone());
+        wait_for_background_jobs(&mut import_controller);
+
+        assert!(export_path.exists());
+        assert!(controller.status_message.contains("Exported"));
+        assert_eq!(flatten_document_rgba(&import_controller.document), imported_pixels);
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD repo export directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_repo_fixture_canvas_raster_matches_flattened_document() {
+        if !repo_psd_sidecar_runtime_available() {
+            eprintln!("skipping app_core PSD repo viewport parity test: python3 with psd_tools is unavailable");
+            return;
+        }
+
+        let working_directory = unique_temp_dir("psd-repo-viewport");
+        fs::create_dir_all(&working_directory).expect("temporary PSD repo viewport directory should exist");
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new("python3").with_arg(repo_psd_sidecar_script_path().as_os_str())),
+        );
+        controller.import_image(repo_psd_fixture_path("supported-simple-layers.psd"));
+        wait_for_background_jobs(&mut controller);
+
+        let viewport_pixels = controller.canvas_raster().pixels;
+        let flattened_pixels = flatten_document_rgba(&controller.document);
+        assert_eq!(viewport_pixels, flattened_pixels);
+
+        fs::remove_dir_all(&working_directory).expect("temporary PSD repo viewport directory should be removed");
+    }
+
+    #[test]
     fn move_interaction_updates_active_layer_bounds() {
         let mut controller = PhotoTuxController::new();
         let before = controller
@@ -3340,6 +4289,166 @@ mod tests {
         assert!(after.brush_hardness_percent < before.brush_hardness_percent);
         assert!(after.brush_spacing > before.brush_spacing);
         assert!(after.brush_flow_percent < before.brush_flow_percent);
+        assert_eq!(after.brush_preset_name, "Custom");
+    }
+
+    #[test]
+    fn brush_presets_switch_and_custom_state_is_tracked() {
+        let mut controller = PhotoTuxController::new();
+
+        assert_eq!(controller.snapshot().brush_preset_name, "Balanced Round");
+
+        controller.next_brush_preset();
+        let soft = controller.snapshot();
+        assert_eq!(soft.brush_preset_name, "Soft Shade");
+        assert_eq!(soft.brush_radius, 24);
+        assert_eq!(soft.brush_hardness_percent, 35);
+        assert_eq!(soft.brush_spacing, 12);
+        assert_eq!(soft.brush_flow_percent, 40);
+        assert!(soft.pressure_size_enabled);
+        assert!(soft.pressure_opacity_enabled);
+
+        controller.previous_brush_preset();
+        assert_eq!(controller.snapshot().brush_preset_name, "Balanced Round");
+
+        controller.increase_brush_radius();
+        assert_eq!(controller.snapshot().brush_preset_name, "Custom");
+
+        controller.previous_brush_preset();
+        let ink = controller.snapshot();
+        assert_eq!(ink.brush_preset_name, "Ink Taper");
+        assert_eq!(ink.brush_radius, 7);
+        assert_eq!(ink.brush_hardness_percent, 100);
+        assert_eq!(ink.brush_spacing, 3);
+        assert_eq!(ink.brush_flow_percent, 28);
+        assert!(ink.pressure_size_enabled);
+        assert!(!ink.pressure_opacity_enabled);
+    }
+
+    #[test]
+    fn pressure_enabled_repeated_strokes_remain_stable_on_medium_canvas() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_medium_paint_fixture_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        controller.select_tool(ShellToolKind::Brush);
+        controller.toggle_pressure_size_enabled();
+        controller.toggle_pressure_opacity_enabled();
+        controller.increase_brush_radius();
+        controller.increase_brush_spacing();
+
+        let baseline = controller.canvas_raster();
+        let stroke_segments = [
+            ((96, 96), (184, 140), (0.22, 0.94)),
+            ((212, 118), (320, 152), (0.35, 1.0)),
+            ((356, 210), (448, 240), (0.28, 0.86)),
+            ((492, 196), (612, 248), (0.42, 0.98)),
+            ((128, 332), (244, 364), (0.30, 0.88)),
+            ((268, 352), (392, 396), (0.25, 0.92)),
+            ((428, 318), (544, 372), (0.46, 1.0)),
+            ((588, 344), (708, 388), (0.32, 0.9)),
+            ((176, 508), (304, 544), (0.24, 0.84)),
+            ((336, 520), (464, 560), (0.4, 0.96)),
+            ((508, 474), (628, 526), (0.27, 0.9)),
+            ((664, 512), (796, 564), (0.38, 1.0)),
+        ];
+
+        for ((start_x, start_y), (end_x, end_y), (start_pressure, end_pressure)) in stroke_segments {
+            ui_shell::ShellController::begin_canvas_interaction_with_pressure(
+                &mut controller,
+                start_x,
+                start_y,
+                start_pressure,
+            );
+            ui_shell::ShellController::update_canvas_interaction_with_pressure(
+                &mut controller,
+                end_x,
+                end_y,
+                end_pressure,
+            );
+            controller.end_canvas_interaction();
+        }
+
+        let painted = controller.canvas_raster();
+        assert_ne!(painted.pixels, baseline.pixels);
+        assert_eq!(painted.pixels, flatten_document_rgba(&controller.document));
+        assert!(controller.document.active_layer().tiles.len() > 0);
+        assert!(controller.document.active_layer().tiles.len() < 64);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(
+            snapshot
+                .history_entries
+                .iter()
+                .filter(|entry| entry.contains("Brush Stroke"))
+                .count(),
+            12
+        );
+        assert!(snapshot.can_undo);
+
+        for _ in 0..12 {
+            controller.undo();
+        }
+        assert_eq!(controller.canvas_raster().pixels, baseline.pixels);
+
+        for _ in 0..12 {
+            controller.redo();
+        }
+        assert_eq!(controller.canvas_raster().pixels, painted.pixels);
+    }
+
+    #[test]
+    fn destructive_filter_runs_through_background_job_and_history() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        let before = controller.canvas_raster();
+
+        controller.apply_destructive_filter(DestructiveFilterKind::InvertColors);
+        assert!(controller.snapshot().filter_job_active);
+        wait_for_background_jobs(&mut controller);
+
+        let after = controller.canvas_raster();
+        assert_ne!(after.pixels, before.pixels);
+        assert_eq!(after.pixels, flatten_document_rgba(&controller.document));
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Filter Invert Colors")));
+
+        controller.undo();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+
+        controller.redo();
+        assert_eq!(controller.canvas_raster().pixels, after.pixels);
+    }
+
+    #[test]
+    fn destructive_filter_result_is_discarded_if_document_changes_mid_job() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        let before = controller.canvas_raster();
+
+        controller.apply_destructive_filter(DestructiveFilterKind::Desaturate);
+        controller.add_layer();
+        wait_for_background_jobs(&mut controller);
+
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.status_message.contains("discarded"));
+    }
+
+    #[test]
+    fn destructive_filter_rejects_mask_edit_target() {
+        let mut controller = PhotoTuxController::new();
+        controller.add_active_layer_mask();
+        controller.edit_active_layer_mask();
+
+        controller.apply_destructive_filter(DestructiveFilterKind::InvertColors);
+
+        assert!(controller.pending_filter_job.is_none());
+        assert_eq!(
+            controller.status_message,
+            "Destructive filters currently apply to layer pixels only"
+        );
     }
 
     #[test]

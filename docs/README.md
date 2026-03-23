@@ -88,6 +88,7 @@ Post-MVP planning references:
 - `post-mvp/tasks/painting-and-input-expressiveness-tasks.md`: End-to-end implementation sequence for painting and input expansion.
 - `post-mvp/plans/text-and-design-tools-plan.md`: Text layers and design-tool expansion planning.
 - `post-mvp/tasks/text-and-design-tools-tasks.md`: End-to-end implementation sequence for text and design tools.
+- `psd-compatibility.md`: User-facing PSD import compatibility, fallback, and non-goals reference.
 
 ## Change Rules
 
