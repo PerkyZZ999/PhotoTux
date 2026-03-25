@@ -1,21 +1,26 @@
 use anyhow::Result;
-use common::{CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId, APP_NAME};
+use common::{APP_NAME, CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    gdk, Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
-    CssProvider, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
-    EventControllerMotion, FileChooserAction, FileChooserNative, FileFilter, GestureDrag,
-    GestureStylus, HeaderBar, Image, Label,
-    MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
-    ResponseType, Separator,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, CssProvider, Dialog,
+    EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
+    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, GestureStylus, HeaderBar, Image,
+    Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
+    ResponseType, Separator, gdk,
 };
-use render_wgpu::{CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportSize, ViewportState};
+use render_wgpu::{
+    CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
+    ViewportSize, ViewportState,
+};
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
+use ui_templates::{build_panel_group_shell, load_info_dialog_template};
+
+mod ui_templates;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
@@ -211,12 +216,22 @@ pub trait ShellController {
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
-    fn begin_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
+    fn begin_canvas_interaction_with_pressure(
+        &mut self,
+        canvas_x: i32,
+        canvas_y: i32,
+        pressure: f32,
+    ) {
         let _ = pressure;
         self.begin_canvas_interaction(canvas_x, canvas_y);
     }
     fn update_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
-    fn update_canvas_interaction_with_pressure(&mut self, canvas_x: i32, canvas_y: i32, pressure: f32) {
+    fn update_canvas_interaction_with_pressure(
+        &mut self,
+        canvas_x: i32,
+        canvas_y: i32,
+        pressure: f32,
+    ) {
         let _ = pressure;
         self.update_canvas_interaction(canvas_x, canvas_y);
     }
@@ -484,11 +499,8 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&rotate_right);
 
-    let commit_transform = build_icon_label_shortcut_button(
-        "check-line.svg",
-        "Commit Transform",
-        Some("Enter"),
-    );
+    let commit_transform =
+        build_icon_label_shortcut_button("check-line.svg", "Commit Transform", Some("Enter"));
     commit_transform.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -500,11 +512,8 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&commit_transform);
 
-    let cancel_transform = build_icon_label_shortcut_button(
-        "close-line.svg",
-        "Cancel Transform",
-        Some("Esc"),
-    );
+    let cancel_transform =
+        build_icon_label_shortcut_button("close-line.svg", "Cancel Transform", Some("Esc"));
     cancel_transform.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -608,7 +617,8 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&remove_mask);
 
-    let toggle_mask = build_icon_label_button("contrast-2-line.svg", "Enable or Disable Layer Mask");
+    let toggle_mask =
+        build_icon_label_button("contrast-2-line.svg", "Enable or Disable Layer Mask");
     toggle_mask.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -682,7 +692,11 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         popover.connect_show(move |_| {
             let snapshot = shell_state.controller.borrow().snapshot();
             let layer_count = snapshot.layers.len();
-            let active_index = snapshot.layers.iter().position(|layer| layer.is_active).unwrap_or(0);
+            let active_index = snapshot
+                .layers
+                .iter()
+                .position(|layer| layer.is_active)
+                .unwrap_or(0);
             let has_multiple_layers = layer_count > 1;
             let has_mask = snapshot.active_layer_has_mask;
 
@@ -739,7 +753,12 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         let clear = clear.clone();
         let invert = invert.clone();
         popover.connect_show(move |_| {
-            let has_selection = shell_state.controller.borrow().snapshot().selection_rect.is_some();
+            let has_selection = shell_state
+                .controller
+                .borrow()
+                .snapshot()
+                .selection_rect
+                .is_some();
             clear.set_sensitive(has_selection);
             invert.set_sensitive(has_selection);
         });
@@ -769,7 +788,8 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&opacity_up);
 
-    let opacity_down = build_icon_label_button("indeterminate-circle-line.svg", "Decrease Layer Opacity");
+    let opacity_down =
+        build_icon_label_button("indeterminate-circle-line.svg", "Decrease Layer Opacity");
     opacity_down.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -881,7 +901,8 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&zoom_in);
 
-    let zoom_out = build_icon_label_shortcut_button("zoom-out-line.svg", "Zoom Out", Some("Ctrl+-"));
+    let zoom_out =
+        build_icon_label_shortcut_button("zoom-out-line.svg", "Zoom Out", Some("Ctrl+-"));
     zoom_out.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
@@ -893,7 +914,8 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&zoom_out);
 
-    let fit = build_icon_label_shortcut_button("fullscreen-line.svg", "Fit To View", Some("Ctrl+0"));
+    let fit =
+        build_icon_label_shortcut_button("fullscreen-line.svg", "Fit To View", Some("Ctrl+0"));
     fit.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
@@ -905,7 +927,8 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&fit);
 
-    let add_horizontal_guide = build_icon_label_button("layout-column-line.svg", "Add Horizontal Guide");
+    let add_horizontal_guide =
+        build_icon_label_button("layout-column-line.svg", "Add Horizontal Guide");
     add_horizontal_guide.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -917,7 +940,8 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&add_horizontal_guide);
 
-    let add_vertical_guide = build_icon_label_button("layout-column-line.svg", "Add Vertical Guide");
+    let add_vertical_guide =
+        build_icon_label_button("layout-column-line.svg", "Add Vertical Guide");
     add_vertical_guide.add_css_class("menu-dropdown-item");
     {
         let controller = shell_state.controller.clone();
@@ -970,21 +994,15 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     button
 }
 
-fn build_file_menu_button(
-    window: &ApplicationWindow,
-    shell_state: Rc<ShellUiState>,
-) -> MenuButton {
+fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> MenuButton {
     let button = MenuButton::builder().label("File").build();
     button.set_has_frame(false);
     button.add_css_class("menu-button");
 
     let (popover, menu) = create_menu_popover(&button);
 
-    let open_project = build_icon_label_shortcut_button(
-        "folder-open-line.svg",
-        "Open Project...",
-        Some("Ctrl+O"),
-    );
+    let open_project =
+        build_icon_label_shortcut_button("folder-open-line.svg", "Open Project...", Some("Ctrl+O"));
     open_project.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
@@ -1022,11 +1040,8 @@ fn build_file_menu_button(
     }
     menu.append(&save);
 
-    let save_as = build_icon_label_shortcut_button(
-        "save-3-line.svg",
-        "Save As...",
-        Some("Ctrl+Shift+S"),
-    );
+    let save_as =
+        build_icon_label_shortcut_button("save-3-line.svg", "Save As...", Some("Ctrl+Shift+S"));
     save_as.add_css_class("menu-dropdown-item");
     {
         let shell_state = shell_state.clone();
@@ -1079,7 +1094,8 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     }
     menu.append(&color_toggle);
 
-    let properties_toggle = build_icon_label_button("equalizer-line.svg", "Toggle Properties Panel");
+    let properties_toggle =
+        build_icon_label_button("equalizer-line.svg", "Toggle Properties Panel");
     properties_toggle.add_css_class("menu-dropdown-item");
     {
         let panel = shell_state.properties_group.clone();
@@ -1149,14 +1165,41 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             let layers_visible = layers_group.is_visible();
             let history_visible = history_group.is_visible();
 
-            set_menu_button_label(&color_toggle, if color_visible { "Hide Color Panel" } else { "Show Color Panel" });
+            set_menu_button_label(
+                &color_toggle,
+                if color_visible {
+                    "Hide Color Panel"
+                } else {
+                    "Show Color Panel"
+                },
+            );
             set_menu_button_label(
                 &properties_toggle,
-                if properties_visible { "Hide Properties Panel" } else { "Show Properties Panel" },
+                if properties_visible {
+                    "Hide Properties Panel"
+                } else {
+                    "Show Properties Panel"
+                },
             );
-            set_menu_button_label(&layers_toggle, if layers_visible { "Hide Layers Panel" } else { "Show Layers Panel" });
-            set_menu_button_label(&history_toggle, if history_visible { "Hide History Panel" } else { "Show History Panel" });
-            show_all.set_sensitive(!(color_visible && properties_visible && layers_visible && history_visible));
+            set_menu_button_label(
+                &layers_toggle,
+                if layers_visible {
+                    "Hide Layers Panel"
+                } else {
+                    "Show Layers Panel"
+                },
+            );
+            set_menu_button_label(
+                &history_toggle,
+                if history_visible {
+                    "Hide History Panel"
+                } else {
+                    "Show History Panel"
+                },
+            );
+            show_all.set_sensitive(
+                !(color_visible && properties_visible && layers_visible && history_visible),
+            );
         });
     }
 
@@ -1269,13 +1312,13 @@ fn choose_path<F>(
     let parent = parent.clone();
 
     dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            if let Some(path) = dialog.file().and_then(|file| file.path()) {
-                if action == FileChooserAction::Save && path.exists() {
-                    confirm_overwrite(&parent, path, on_accept.clone());
-                } else {
-                    on_accept(path);
-                }
+        if response == ResponseType::Accept
+            && let Some(path) = dialog.file().and_then(|file| file.path())
+        {
+            if action == FileChooserAction::Save && path.exists() {
+                confirm_overwrite(&parent, path, on_accept.clone());
+            } else {
+                on_accept(path);
             }
         }
         dialog.destroy();
@@ -1291,7 +1334,10 @@ fn confirm_overwrite(parent: &ApplicationWindow, path: PathBuf, on_accept: Rc<dy
         .message_type(MessageType::Question)
         .buttons(ButtonsType::None)
         .text("Replace existing file?")
-        .secondary_text(format!("{} already exists. Do you want to replace it?", path.display()))
+        .secondary_text(format!(
+            "{} already exists. Do you want to replace it?",
+            path.display()
+        ))
         .build();
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Replace", ResponseType::Accept);
@@ -1312,17 +1358,54 @@ fn show_info_dialog(
     text: &str,
     secondary_text: Option<&str>,
 ) {
-    let dialog = MessageDialog::builder()
+    let template = match load_info_dialog_template() {
+        Ok(template) => template,
+        Err(error) => {
+            tracing::error!(%error, "failed to load info dialog template");
+            let dialog = MessageDialog::builder()
+                .transient_for(parent)
+                .modal(true)
+                .message_type(MessageType::Error)
+                .buttons(ButtonsType::Close)
+                .text("Failed to load dialog UI")
+                .secondary_text(format!(
+                    "{} could not be shown because its UI template failed to load: {}",
+                    title, error
+                ))
+                .build();
+            dialog.set_title(Some(title));
+            dialog.connect_response(|dialog, _| dialog.destroy());
+            dialog.show();
+            return;
+        }
+    };
+
+    template.title_label.set_label(title);
+    template.body_label.set_label(text);
+    let secondary_text = secondary_text.unwrap_or("");
+    template.secondary_label.set_label(secondary_text);
+    template
+        .secondary_label
+        .set_visible(!secondary_text.is_empty());
+
+    let dialog = Dialog::builder()
         .transient_for(parent)
         .modal(true)
-        .message_type(MessageType::Info)
-        .buttons(ButtonsType::Close)
-        .text(text)
-        .secondary_text(secondary_text.unwrap_or(""))
+        .resizable(false)
+        .title(title)
         .build();
-    dialog.set_title(Some(title));
-    dialog.connect_response(|dialog, _| dialog.destroy());
-    dialog.show();
+    dialog.content_area().append(&template.root);
+    {
+        let dialog = dialog.clone();
+        template
+            .close_button
+            .connect_clicked(move |_| dialog.destroy());
+    }
+    dialog.connect_close_request(|dialog| {
+        dialog.destroy();
+        glib::Propagation::Stop
+    });
+    dialog.present();
 }
 
 fn choose_open_project(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
@@ -1357,7 +1440,8 @@ fn choose_export_path(
     controller: Rc<RefCell<dyn ShellController>>,
     extension: &'static str,
 ) {
-    let suggested_name = suggested_export_name(&controller.borrow().snapshot().document_title, extension);
+    let suggested_name =
+        suggested_export_name(&controller.borrow().snapshot().document_title, extension);
     choose_path(
         parent,
         "Export Image",
@@ -1368,13 +1452,18 @@ fn choose_export_path(
             &format!("{}.{}", extension.to_ascii_uppercase(), extension),
             &[&format!("*.{}", extension)],
         )],
-        move |path| controller
-            .borrow_mut()
-            .export_document(ensure_extension(&path, extension)),
+        move |path| {
+            controller
+                .borrow_mut()
+                .export_document(ensure_extension(&path, extension))
+        },
     );
 }
 
-fn choose_save_project_path(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+fn choose_save_project_path(
+    parent: &ApplicationWindow,
+    controller: Rc<RefCell<dyn ShellController>>,
+) {
     choose_save_project_path_with_callback(parent, controller, None);
 }
 
@@ -1409,9 +1498,7 @@ fn choose_save_project_path_with_callback(
     );
 }
 
-fn build_tool_options_bar(
-    controller: Rc<RefCell<dyn ShellController>>,
-) -> (GtkBox, Image, Label) {
+fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox, Image, Label) {
     let bar = GtkBox::new(Orientation::Horizontal, 6);
     bar.add_css_class("tool-options-bar");
 
@@ -1474,22 +1561,42 @@ fn build_left_tool_rail(
     let mut buttons = Vec::new();
 
     for (index, (tool, icon_name, tooltip)) in [
-        (ShellToolKind::Move, "drag-move-line.svg", ShellToolKind::Move.label()),
+        (
+            ShellToolKind::Move,
+            "drag-move-line.svg",
+            ShellToolKind::Move.label(),
+        ),
         (
             ShellToolKind::RectangularMarquee,
             "focus-3-line.svg",
             ShellToolKind::RectangularMarquee.label(),
         ),
-        (ShellToolKind::Lasso, "focus-3-line.svg", ShellToolKind::Lasso.label()),
+        (
+            ShellToolKind::Lasso,
+            "focus-3-line.svg",
+            ShellToolKind::Lasso.label(),
+        ),
         (
             ShellToolKind::Transform,
             "expand-diagonal-2-line.svg",
             ShellToolKind::Transform.label(),
         ),
-        (ShellToolKind::Brush, "brush-2-line.svg", ShellToolKind::Brush.label()),
-        (ShellToolKind::Eraser, "eraser-line.svg", ShellToolKind::Eraser.label()),
+        (
+            ShellToolKind::Brush,
+            "brush-2-line.svg",
+            ShellToolKind::Brush.label(),
+        ),
+        (
+            ShellToolKind::Eraser,
+            "eraser-line.svg",
+            ShellToolKind::Eraser.label(),
+        ),
         (ShellToolKind::Hand, "hand.svg", ShellToolKind::Hand.label()),
-        (ShellToolKind::Zoom, "zoom-in-line.svg", ShellToolKind::Zoom.label()),
+        (
+            ShellToolKind::Zoom,
+            "zoom-in-line.svg",
+            ShellToolKind::Zoom.label(),
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -1692,25 +1799,45 @@ fn build_status_bar() -> (GtkBox, Label, Label, Label, Label, Label) {
     (bar, doc, zoom, cursor, notice, mode)
 }
 
-fn build_panel_group(tabs: &[&str], body: &impl gtk4::prelude::IsA<gtk4::Widget>) -> GtkBox {
-    let group = GtkBox::new(Orientation::Vertical, 0);
-    group.add_css_class("panel-group");
-    group.set_vexpand(true);
+fn build_panel_group(
+    shell_name: &str,
+    tabs: &[&str],
+    body_spacing: i32,
+    body_vexpand: bool,
+) -> (GtkBox, GtkBox) {
+    match build_panel_group_shell(shell_name, tabs, body_spacing, body_vexpand) {
+        Ok(shell) => shell,
+        Err(error) => {
+            tracing::error!(%error, panel = shell_name, "failed to load panel group template");
 
-    let header = GtkBox::new(Orientation::Horizontal, 2);
-    header.add_css_class("panel-group-header");
-    for (index, tab) in tabs.iter().enumerate() {
-        let button = Button::with_label(tab);
-        button.add_css_class("panel-tab");
-        if index == 0 {
-            button.add_css_class("panel-tab-active");
+            let group = GtkBox::new(Orientation::Vertical, 0);
+            group.set_widget_name(&format!("{shell_name}-panel"));
+            group.add_css_class("panel-group");
+            group.set_vexpand(true);
+
+            let header = GtkBox::new(Orientation::Horizontal, 2);
+            header.set_widget_name(&format!("{shell_name}-panel-header"));
+            header.add_css_class("panel-group-header");
+            for (index, tab) in tabs.iter().enumerate() {
+                let button = Button::with_label(tab);
+                button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+                button.add_css_class("panel-tab");
+                if index == 0 {
+                    button.add_css_class("panel-tab-active");
+                }
+                header.append(&button);
+            }
+
+            let body = GtkBox::new(Orientation::Vertical, body_spacing);
+            body.set_widget_name(&format!("{shell_name}-panel-body"));
+            body.add_css_class("panel-group-body");
+            body.set_vexpand(body_vexpand);
+
+            group.append(&header);
+            group.append(&body);
+            (group, body)
         }
-        header.append(&button);
     }
-
-    group.append(&header);
-    group.append(body);
-    group
 }
 
 fn build_color_chip(label_text: &str, css_class: &str) -> Button {
@@ -1781,23 +1908,16 @@ impl ShellUiState {
         let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
         let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
 
-        let color_body = GtkBox::new(Orientation::Vertical, 6);
-        color_body.add_css_class("panel-group-body");
-        let color_group = build_panel_group(&["Color", "Swatches"], &color_body);
+        let (color_group, color_body) =
+            build_panel_group("color", &["Color", "Swatches"], 6, false);
 
-        let properties_body = GtkBox::new(Orientation::Vertical, 4);
-        properties_body.add_css_class("panel-group-body");
-        let properties_group = build_panel_group(&["Properties", "Adjust"], &properties_body);
+        let (properties_group, properties_body) =
+            build_panel_group("properties", &["Properties", "Adjust"], 4, false);
 
-        let layers_body = GtkBox::new(Orientation::Vertical, 4);
-        layers_body.add_css_class("panel-group-body");
-        let layers_group = build_panel_group(&["Layers", "Channels", "Paths"], &layers_body);
+        let (layers_group, layers_body) =
+            build_panel_group("layers", &["Layers", "Channels", "Paths"], 4, false);
 
-        let history_body = GtkBox::new(Orientation::Vertical, 4);
-        history_body.add_css_class("panel-group-body");
-        history_body.set_vexpand(true);
-        let history_group = build_panel_group(&["History"], &history_body);
-        history_group.set_vexpand(true);
+        let (history_group, history_body) = build_panel_group("history", &["History"], 4, true);
 
         let (status_bar, status_doc, status_zoom, status_cursor, status_notice, status_mode) =
             build_status_bar();
@@ -1844,7 +1964,9 @@ impl ShellUiState {
     fn handle_shortcut(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
         let is_control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
         let is_shift = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
-        let key_char = key.to_unicode().map(|character| character.to_ascii_lowercase());
+        let key_char = key
+            .to_unicode()
+            .map(|character| character.to_ascii_lowercase());
 
         if self.automation_shortcuts_enabled && is_control && is_shift {
             if matches!(key, gdk::Key::F1) {
@@ -1859,14 +1981,16 @@ impl ShellUiState {
                 self.controller.borrow_mut().delete_active_layer();
                 return true;
             }
-            if matches!(key, gdk::Key::F4) {
-                if let Some(index) = self.active_layer_index() {
-                    self.controller.borrow_mut().toggle_layer_visibility(index);
-                    return true;
-                }
+            if matches!(key, gdk::Key::F4)
+                && let Some(index) = self.active_layer_index()
+            {
+                self.controller.borrow_mut().toggle_layer_visibility(index);
+                return true;
             }
             if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
-                self.controller.borrow_mut().previous_active_layer_blend_mode();
+                self.controller
+                    .borrow_mut()
+                    .previous_active_layer_blend_mode();
                 return true;
             }
             if matches!(key, gdk::Key::F6 | gdk::Key::bracketright) {
@@ -1877,7 +2001,10 @@ impl ShellUiState {
                 self.controller.borrow_mut().decrease_active_layer_opacity();
                 return true;
             }
-            if matches!(key, gdk::Key::F8 | gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add) {
+            if matches!(
+                key,
+                gdk::Key::F8 | gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add
+            ) {
                 self.controller.borrow_mut().increase_active_layer_opacity();
                 return true;
             }
@@ -2022,14 +2149,38 @@ impl ShellUiState {
         }
 
         match key_char {
-            Some('v') => self.controller.borrow_mut().select_tool(ShellToolKind::Move),
-            Some('m') => self.controller.borrow_mut().select_tool(ShellToolKind::RectangularMarquee),
-            Some('l') => self.controller.borrow_mut().select_tool(ShellToolKind::Lasso),
-            Some('t') => self.controller.borrow_mut().select_tool(ShellToolKind::Transform),
-            Some('b') => self.controller.borrow_mut().select_tool(ShellToolKind::Brush),
-            Some('e') => self.controller.borrow_mut().select_tool(ShellToolKind::Eraser),
-            Some('h') => self.controller.borrow_mut().select_tool(ShellToolKind::Hand),
-            Some('z') => self.controller.borrow_mut().select_tool(ShellToolKind::Zoom),
+            Some('v') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Move),
+            Some('m') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::RectangularMarquee),
+            Some('l') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Lasso),
+            Some('t') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Transform),
+            Some('b') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Brush),
+            Some('e') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Eraser),
+            Some('h') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Hand),
+            Some('z') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Zoom),
             _ => return false,
         }
 
@@ -2081,8 +2232,13 @@ impl ShellUiState {
         dialog.connect_response(move |dialog, response| {
             shell_state.recovery_prompt_visible.set(false);
             match response {
-                ResponseType::Accept => shell_state.controller.borrow_mut().load_recovery_document(),
-                ResponseType::Reject => shell_state.controller.borrow_mut().discard_recovery_document(),
+                ResponseType::Accept => {
+                    shell_state.controller.borrow_mut().load_recovery_document()
+                }
+                ResponseType::Reject => shell_state
+                    .controller
+                    .borrow_mut()
+                    .discard_recovery_document(),
                 _ => {}
             }
             dialog.destroy();
@@ -2120,7 +2276,10 @@ impl ShellUiState {
             match response {
                 ResponseType::Accept => shell_state.request_project_save_for_close(),
                 ResponseType::Reject => {
-                    shell_state.controller.borrow_mut().discard_recovery_document();
+                    shell_state
+                        .controller
+                        .borrow_mut()
+                        .discard_recovery_document();
                     shell_state.allow_close_once.set(true);
                     if let Some(window) = shell_state.window.borrow().as_ref() {
                         window.close();
@@ -2192,7 +2351,11 @@ impl ShellUiState {
         let on_requested: Rc<dyn Fn()> = Rc::new(move || {
             shell_state.pending_close_after_save.set(true);
         });
-        choose_save_project_path_with_callback(&window, self.controller.clone(), Some(on_requested));
+        choose_save_project_path_with_callback(
+            &window,
+            self.controller.clone(),
+            Some(on_requested),
+        );
     }
 
     fn request_project_save(&self) {
@@ -2250,14 +2413,16 @@ impl ShellUiState {
             "Doc: {} x {}",
             snapshot.canvas_size.width, snapshot.canvas_size.height
         ));
-        self.status_zoom.set_label(&format!("Zoom: {}%", zoom_percent));
+        self.status_zoom
+            .set_label(&format!("Zoom: {}%", zoom_percent));
         self.status_cursor.set_label(&shell_status_hint(&snapshot));
         self.status_notice.set_label(&shell_notice_text(&snapshot));
         apply_status_notice_style(&self.status_notice, &shell_notice_text(&snapshot));
         self.status_mode.set_label("RGB/8");
 
         if snapshot_changed {
-            self.tool_options_label.set_label(&snapshot.active_tool_name);
+            self.tool_options_label
+                .set_label(&snapshot.active_tool_name);
             self.tool_options_icon
                 .set_from_file(Some(remix_icon_path(shell_tool_icon(snapshot.active_tool))));
             self.refresh_tool_buttons(&snapshot);
@@ -2284,7 +2449,8 @@ impl ShellUiState {
         }
 
         let should_prompt_recovery = current_snapshot.recovery_offer_pending
-            && self.prompted_recovery_path.borrow().as_ref() != current_snapshot.recovery_path.as_ref();
+            && self.prompted_recovery_path.borrow().as_ref()
+                != current_snapshot.recovery_path.as_ref();
         if should_prompt_recovery && !self.recovery_prompt_visible.get() {
             self.prompted_recovery_path
                 .replace(current_snapshot.recovery_path.clone());
@@ -2345,7 +2511,10 @@ impl ShellUiState {
         let editing_mask = snapshot.active_edit_target_name == "Layer Mask";
         for row in [
             format!("Tool: {}", snapshot.active_tool_name),
-            format!("Tool Shortcut: {}", shell_tool_shortcut(snapshot.active_tool)),
+            format!(
+                "Tool Shortcut: {}",
+                shell_tool_shortcut(snapshot.active_tool)
+            ),
             format!("Layer: {}", snapshot.active_layer_name),
             format!("Selection: {}", snapshot.selected_structure_name),
             format!("Edit Target: {}", snapshot.active_edit_target_name),
@@ -2353,7 +2522,11 @@ impl ShellUiState {
             format!("Opacity: {}%", snapshot.active_layer_opacity_percent),
             format!(
                 "Visible: {}",
-                if snapshot.active_layer_visible { "Yes" } else { "No" }
+                if snapshot.active_layer_visible {
+                    "Yes"
+                } else {
+                    "No"
+                }
             ),
             format!(
                 "Mask: {}",
@@ -2411,7 +2584,11 @@ impl ShellUiState {
         target_strip.append(&layer_chip);
 
         let mask_chip = build_target_chip(
-            if snapshot.active_layer_mask_enabled { "Mask" } else { "Mask Off" },
+            if snapshot.active_layer_mask_enabled {
+                "Mask"
+            } else {
+                "Mask Off"
+            },
             "Edit this layer's mask",
             editing_mask,
             snapshot.active_layer_has_mask,
@@ -2448,7 +2625,11 @@ impl ShellUiState {
                 ),
                 format!(
                     "Selection Mode: {}",
-                    if snapshot.selection_inverted { "Inverted" } else { "Normal" }
+                    if snapshot.selection_inverted {
+                        "Inverted"
+                    } else {
+                        "Normal"
+                    }
                 ),
             ] {
                 let label = Label::new(Some(&row));
@@ -2473,8 +2654,16 @@ impl ShellUiState {
             let guides_label = Label::new(Some(&format!(
                 "Guides: {} ({}) | Snapping {}",
                 snapshot.guide_count,
-                if snapshot.guides_visible { "Visible" } else { "Hidden" },
-                if snapshot.snapping_enabled { "On" } else { "Off" }
+                if snapshot.guides_visible {
+                    "Visible"
+                } else {
+                    "Hidden"
+                },
+                if snapshot.snapping_enabled {
+                    "On"
+                } else {
+                    "Off"
+                }
             )));
             guides_label.set_xalign(0.0);
             guides_label.add_css_class("panel-row");
@@ -2487,7 +2676,8 @@ impl ShellUiState {
         opacity_down.set_tooltip_text(Some("Decrease active layer opacity"));
         {
             let controller = self.controller.clone();
-            opacity_down.connect_clicked(move |_| controller.borrow_mut().decrease_active_layer_opacity());
+            opacity_down
+                .connect_clicked(move |_| controller.borrow_mut().decrease_active_layer_opacity());
         }
         controls.append(&opacity_down);
 
@@ -2496,7 +2686,8 @@ impl ShellUiState {
         opacity_up.set_tooltip_text(Some("Increase active layer opacity"));
         {
             let controller = self.controller.clone();
-            opacity_up.connect_clicked(move |_| controller.borrow_mut().increase_active_layer_opacity());
+            opacity_up
+                .connect_clicked(move |_| controller.borrow_mut().increase_active_layer_opacity());
         }
         controls.append(&opacity_up);
         self.properties_body.append(&controls);
@@ -2507,7 +2698,9 @@ impl ShellUiState {
         blend_prev.set_tooltip_text(Some("Previous blend mode"));
         {
             let controller = self.controller.clone();
-            blend_prev.connect_clicked(move |_| controller.borrow_mut().previous_active_layer_blend_mode());
+            blend_prev.connect_clicked(move |_| {
+                controller.borrow_mut().previous_active_layer_blend_mode()
+            });
         }
         blend_controls.append(&blend_prev);
 
@@ -2516,7 +2709,8 @@ impl ShellUiState {
         blend_next.set_tooltip_text(Some("Next blend mode"));
         {
             let controller = self.controller.clone();
-            blend_next.connect_clicked(move |_| controller.borrow_mut().next_active_layer_blend_mode());
+            blend_next
+                .connect_clicked(move |_| controller.borrow_mut().next_active_layer_blend_mode());
         }
         blend_controls.append(&blend_next);
         self.properties_body.append(&blend_controls);
@@ -2532,12 +2726,18 @@ impl ShellUiState {
         }
         mask_controls.append(&add_mask);
 
-        let toggle_mask = Button::with_label(if snapshot.active_layer_mask_enabled { "Mask Off" } else { "Mask On" });
+        let toggle_mask = Button::with_label(if snapshot.active_layer_mask_enabled {
+            "Mask Off"
+        } else {
+            "Mask On"
+        });
         toggle_mask.add_css_class("tool-chip");
         toggle_mask.set_sensitive(snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
-            toggle_mask.connect_clicked(move |_| controller.borrow_mut().toggle_active_layer_mask_enabled());
+            toggle_mask.connect_clicked(move |_| {
+                controller.borrow_mut().toggle_active_layer_mask_enabled()
+            });
         }
         mask_controls.append(&toggle_mask);
 
@@ -2546,7 +2746,8 @@ impl ShellUiState {
         remove_mask.set_sensitive(snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
-            remove_mask.connect_clicked(move |_| controller.borrow_mut().remove_active_layer_mask());
+            remove_mask
+                .connect_clicked(move |_| controller.borrow_mut().remove_active_layer_mask());
         }
         mask_controls.append(&remove_mask);
         self.properties_body.append(&mask_controls);
@@ -2557,7 +2758,8 @@ impl ShellUiState {
         edit_pixels.set_sensitive(snapshot.active_edit_target_name != "Layer Pixels");
         {
             let controller = self.controller.clone();
-            edit_pixels.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_pixels());
+            edit_pixels
+                .connect_clicked(move |_| controller.borrow_mut().edit_active_layer_pixels());
         }
         target_controls.append(&edit_pixels);
 
@@ -2642,7 +2844,8 @@ impl ShellUiState {
         hardness_down.add_css_class("tool-chip");
         {
             let controller = self.controller.clone();
-            hardness_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_hardness());
+            hardness_down
+                .connect_clicked(move |_| controller.borrow_mut().decrease_brush_hardness());
         }
         brush_controls_row_one.append(&hardness_down);
 
@@ -2703,7 +2906,8 @@ impl ShellUiState {
         pressure_size.set_tooltip_text(Some("Toggle pressure-to-size mapping"));
         {
             let controller = self.controller.clone();
-            pressure_size.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_size_enabled());
+            pressure_size
+                .connect_clicked(move |_| controller.borrow_mut().toggle_pressure_size_enabled());
         }
         pressure_controls.append(&pressure_size);
 
@@ -2716,7 +2920,9 @@ impl ShellUiState {
         pressure_opacity.set_tooltip_text(Some("Toggle pressure-to-opacity mapping"));
         {
             let controller = self.controller.clone();
-            pressure_opacity.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_opacity_enabled());
+            pressure_opacity.connect_clicked(move |_| {
+                controller.borrow_mut().toggle_pressure_opacity_enabled()
+            });
         }
         pressure_controls.append(&pressure_opacity);
 
@@ -2740,7 +2946,11 @@ impl ShellUiState {
         }
         guide_controls.append(&add_v_guide);
 
-        let toggle_guides = Button::with_label(if snapshot.guides_visible { "Hide Guides" } else { "Show Guides" });
+        let toggle_guides = Button::with_label(if snapshot.guides_visible {
+            "Hide Guides"
+        } else {
+            "Show Guides"
+        });
         toggle_guides.add_css_class("tool-chip");
         {
             let controller = self.controller.clone();
@@ -2757,11 +2967,16 @@ impl ShellUiState {
         }
         guide_controls.append(&remove_guide);
 
-        let toggle_snapping = Button::with_label(if snapshot.snapping_enabled { "Snap On" } else { "Snap Off" });
+        let toggle_snapping = Button::with_label(if snapshot.snapping_enabled {
+            "Snap On"
+        } else {
+            "Snap Off"
+        });
         toggle_snapping.add_css_class("tool-chip");
         {
             let controller = self.controller.clone();
-            toggle_snapping.connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
+            toggle_snapping
+                .connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
         }
         guide_controls.append(&toggle_snapping);
         self.properties_body.append(&guide_controls);
@@ -2771,7 +2986,8 @@ impl ShellUiState {
         let begin_transform = Button::with_label("Start Xform");
         begin_transform.add_css_class("tool-chip");
         begin_transform.set_tooltip_text(Some("Start transform (T)"));
-        begin_transform.set_sensitive(snapshot.active_layer_bounds.is_some() && !snapshot.transform_active);
+        begin_transform
+            .set_sensitive(snapshot.active_layer_bounds.is_some() && !snapshot.transform_active);
         {
             let controller = self.controller.clone();
             begin_transform.connect_clicked(move |_| controller.borrow_mut().begin_transform());
@@ -2910,11 +3126,19 @@ impl ShellUiState {
             ("Out Group", LayerAction::MoveOutOfGroup),
             ("+ Mask", LayerAction::AddMask),
             (
-                if snapshot.active_layer_mask_enabled { "Mask Off" } else { "Mask On" },
+                if snapshot.active_layer_mask_enabled {
+                    "Mask Off"
+                } else {
+                    "Mask On"
+                },
                 LayerAction::ToggleMask,
             ),
             (
-                if snapshot.active_edit_target_name == "Layer Mask" { "Edit Layer" } else { "Edit Mask" },
+                if snapshot.active_edit_target_name == "Layer Mask" {
+                    "Edit Layer"
+                } else {
+                    "Edit Mask"
+                },
                 LayerAction::ToggleMaskTarget,
             ),
             ("Up", LayerAction::MoveUp),
@@ -2924,13 +3148,21 @@ impl ShellUiState {
             button.add_css_class("tool-chip");
             button.add_css_class("layer-action-chip");
             match action {
-                LayerAction::AddGroup => button.set_sensitive(snapshot.can_create_group_from_active_layer),
+                LayerAction::AddGroup => {
+                    button.set_sensitive(snapshot.can_create_group_from_active_layer)
+                }
                 LayerAction::Ungroup => button.set_sensitive(snapshot.can_ungroup_selected_group),
-                LayerAction::MoveIntoGroup => button.set_sensitive(snapshot.can_move_active_layer_into_selected_group),
-                LayerAction::MoveOutOfGroup => button.set_sensitive(snapshot.can_move_active_layer_out_of_group),
+                LayerAction::MoveIntoGroup => {
+                    button.set_sensitive(snapshot.can_move_active_layer_into_selected_group)
+                }
+                LayerAction::MoveOutOfGroup => {
+                    button.set_sensitive(snapshot.can_move_active_layer_out_of_group)
+                }
                 LayerAction::AddMask => button.set_sensitive(!snapshot.active_layer_has_mask),
                 LayerAction::ToggleMask => button.set_sensitive(snapshot.active_layer_has_mask),
-                LayerAction::ToggleMaskTarget => button.set_sensitive(snapshot.active_layer_has_mask),
+                LayerAction::ToggleMaskTarget => {
+                    button.set_sensitive(snapshot.active_layer_has_mask)
+                }
                 _ => {}
             }
             let controller = self.controller.clone();
@@ -2940,10 +3172,16 @@ impl ShellUiState {
                 LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
                 LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
                 LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
-                LayerAction::MoveIntoGroup => controller.borrow_mut().move_active_layer_into_selected_group(),
-                LayerAction::MoveOutOfGroup => controller.borrow_mut().move_active_layer_out_of_group(),
+                LayerAction::MoveIntoGroup => controller
+                    .borrow_mut()
+                    .move_active_layer_into_selected_group(),
+                LayerAction::MoveOutOfGroup => {
+                    controller.borrow_mut().move_active_layer_out_of_group()
+                }
                 LayerAction::AddMask => controller.borrow_mut().add_active_layer_mask(),
-                LayerAction::ToggleMask => controller.borrow_mut().toggle_active_layer_mask_enabled(),
+                LayerAction::ToggleMask => {
+                    controller.borrow_mut().toggle_active_layer_mask_enabled()
+                }
                 LayerAction::ToggleMaskTarget => {
                     let mut controller = controller.borrow_mut();
                     let snapshot = controller.snapshot();
@@ -2962,7 +3200,11 @@ impl ShellUiState {
 
         for layer in &snapshot.layers {
             let row = GtkBox::new(Orientation::Horizontal, 4);
-            row.add_css_class(if layer.is_selected { "layer-row-active" } else { "layer-row" });
+            row.add_css_class(if layer.is_selected {
+                "layer-row-active"
+            } else {
+                "layer-row"
+            });
             row.set_margin_start((layer.depth as i32) * 14);
             if layer.mask_target_active {
                 row.add_css_class("layer-row-mask-target");
@@ -2984,25 +3226,34 @@ impl ShellUiState {
             visibility.add_css_class("layer-visibility-button");
             if let Some(index) = layer.index {
                 let controller = self.controller.clone();
-                visibility.connect_clicked(move |_| controller.borrow_mut().toggle_layer_visibility(index));
+                visibility.connect_clicked(move |_| {
+                    controller.borrow_mut().toggle_layer_visibility(index)
+                });
             } else if let Some(group_id) = layer.group_id {
                 let controller = self.controller.clone();
-                visibility.connect_clicked(move |_| controller.borrow_mut().toggle_group_visibility(group_id));
+                visibility.connect_clicked(move |_| {
+                    controller.borrow_mut().toggle_group_visibility(group_id)
+                });
             }
             row.append(&visibility);
 
             if layer.is_group {
                 let target_strip = GtkBox::new(Orientation::Horizontal, 3);
                 target_strip.add_css_class("layer-target-strip");
-                let group_chip = build_target_chip("G", "Select this group", layer.is_selected, true);
+                let group_chip =
+                    build_target_chip("G", "Select this group", layer.is_selected, true);
                 if let Some(group_id) = layer.group_id {
                     let controller = self.controller.clone();
-                    group_chip.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
+                    group_chip
+                        .connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
                 }
                 target_strip.append(&group_chip);
                 row.append(&target_strip);
 
-                let select = Button::with_label(&format!("{}  ({}%) [Group]", layer.name, layer.opacity_percent));
+                let select = Button::with_label(&format!(
+                    "{}  ({}%) [Group]",
+                    layer.name, layer.opacity_percent
+                ));
                 select.add_css_class("layer-select-button");
                 if layer.is_selected {
                     select.add_css_class("layer-select-button-active");
@@ -3038,15 +3289,15 @@ impl ShellUiState {
                     layer.mask_target_active,
                     layer.has_mask,
                 );
-                if layer.has_mask {
-                    if let Some(index) = layer.index {
-                        let controller = self.controller.clone();
-                        mask_target.connect_clicked(move |_| {
-                            let mut controller = controller.borrow_mut();
-                            controller.select_layer(index);
-                            controller.edit_active_layer_mask();
-                        });
-                    }
+                if layer.has_mask
+                    && let Some(index) = layer.index
+                {
+                    let controller = self.controller.clone();
+                    mask_target.connect_clicked(move |_| {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(index);
+                        controller.edit_active_layer_mask();
+                    });
                 }
                 target_strip.append(&mask_target);
                 row.append(&target_strip);
@@ -3059,14 +3310,15 @@ impl ShellUiState {
                     } else {
                         "  [Mask Editing Off]".to_string()
                     }
+                } else if layer.mask_enabled {
+                    "  [Mask]".to_string()
                 } else {
-                    if layer.mask_enabled {
-                        "  [Mask]".to_string()
-                    } else {
-                        "  [Mask Off]".to_string()
-                    }
+                    "  [Mask Off]".to_string()
                 };
-                let select = Button::with_label(&format!("{}  ({}%){}", layer.name, layer.opacity_percent, mask_suffix));
+                let select = Button::with_label(&format!(
+                    "{}  ({}%){}",
+                    layer.name, layer.opacity_percent, mask_suffix
+                ));
                 select.add_css_class("layer-select-button");
                 if layer.is_selected {
                     select.add_css_class("layer-select-button-active");
@@ -3137,8 +3389,7 @@ fn remix_icon_path(icon_name: &str) -> PathBuf {
 }
 
 fn logo_icon_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/logo/Logo_01.png")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/logo/Logo_01.png")
 }
 
 fn build_logo_icon(alt_text: &str, size: i32) -> Image {
@@ -3175,7 +3426,11 @@ fn build_icon_label_button(icon_name: &str, label: &str) -> Button {
     build_icon_label_shortcut_button(icon_name, label, None)
 }
 
-fn build_icon_label_shortcut_button(icon_name: &str, label: &str, shortcut: Option<&str>) -> Button {
+fn build_icon_label_shortcut_button(
+    icon_name: &str,
+    label: &str,
+    shortcut: Option<&str>,
+) -> Button {
     let button = Button::new();
     button.set_has_frame(false);
     button.set_hexpand(true);
@@ -3204,19 +3459,22 @@ fn build_icon_label_shortcut_button(icon_name: &str, label: &str, shortcut: Opti
 }
 
 fn set_menu_button_label(button: &Button, label: &str) {
-    if let Some(content) = button.child().and_downcast::<GtkBox>() {
-        if let Some(widget) = content.first_child() {
-            let mut current = widget.next_sibling();
-            while let Some(child) = current {
-                if let Ok(text) = child.clone().downcast::<Label>() {
-                    if text.css_classes().iter().any(|class_name| class_name == "icon-label-text") {
-                        text.set_label(label);
-                        button.set_tooltip_text(Some(label));
-                        break;
-                    }
-                }
-                current = child.next_sibling();
+    if let Some(content) = button.child().and_downcast::<GtkBox>()
+        && let Some(widget) = content.first_child()
+    {
+        let mut current = widget.next_sibling();
+        while let Some(child) = current {
+            if let Ok(text) = child.clone().downcast::<Label>()
+                && text
+                    .css_classes()
+                    .iter()
+                    .any(|class_name| class_name == "icon-label-text")
+            {
+                text.set_label(label);
+                button.set_tooltip_text(Some(label));
+                break;
             }
+            current = child.next_sibling();
         }
     }
 }
@@ -3230,7 +3488,11 @@ fn create_menu_popover(button: &MenuButton) -> (Popover, GtkBox) {
     let anchor = button.clone();
     popover.connect_show(move |popover| {
         let button_width = anchor.width().max(1);
-        let visible_width = popover.child().map(|child| child.width()).unwrap_or(220).max(220);
+        let visible_width = popover
+            .child()
+            .map(|child| child.width())
+            .unwrap_or(220)
+            .max(220);
         let offset_x = ((visible_width - button_width) / 2).max(0);
         popover.set_offset(offset_x, 0);
     });
@@ -3268,9 +3530,15 @@ fn shell_tool_shortcut(tool: ShellToolKind) -> &'static str {
 }
 
 fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
-    let tool_hint = format!("Tool: {} ({})", snapshot.active_tool_name, shell_tool_shortcut(snapshot.active_tool));
-    if matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser)
-        && (snapshot.pressure_size_enabled || snapshot.pressure_opacity_enabled)
+    let tool_hint = format!(
+        "Tool: {} ({})",
+        snapshot.active_tool_name,
+        shell_tool_shortcut(snapshot.active_tool)
+    );
+    if matches!(
+        snapshot.active_tool,
+        ShellToolKind::Brush | ShellToolKind::Eraser
+    ) && (snapshot.pressure_size_enabled || snapshot.pressure_opacity_enabled)
     {
         return format!(
             "{} | Radius {} | Hardness {}% | Spacing {} | Flow {}% | Pressure {}{}",
@@ -3279,15 +3547,26 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
             snapshot.brush_hardness_percent,
             snapshot.brush_spacing,
             snapshot.brush_flow_percent,
-            if snapshot.pressure_size_enabled { "size" } else { "" },
+            if snapshot.pressure_size_enabled {
+                "size"
+            } else {
+                ""
+            },
             if snapshot.pressure_opacity_enabled {
-                if snapshot.pressure_size_enabled { " + opacity" } else { "opacity" }
+                if snapshot.pressure_size_enabled {
+                    " + opacity"
+                } else {
+                    "opacity"
+                }
             } else {
                 ""
             }
         );
     }
-    if matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser) {
+    if matches!(
+        snapshot.active_tool,
+        ShellToolKind::Brush | ShellToolKind::Eraser
+    ) {
         return format!(
             "{} | Radius {} | Hardness {}% | Spacing {} | Flow {}%",
             tool_hint,
@@ -3298,14 +3577,21 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
         );
     }
     if snapshot.active_edit_target_name == "Layer Mask" {
-        return format!("{} | Editing mask | Brush hides | Eraser reveals", tool_hint);
+        return format!(
+            "{} | Editing mask | Brush hides | Eraser reveals",
+            tool_hint
+        );
     }
     if snapshot.transform_active {
         if snapshot.snapping_enabled {
             return format!(
                 "{} | Enter commit | Esc cancel | Snap {} | Hold Shift bypass",
                 tool_hint,
-                if snapshot.snapping_temporarily_bypassed { "bypassed" } else { "on" }
+                if snapshot.snapping_temporarily_bypassed {
+                    "bypassed"
+                } else {
+                    "on"
+                }
             );
         }
         return format!("{} | Enter commit | Esc cancel", tool_hint);
@@ -3314,7 +3600,11 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
         return format!(
             "{} | Snap {} | Hold Shift bypass",
             tool_hint,
-            if snapshot.snapping_temporarily_bypassed { "bypassed" } else { "on" }
+            if snapshot.snapping_temporarily_bypassed {
+                "bypassed"
+            } else {
+                "on"
+            }
         );
     }
     if snapshot.selection_rect.is_some() {
@@ -3461,14 +3751,19 @@ fn wire_window_close_request(window: &ApplicationWindow, shell_state: Rc<ShellUi
     });
 }
 
-fn build_canvas_host(controller: Rc<RefCell<dyn ShellController>>) -> (Picture, Rc<RefCell<CanvasHostState>>) {
+fn build_canvas_host(
+    controller: Rc<RefCell<dyn ShellController>>,
+) -> (Picture, Rc<RefCell<CanvasHostState>>) {
     let picture = Picture::new();
     picture.set_hexpand(true);
     picture.set_vexpand(true);
     picture.set_can_shrink(true);
     picture.add_css_class("frame");
 
-    let state = Rc::new(RefCell::new(CanvasHostState::new(picture.clone(), controller)));
+    let state = Rc::new(RefCell::new(CanvasHostState::new(
+        picture.clone(),
+        controller,
+    )));
     wire_canvas_motion(&picture, state.clone());
     wire_canvas_drag(&picture, state.clone());
     wire_canvas_stylus(&picture, state.clone());
@@ -3513,16 +3808,24 @@ fn wire_canvas_drag(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
     {
         let state = state.clone();
         drag.connect_drag_begin(move |gesture, start_x, start_y| {
-            let bypass = gesture.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
-            state.borrow_mut().begin_drag(start_x as f32, start_y as f32, bypass);
+            let bypass = gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::SHIFT_MASK);
+            state
+                .borrow_mut()
+                .begin_drag(start_x as f32, start_y as f32, bypass);
         });
     }
 
     {
         let state = state.clone();
         drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-            let bypass = gesture.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
-            state.borrow_mut().drag_to(offset_x as f32, offset_y as f32, bypass);
+            let bypass = gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::SHIFT_MASK);
+            state
+                .borrow_mut()
+                .drag_to(offset_x as f32, offset_y as f32, bypass);
         });
     }
 
@@ -3556,14 +3859,18 @@ fn wire_canvas_stylus(picture: &Picture, state: Rc<RefCell<CanvasHostState>>) {
     {
         let state = state.clone();
         stylus.connect_down(move |gesture, _, _| {
-            state.borrow_mut().set_pointer_pressure(stylus_pressure(gesture));
+            state
+                .borrow_mut()
+                .set_pointer_pressure(stylus_pressure(gesture));
         });
     }
 
     {
         let state = state.clone();
         stylus.connect_motion(move |gesture, _, _| {
-            state.borrow_mut().set_pointer_pressure(stylus_pressure(gesture));
+            state
+                .borrow_mut()
+                .set_pointer_pressure(stylus_pressure(gesture));
         });
     }
 
@@ -3686,7 +3993,7 @@ impl CanvasHostState {
         let logical_width = self.picture.width().max(0) as u32;
         let logical_height = self.picture.height().max(0) as u32;
 
-        // If the layout isn't fully calculated by GTK yet (often sizes like 0 or 1 on boot), 
+        // If the layout isn't fully calculated by GTK yet (often sizes like 0 or 1 on boot),
         // wait before trying to fit the canvas view, otherwise it starts massively zoomed out.
         if logical_width <= 1 || logical_height <= 1 {
             return;
@@ -3770,9 +4077,11 @@ impl CanvasHostState {
         match renderer.render(
             self.canvas_size,
             self.viewport_state,
-            logical_width,
-            logical_height,
-            scale_factor,
+            ViewportRendererConfig {
+                width: logical_width,
+                height: logical_height,
+                scale_factor,
+            },
             self.canvas_raster.as_ref(),
             &overlays,
             &overlay_paths,
@@ -3810,10 +4119,16 @@ impl CanvasHostState {
             | ShellToolKind::Brush
             | ShellToolKind::Eraser => {
                 let (canvas_x, canvas_y) = self.screen_to_canvas(start_x, start_y);
-                self.controller.borrow_mut().set_temporary_snap_bypass(snap_bypass);
                 self.controller
                     .borrow_mut()
-                    .begin_canvas_interaction_with_pressure(canvas_x, canvas_y, self.pointer_pressure);
+                    .set_temporary_snap_bypass(snap_bypass);
+                self.controller
+                    .borrow_mut()
+                    .begin_canvas_interaction_with_pressure(
+                        canvas_x,
+                        canvas_y,
+                        self.pointer_pressure,
+                    );
             }
             _ => {}
         }
@@ -3837,11 +4152,18 @@ impl CanvasHostState {
             | ShellToolKind::Eraser => {
                 if let Some((start_x, start_y)) = self.drag_start_screen {
                     self.update_hover_position(start_x + offset_x, start_y + offset_y);
-                    let (canvas_x, canvas_y) = self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
-                    self.controller.borrow_mut().set_temporary_snap_bypass(snap_bypass);
+                    let (canvas_x, canvas_y) =
+                        self.screen_to_canvas(start_x + offset_x, start_y + offset_y);
                     self.controller
                         .borrow_mut()
-                        .update_canvas_interaction_with_pressure(canvas_x, canvas_y, self.pointer_pressure);
+                        .set_temporary_snap_bypass(snap_bypass);
+                    self.controller
+                        .borrow_mut()
+                        .update_canvas_interaction_with_pressure(
+                            canvas_x,
+                            canvas_y,
+                            self.pointer_pressure,
+                        );
                     self.dirty = true;
                     self.tick();
                 }
@@ -3853,7 +4175,9 @@ impl CanvasHostState {
     fn end_drag(&mut self) {
         self.drag_origin_pan = None;
         self.drag_start_screen = None;
-        self.controller.borrow_mut().set_temporary_snap_bypass(false);
+        self.controller
+            .borrow_mut()
+            .set_temporary_snap_bypass(false);
         self.controller.borrow_mut().end_canvas_interaction();
         self.dirty = true;
         self.tick();
@@ -3889,7 +4213,10 @@ impl CanvasHostState {
     }
 
     fn build_active_brush_preview_paths(&self, snapshot: &ShellSnapshot) -> Vec<CanvasOverlayPath> {
-        if !matches!(snapshot.active_tool, ShellToolKind::Brush | ShellToolKind::Eraser) {
+        if !matches!(
+            snapshot.active_tool,
+            ShellToolKind::Brush | ShellToolKind::Eraser
+        ) {
             return Vec::new();
         }
 
@@ -3922,7 +4249,8 @@ impl CanvasHostState {
 
     fn zoom(&mut self, delta_y: f64, focal_x: f32, focal_y: f32) {
         let zoom_factor = if delta_y < 0.0 { 1.1 } else { 1.0 / 1.1 };
-        self.viewport_state.zoom_towards(zoom_factor, focal_x, focal_y);
+        self.viewport_state
+            .zoom_towards(zoom_factor, focal_x, focal_y);
         self.dirty = true;
         self.tick();
     }
@@ -3930,7 +4258,8 @@ impl CanvasHostState {
     fn zoom_in(&mut self) {
         let width = self.picture.width().max(1) as f32;
         let height = self.picture.height().max(1) as f32;
-        self.viewport_state.zoom_towards(1.1, width * 0.5, height * 0.5);
+        self.viewport_state
+            .zoom_towards(1.1, width * 0.5, height * 0.5);
         self.dirty = true;
         self.tick();
     }
@@ -3938,7 +4267,8 @@ impl CanvasHostState {
     fn zoom_out(&mut self) {
         let width = self.picture.width().max(1) as f32;
         let height = self.picture.height().max(1) as f32;
-        self.viewport_state.zoom_towards(1.0 / 1.1, width * 0.5, height * 0.5);
+        self.viewport_state
+            .zoom_towards(1.0 / 1.1, width * 0.5, height * 0.5);
         self.dirty = true;
         self.tick();
     }
@@ -3971,8 +4301,10 @@ impl CanvasHostState {
     }
 
     fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> (i32, i32) {
-        let canvas_x = ((screen_x - self.viewport_state.pan_x) / self.viewport_state.zoom).round() as i32;
-        let canvas_y = ((screen_y - self.viewport_state.pan_y) / self.viewport_state.zoom).round() as i32;
+        let canvas_x =
+            ((screen_x - self.viewport_state.pan_x) / self.viewport_state.zoom).round() as i32;
+        let canvas_y =
+            ((screen_y - self.viewport_state.pan_y) / self.viewport_state.zoom).round() as i32;
         (canvas_x, canvas_y)
     }
 }
@@ -4037,12 +4369,18 @@ fn build_brush_preview_paths(
 
     let crosshair_extent = (radius * 0.35).clamp(2.0, 8.0).round() as i32;
     paths.push(CanvasOverlayPath {
-        points: vec![(center.0 - crosshair_extent, center.1), (center.0 + crosshair_extent, center.1)],
+        points: vec![
+            (center.0 - crosshair_extent, center.1),
+            (center.0 + crosshair_extent, center.1),
+        ],
         stroke_rgba: brush_preview_detail_color(tool),
         closed: false,
     });
     paths.push(CanvasOverlayPath {
-        points: vec![(center.0, center.1 - crosshair_extent), (center.0, center.1 + crosshair_extent)],
+        points: vec![
+            (center.0, center.1 - crosshair_extent),
+            (center.0, center.1 + crosshair_extent),
+        ],
         stroke_rgba: brush_preview_detail_color(tool),
         closed: false,
     });
@@ -4301,6 +4639,30 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .tool-options-icon {
     margin-left: 2px;
+}
+
+.template-dialog-content {
+    min-width: 420px;
+}
+
+.template-dialog-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #f2f4f7;
+}
+
+.template-dialog-body,
+.template-dialog-secondary {
+    color: #d0d4da;
+    line-height: 1.35;
+}
+
+.template-dialog-secondary {
+    color: #b7bec7;
+}
+
+.template-dialog-actions {
+    margin-top: 6px;
 }
 
 .workspace-body {
@@ -4785,9 +5147,9 @@ paned > separator:hover {
 #[cfg(test)]
 mod tests {
     use super::{
-        brush_preview_radius, build_brush_preview_paths, format_import_report_details,
-        shell_status_hint, LayerPanelItem, ShellGuide, ShellImportDiagnostic,
-        ShellImportReport, ShellSnapshot, ShellToolKind,
+        LayerPanelItem, ShellGuide, ShellImportDiagnostic, ShellImportReport, ShellSnapshot,
+        ShellToolKind, brush_preview_radius, build_brush_preview_paths,
+        format_import_report_details, shell_status_hint,
     };
     use common::CanvasSize;
 
@@ -4898,4 +5260,3 @@ mod tests {
         assert!(details.contains("Warning: Source layer 1"));
     }
 }
-

@@ -179,15 +179,13 @@ impl OffscreenCanvasRenderer {
         &self,
         canvas_size: CanvasSize,
         viewport_state: ViewportState,
-        logical_width: u32,
-        logical_height: u32,
-        scale_factor: f64,
+        config: ViewportRendererConfig,
         canvas_raster: Option<&CanvasRaster>,
         overlays: &[CanvasOverlayRect],
         overlay_paths: &[CanvasOverlayPath],
     ) -> Result<CanvasFrame> {
-        let physical_width = ((logical_width as f64 * scale_factor).round() as u32).max(1);
-        let physical_height = ((logical_height as f64 * scale_factor).round() as u32).max(1);
+        let physical_width = ((config.width as f64 * config.scale_factor).round() as u32).max(1);
+        let physical_height = ((config.height as f64 * config.scale_factor).round() as u32).max(1);
         let bytes_per_row = physical_width * 4;
         let padded_bytes_per_row = align_to(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer_size = padded_bytes_per_row as u64 * physical_height as u64;
@@ -197,15 +195,20 @@ impl OffscreenCanvasRenderer {
             canvas_size: [canvas_size.width as f32, canvas_size.height as f32],
             zoom: viewport_state.zoom,
             _pad0: 0.0,
-            pan: [viewport_state.pan_x * scale_factor as f32, viewport_state.pan_y * scale_factor as f32],
+            pan: [
+                viewport_state.pan_x * config.scale_factor as f32,
+                viewport_state.pan_y * config.scale_factor as f32,
+            ],
             _pad1: [0.0, 0.0],
         };
 
-        let uniform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("PhotoTux Canvas Uniform Buffer"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("PhotoTux Canvas Uniform Buffer"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PhotoTux Canvas Bind Group"),
@@ -320,7 +323,7 @@ impl OffscreenCanvasRenderer {
                 physical_width,
                 physical_height,
                 viewport_state,
-                scale_factor as f32,
+                config.scale_factor as f32,
                 canvas_raster,
             );
         }
@@ -330,7 +333,7 @@ impl OffscreenCanvasRenderer {
             physical_width,
             physical_height,
             viewport_state,
-            scale_factor as f32,
+            config.scale_factor as f32,
             overlays,
         );
         draw_overlay_paths(
@@ -338,7 +341,7 @@ impl OffscreenCanvasRenderer {
             physical_width,
             physical_height,
             viewport_state,
-            scale_factor as f32,
+            config.scale_factor as f32,
             overlay_paths,
         );
 
@@ -361,8 +364,12 @@ fn draw_canvas_raster(
 ) {
     let left = (viewport_state.pan_x * scale_factor).round() as i32;
     let top = (viewport_state.pan_y * scale_factor).round() as i32;
-    let canvas_width = (canvas_raster.size.width as f32 * viewport_state.zoom).round().max(1.0) as i32;
-    let canvas_height = (canvas_raster.size.height as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let canvas_width = (canvas_raster.size.width as f32 * viewport_state.zoom)
+        .round()
+        .max(1.0) as i32;
+    let canvas_height = (canvas_raster.size.height as f32 * viewport_state.zoom)
+        .round()
+        .max(1.0) as i32;
     let right = left + canvas_width;
     let bottom = top + canvas_height;
 
@@ -378,7 +385,8 @@ fn draw_canvas_raster(
                 continue;
             }
 
-            let source_index = ((source_y as u32 * canvas_raster.size.width + source_x as u32) * 4) as usize;
+            let source_index =
+                ((source_y as u32 * canvas_raster.size.width + source_x as u32) * 4) as usize;
             blend_overlay_pixel(
                 pixels,
                 frame_width,
@@ -404,7 +412,14 @@ fn draw_overlay_rects(
     overlays: &[CanvasOverlayRect],
 ) {
     for overlay in overlays {
-        draw_overlay_rect(pixels, frame_width, frame_height, viewport_state, scale_factor, *overlay);
+        draw_overlay_rect(
+            pixels,
+            frame_width,
+            frame_height,
+            viewport_state,
+            scale_factor,
+            *overlay,
+        );
     }
 }
 
@@ -416,10 +431,16 @@ fn draw_overlay_rect(
     scale_factor: f32,
     overlay: CanvasOverlayRect,
 ) {
-    let left = (viewport_state.pan_x * scale_factor + overlay.rect.x as f32 * viewport_state.zoom).round() as i32;
-    let top = (viewport_state.pan_y * scale_factor + overlay.rect.y as f32 * viewport_state.zoom).round() as i32;
-    let width = (overlay.rect.width as f32 * viewport_state.zoom).round().max(1.0) as i32;
-    let height = (overlay.rect.height as f32 * viewport_state.zoom).round().max(1.0) as i32;
+    let left = (viewport_state.pan_x * scale_factor + overlay.rect.x as f32 * viewport_state.zoom)
+        .round() as i32;
+    let top = (viewport_state.pan_y * scale_factor + overlay.rect.y as f32 * viewport_state.zoom)
+        .round() as i32;
+    let width = (overlay.rect.width as f32 * viewport_state.zoom)
+        .round()
+        .max(1.0) as i32;
+    let height = (overlay.rect.height as f32 * viewport_state.zoom)
+        .round()
+        .max(1.0) as i32;
     let right = left + width;
     let bottom = top + height;
 
@@ -477,8 +498,10 @@ fn draw_overlay_path(
         .iter()
         .map(|&(x, y)| {
             (
-                (viewport_state.pan_x * scale_factor + x as f32 * viewport_state.zoom).round() as i32,
-                (viewport_state.pan_y * scale_factor + y as f32 * viewport_state.zoom).round() as i32,
+                (viewport_state.pan_x * scale_factor + x as f32 * viewport_state.zoom).round()
+                    as i32,
+                (viewport_state.pan_y * scale_factor + y as f32 * viewport_state.zoom).round()
+                    as i32,
             )
         })
         .collect::<Vec<_>>();
@@ -492,10 +515,8 @@ fn draw_overlay_path(
             pixels,
             frame_width,
             frame_height,
-            segment[0].0,
-            segment[0].1,
-            segment[1].0,
-            segment[1].1,
+            segment[0],
+            segment[1],
             overlay.stroke_rgba,
         );
     }
@@ -505,16 +526,12 @@ fn draw_overlay_line(
     pixels: &mut [u8],
     frame_width: u32,
     frame_height: u32,
-    start_x: i32,
-    start_y: i32,
-    end_x: i32,
-    end_y: i32,
+    start: (i32, i32),
+    end: (i32, i32),
     rgba: [u8; 4],
 ) {
-    let mut x0 = start_x;
-    let mut y0 = start_y;
-    let x1 = end_x;
-    let y1 = end_y;
+    let (mut x0, mut y0) = start;
+    let (x1, y1) = end;
     let delta_x = (x1 - x0).abs();
     let step_x = if x0 < x1 { 1 } else { -1 };
     let delta_y = -(y1 - y0).abs();
@@ -663,8 +680,8 @@ impl ViewportState {
 #[cfg(test)]
 mod tests {
     use super::{
-        draw_canvas_raster, draw_overlay_paths, draw_overlay_rects, CanvasOverlayPath,
-        CanvasOverlayRect, ViewportSize, ViewportState,
+        CanvasOverlayPath, CanvasOverlayRect, ViewportSize, ViewportState, draw_canvas_raster,
+        draw_overlay_paths, draw_overlay_rects,
     };
     use common::{CanvasRaster, CanvasRect, CanvasSize};
 
@@ -697,7 +714,10 @@ mod tests {
 
     #[test]
     fn fit_canvas_centers_content_in_viewport() {
-        let state = ViewportState::fit_canvas(CanvasSize::new(1000, 500), ViewportSize::new(2000.0, 1000.0));
+        let state = ViewportState::fit_canvas(
+            CanvasSize::new(1000, 500),
+            ViewportSize::new(2000.0, 1000.0),
+        );
 
         assert_eq!(state.zoom, 2.0);
         assert_eq!(state.pan_x, 0.0);
@@ -706,7 +726,10 @@ mod tests {
 
     #[test]
     fn fit_canvas_preserves_centering_when_aspect_ratios_differ() {
-        let state = ViewportState::fit_canvas(CanvasSize::new(1000, 500), ViewportSize::new(1200.0, 1200.0));
+        let state = ViewportState::fit_canvas(
+            CanvasSize::new(1000, 500),
+            ViewportSize::new(1200.0, 1200.0),
+        );
 
         assert!((state.zoom - 1.2).abs() < 0.001);
         assert!((state.pan_x - 0.0).abs() < 0.001);

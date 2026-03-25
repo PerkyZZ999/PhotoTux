@@ -31,152 +31,93 @@ impl BrushDab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushTileContext {
+    pub tile_size: u32,
+    pub tile_origin_x: i32,
+    pub tile_origin_y: i32,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub clip_rect: Option<CanvasRect>,
+    pub clip_inverted: bool,
+}
+
+impl BrushTileContext {
+    pub fn new(
+        tile_size: u32,
+        tile_origin_x: i32,
+        tile_origin_y: i32,
+        center_x: f32,
+        center_y: f32,
+    ) -> Self {
+        Self {
+            tile_size,
+            tile_origin_x,
+            tile_origin_y,
+            center_x,
+            center_y,
+            clip_rect: None,
+            clip_inverted: false,
+        }
+    }
+
+    pub fn with_clip(mut self, clip_rect: Option<CanvasRect>, clip_inverted: bool) -> Self {
+        self.clip_rect = clip_rect;
+        self.clip_inverted = clip_inverted;
+        self
+    }
+}
+
 pub fn apply_round_brush_dab(
     tile_pixels: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
 ) -> bool {
-    apply_round_brush_dab_clipped(
-        tile_pixels,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        None,
-        false,
-    )
+    apply_round_brush_dab_clipped(tile_pixels, context.with_clip(None, false), dab)
 }
 
 pub fn apply_round_mask_hide_dab_clipped(
     tile_alpha: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
-    apply_round_mask_dab(
-        tile_alpha,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        false,
-        clip_rect,
-        clip_inverted,
-    )
+    apply_round_mask_dab(tile_alpha, context, dab, false)
 }
 
 pub fn apply_round_mask_reveal_dab_clipped(
     tile_alpha: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
-    apply_round_mask_dab(
-        tile_alpha,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        true,
-        clip_rect,
-        clip_inverted,
-    )
+    apply_round_mask_dab(tile_alpha, context, dab, true)
 }
 
 pub fn apply_round_brush_dab_clipped(
     tile_pixels: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
-    apply_round_dab(
-        tile_pixels,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        BrushBlendMode::Paint,
-        clip_rect,
-        clip_inverted,
-    )
+    apply_round_dab(tile_pixels, context, dab, BrushBlendMode::Paint)
 }
 
 pub fn apply_round_eraser_dab(
     tile_pixels: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
 ) -> bool {
-    apply_round_eraser_dab_clipped(
-        tile_pixels,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        None,
-        false,
-    )
+    apply_round_eraser_dab_clipped(tile_pixels, context.with_clip(None, false), dab)
 }
 
 pub fn apply_round_eraser_dab_clipped(
     tile_pixels: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
-    apply_round_dab(
-        tile_pixels,
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        dab,
-        BrushBlendMode::Erase,
-        clip_rect,
-        clip_inverted,
-    )
+    apply_round_dab(tile_pixels, context, dab, BrushBlendMode::Erase)
 }
 
 pub fn apply_destructive_filter_rgba(pixels: &mut [u8], filter: DestructiveFilterKind) -> bool {
-    if pixels.len() % 4 != 0 {
+    if !pixels.len().is_multiple_of(4) {
         return false;
     }
 
@@ -194,10 +135,9 @@ pub fn apply_destructive_filter_rgba(pixels: &mut [u8], filter: DestructiveFilte
                 rgba[2] = 255_u8.saturating_sub(rgba[2]);
             }
             DestructiveFilterKind::Desaturate => {
-                let luminance = (rgba[0] as f32 * 0.299
-                    + rgba[1] as f32 * 0.587
-                    + rgba[2] as f32 * 0.114)
-                    .round() as u8;
+                let luminance =
+                    (rgba[0] as f32 * 0.299 + rgba[1] as f32 * 0.587 + rgba[2] as f32 * 0.114)
+                        .round() as u8;
                 rgba[0] = luminance;
                 rgba[1] = luminance;
                 rgba[2] = luminance;
@@ -212,16 +152,19 @@ pub fn apply_destructive_filter_rgba(pixels: &mut [u8], filter: DestructiveFilte
 
 fn apply_round_dab(
     tile_pixels: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
     blend_mode: BrushBlendMode,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
+    let BrushTileContext {
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        clip_rect,
+        clip_inverted,
+    } = context;
     if tile_pixels.len() != tile_size as usize * tile_size as usize * 4 || dab.radius <= 0.0 {
         return false;
     }
@@ -281,7 +224,12 @@ fn apply_round_dab(
             let local_y = (canvas_y - tile_origin_y) as usize;
             let index = (local_y * tile_size as usize + local_x) * 4;
 
-            blend_pixel(&mut tile_pixels[index..index + 4], dab.color, alpha, blend_mode);
+            blend_pixel(
+                &mut tile_pixels[index..index + 4],
+                dab.color,
+                alpha,
+                blend_mode,
+            );
             changed = true;
         }
     }
@@ -291,16 +239,19 @@ fn apply_round_dab(
 
 fn apply_round_mask_dab(
     tile_alpha: &mut [u8],
-    tile_size: u32,
-    tile_origin_x: i32,
-    tile_origin_y: i32,
-    center_x: f32,
-    center_y: f32,
+    context: BrushTileContext,
     dab: BrushDab,
     reveal: bool,
-    clip_rect: Option<CanvasRect>,
-    clip_inverted: bool,
 ) -> bool {
+    let BrushTileContext {
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        center_x,
+        center_y,
+        clip_rect,
+        clip_inverted,
+    } = context;
     if tile_alpha.len() != tile_size as usize * tile_size as usize || dab.radius <= 0.0 {
         return false;
     }
@@ -373,14 +324,20 @@ fn apply_round_mask_dab(
     changed
 }
 
-fn pixel_is_within_clip(pixel_x: i32, pixel_y: i32, clip_rect: Option<CanvasRect>, clip_inverted: bool) -> bool {
+fn pixel_is_within_clip(
+    pixel_x: i32,
+    pixel_y: i32,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+) -> bool {
     let Some(clip_rect) = clip_rect else {
         return true;
     };
 
     let right = clip_rect.x + clip_rect.width as i32;
     let bottom = clip_rect.y + clip_rect.height as i32;
-    let inside = pixel_x >= clip_rect.x && pixel_x < right && pixel_y >= clip_rect.y && pixel_y < bottom;
+    let inside =
+        pixel_x >= clip_rect.x && pixel_x < right && pixel_y >= clip_rect.y && pixel_y < bottom;
     inside != clip_inverted
 }
 
@@ -414,9 +371,9 @@ fn erase_pixel(destination: &mut [u8], alpha: f32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_destructive_filter_rgba, apply_round_brush_dab, apply_round_brush_dab_clipped,
-        apply_round_eraser_dab, apply_round_eraser_dab_clipped,
-        apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped, BrushDab,
+        BrushDab, BrushTileContext, apply_destructive_filter_rgba, apply_round_brush_dab,
+        apply_round_brush_dab_clipped, apply_round_eraser_dab, apply_round_eraser_dab_clipped,
+        apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped,
     };
     use common::{CanvasRect, DestructiveFilterKind};
 
@@ -425,11 +382,7 @@ mod tests {
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         let changed = apply_round_brush_dab(
             &mut pixels,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
             BrushDab::new(4.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
         );
 
@@ -443,11 +396,7 @@ mod tests {
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         let changed = apply_round_brush_dab(
             &mut pixels,
-            16,
-            0,
-            0,
-            40.0,
-            40.0,
+            BrushTileContext::new(16, 0, 0, 40.0, 40.0),
             BrushDab::new(3.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
         );
 
@@ -460,11 +409,7 @@ mod tests {
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         let changed = apply_round_brush_dab(
             &mut pixels,
-            16,
-            16,
-            0,
-            18.0,
-            4.0,
+            BrushTileContext::new(16, 16, 0, 18.0, 4.0),
             BrushDab::new(2.0, 1.0, 1.0, 1.0, [0, 255, 0, 255]),
         );
 
@@ -478,11 +423,7 @@ mod tests {
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         let changed = apply_round_brush_dab(
             &mut pixels,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
             BrushDab::new(5.0, 0.25, 1.0, 1.0, [255, 255, 255, 255]),
         );
 
@@ -497,11 +438,7 @@ mod tests {
         let mut pixels = vec![255_u8; 16 * 16 * 4];
         let changed = apply_round_eraser_dab(
             &mut pixels,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
             BrushDab::new(3.0, 1.0, 0.5, 1.0, [0, 0, 0, 255]),
         );
 
@@ -515,14 +452,9 @@ mod tests {
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         let changed = apply_round_brush_dab_clipped(
             &mut pixels,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0)
+                .with_clip(Some(CanvasRect::new(6, 6, 4, 4)), false),
             BrushDab::new(4.0, 1.0, 1.0, 1.0, [255, 0, 0, 255]),
-            Some(CanvasRect::new(6, 6, 4, 4)),
-            false,
         );
 
         assert!(changed);
@@ -537,14 +469,9 @@ mod tests {
         let mut pixels = vec![255_u8; 16 * 16 * 4];
         let changed = apply_round_eraser_dab_clipped(
             &mut pixels,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0)
+                .with_clip(Some(CanvasRect::new(6, 6, 4, 4)), true),
             BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
-            Some(CanvasRect::new(6, 6, 4, 4)),
-            true,
         );
 
         assert!(changed);
@@ -559,14 +486,8 @@ mod tests {
         let mut alpha = vec![255_u8; 16 * 16];
         let changed = apply_round_mask_hide_dab_clipped(
             &mut alpha,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
             BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
-            None,
-            false,
         );
 
         assert!(changed);
@@ -575,14 +496,8 @@ mod tests {
 
         let changed = apply_round_mask_reveal_dab_clipped(
             &mut alpha,
-            16,
-            0,
-            0,
-            8.0,
-            8.0,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
             BrushDab::new(4.0, 1.0, 1.0, 1.0, [0, 0, 0, 255]),
-            None,
-            false,
         );
 
         assert!(changed);
@@ -593,7 +508,8 @@ mod tests {
     fn invert_filter_changes_visible_rgb_without_touching_alpha() {
         let mut pixels = vec![10_u8, 20, 30, 255, 0, 0, 0, 0];
 
-        let changed = apply_destructive_filter_rgba(&mut pixels, DestructiveFilterKind::InvertColors);
+        let changed =
+            apply_destructive_filter_rgba(&mut pixels, DestructiveFilterKind::InvertColors);
 
         assert!(changed);
         assert_eq!(&pixels[0..4], &[245, 235, 225, 255]);

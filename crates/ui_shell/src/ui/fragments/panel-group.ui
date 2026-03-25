@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="panel_group_root">
+    <property name="orientation">vertical</property>
+    <property name="vexpand">True</property>
+    <property name="name">panel-group</property>
+    <style>
+      <class name="panel-group"/>
+    </style>
+    <child>
+      <object class="GtkBox" id="panel_group_header">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">2</property>
+        <property name="name">panel-group-header</property>
+        <style>
+          <class name="panel-group-header"/>
+        </style>
+        <child>
+          <object class="GtkButton" id="panel_group_tab_1">
+            <property name="label">Primary</property>
+            <property name="name">panel-group-tab-1</property>
+            <style>
+              <class name="panel-tab"/>
+              <class name="panel-tab-active"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="panel_group_tab_2">
+            <property name="label">Secondary</property>
+            <property name="name">panel-group-tab-2</property>
+            <style>
+              <class name="panel-tab"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="panel_group_tab_3">
+            <property name="label">Tertiary</property>
+            <property name="name">panel-group-tab-3</property>
+            <style>
+              <class name="panel-tab"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="panel_group_body">
+        <property name="orientation">vertical</property>
+        <property name="spacing">4</property>
+        <property name="name">panel-group-body</property>
+        <style>
+          <class name="panel-group-body"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

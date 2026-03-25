@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="info_dialog_content">
+    <property name="orientation">vertical</property>
+    <property name="spacing">12</property>
+    <property name="margin-start">18</property>
+    <property name="margin-end">18</property>
+    <property name="margin-top">18</property>
+    <property name="margin-bottom">18</property>
+    <property name="name">info-dialog-content</property>
+    <style>
+      <class name="template-dialog-content"/>
+    </style>
+    <child>
+      <object class="GtkLabel" id="info_dialog_title_label">
+        <property name="xalign">0</property>
+        <property name="wrap">True</property>
+        <property name="selectable">True</property>
+        <property name="name">info-dialog-title</property>
+        <style>
+          <class name="template-dialog-title"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="info_dialog_body_label">
+        <property name="xalign">0</property>
+        <property name="wrap">True</property>
+        <property name="selectable">True</property>
+        <property name="name">info-dialog-body</property>
+        <style>
+          <class name="template-dialog-body"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="info_dialog_secondary_label">
+        <property name="visible">False</property>
+        <property name="xalign">0</property>
+        <property name="wrap">True</property>
+        <property name="selectable">True</property>
+        <property name="name">info-dialog-secondary</property>
+        <style>
+          <class name="template-dialog-secondary"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="info_dialog_actions">
+        <property name="orientation">horizontal</property>
+        <property name="halign">end</property>
+        <property name="spacing">8</property>
+        <property name="name">info-dialog-actions</property>
+        <style>
+          <class name="template-dialog-actions"/>
+        </style>
+        <child>
+          <object class="GtkButton" id="info_dialog_close_button">
+            <property name="label">Close</property>
+            <property name="tooltip-text">Close dialog</property>
+            <property name="receives-default">True</property>
+            <property name="name">info-dialog-close-button</property>
+            <style>
+              <class name="tool-chip"/>
+              <class name="template-dialog-close-button"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -4,8 +4,8 @@ use doc_model::{
     SelectionPoint, SelectionShape, TileCoord,
 };
 use image_ops::{
-    apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped,
-    apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped, BrushDab,
+    BrushDab, BrushTileContext, apply_round_brush_dab_clipped, apply_round_eraser_dab_clipped,
+    apply_round_mask_hide_dab_clipped, apply_round_mask_reveal_dab_clipped,
 };
 use std::collections::HashMap;
 
@@ -75,7 +75,13 @@ impl BrushSettings {
             settings.opacity
         };
 
-        BrushDab::new(radius, settings.hardness, opacity, settings.flow, settings.color)
+        BrushDab::new(
+            radius,
+            settings.hardness,
+            opacity,
+            settings.flow,
+            settings.color,
+        )
     }
 }
 
@@ -137,13 +143,15 @@ pub struct MoveLayerRecord {
 impl MoveLayerRecord {
     pub fn undo(&self, document: &mut Document) {
         if let Some(layer_index) = document.layer_index_by_id(self.layer_id) {
-            let _ = document.set_layer_offset(layer_index, self.before_offset.0, self.before_offset.1);
+            let _ =
+                document.set_layer_offset(layer_index, self.before_offset.0, self.before_offset.1);
         }
     }
 
     pub fn redo(&self, document: &mut Document) {
         if let Some(layer_index) = document.layer_index_by_id(self.layer_id) {
-            let _ = document.set_layer_offset(layer_index, self.after_offset.0, self.after_offset.1);
+            let _ =
+                document.set_layer_offset(layer_index, self.after_offset.0, self.after_offset.1);
         }
     }
 }
@@ -226,6 +234,15 @@ pub struct RectangularMarqueeTool;
 pub struct LassoTool;
 pub struct SimpleTransformTool;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TransformDelta {
+    scale_x: f32,
+    scale_y: f32,
+    rotate_quadrants: i32,
+    translate_x: i32,
+    translate_y: i32,
+}
+
 impl BrushTool {
     pub fn apply_stroke(
         document: &mut Document,
@@ -270,7 +287,8 @@ impl BrushTool {
             let dab = settings.to_dab_with_pressure(sample.pressure);
             let local_dab_x = dab_x - layer_offset_x as f32;
             let local_dab_y = dab_y - layer_offset_y as f32;
-            let touched_coords = document.tile_coords_in_radius(local_dab_x, local_dab_y, dab.radius);
+            let touched_coords =
+                document.tile_coords_in_radius(local_dab_x, local_dab_y, dab.radius);
 
             for coord in touched_coords {
                 let (tile_origin_x, tile_origin_y) = document.tile_origin(coord);
@@ -278,10 +296,9 @@ impl BrushTool {
                 let canvas_tile_origin_y = tile_origin_y as i32 + layer_offset_y;
                 match target {
                     LayerEditTarget::LayerPixels => {
-                        if changes
-                            .iter()
-                            .all(|change| !(change.layer_id() == layer_id && change.coord() == coord))
-                        {
+                        if changes.iter().all(|change| {
+                            !(change.layer_id() == layer_id && change.coord() == coord)
+                        }) {
                             changes.push(BrushChange::Pixels {
                                 layer_id,
                                 coord,
@@ -291,58 +308,62 @@ impl BrushTool {
                         }
 
                         let changed = {
-                            let tile = document.layer_mut(layer_index)?.ensure_tile(coord, tile_size);
+                            let tile = document
+                                .layer_mut(layer_index)?
+                                .ensure_tile(coord, tile_size);
+                            let context = BrushTileContext::new(
+                                tile_size,
+                                canvas_tile_origin_x,
+                                canvas_tile_origin_y,
+                                dab_x,
+                                dab_y,
+                            )
+                            .with_clip(clip_rect, clip_inverted);
                             match mode {
-                                BrushToolMode::Paint => apply_round_brush_dab_clipped(
-                                    &mut tile.pixels,
-                                    tile_size,
-                                    canvas_tile_origin_x,
-                                    canvas_tile_origin_y,
-                                    dab_x,
-                                    dab_y,
-                                    dab,
-                                    clip_rect,
-                                    clip_inverted,
-                                ),
-                                BrushToolMode::Erase => apply_round_eraser_dab_clipped(
-                                    &mut tile.pixels,
-                                    tile_size,
-                                    canvas_tile_origin_x,
-                                    canvas_tile_origin_y,
-                                    dab_x,
-                                    dab_y,
-                                    dab,
-                                    clip_rect,
-                                    clip_inverted,
-                                ),
+                                BrushToolMode::Paint => {
+                                    apply_round_brush_dab_clipped(&mut tile.pixels, context, dab)
+                                }
+                                BrushToolMode::Erase => {
+                                    apply_round_eraser_dab_clipped(&mut tile.pixels, context, dab)
+                                }
                             }
                         };
 
-                        if let Some(selection_shape) = &selection_shape {
-                            if matches!(selection_shape, SelectionShape::Freeform(_)) {
-                                let before_tile = changes.iter().find_map(|change| match change {
-                                    BrushChange::Pixels { layer_id: changed_layer_id, coord: changed_coord, before, .. }
-                                        if *changed_layer_id == layer_id && *changed_coord == coord => before.clone(),
-                                    _ => None,
-                                });
-                                if let Some(tile) = document.layer_mut(layer_index)?.tiles.get_mut(&coord) {
-                                    restore_pixels_outside_selection(
-                                        &mut tile.pixels,
-                                        before_tile.as_ref(),
-                                        tile_size,
-                                        canvas_tile_origin_x,
-                                        canvas_tile_origin_y,
-                                        selection_shape,
-                                        clip_inverted,
-                                    );
+                        if let Some(selection_shape) = &selection_shape
+                            && matches!(selection_shape, SelectionShape::Freeform(_))
+                        {
+                            let before_tile = changes.iter().find_map(|change| match change {
+                                BrushChange::Pixels {
+                                    layer_id: changed_layer_id,
+                                    coord: changed_coord,
+                                    before,
+                                    ..
+                                } if *changed_layer_id == layer_id && *changed_coord == coord => {
+                                    before.clone()
                                 }
+                                _ => None,
+                            });
+                            if let Some(tile) =
+                                document.layer_mut(layer_index)?.tiles.get_mut(&coord)
+                            {
+                                restore_pixels_outside_selection(
+                                    &mut tile.pixels,
+                                    before_tile.as_ref(),
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    selection_shape,
+                                    clip_inverted,
+                                );
                             }
                         }
 
                         if !changed
-                            && document.layer(layer_index)?.tiles.get(&coord).is_some_and(|tile| {
-                                tile.pixels.iter().all(|value| *value == 0)
-                            })
+                            && document
+                                .layer(layer_index)?
+                                .tiles
+                                .get(&coord)
+                                .is_some_and(|tile| tile.pixels.iter().all(|value| *value == 0))
                         {
                             document.layer_mut(layer_index)?.tiles.remove(&coord);
                         }
@@ -352,10 +373,9 @@ impl BrushTool {
                             continue;
                         }
 
-                        if changes
-                            .iter()
-                            .all(|change| !(change.layer_id() == layer_id && change.coord() == coord))
-                        {
+                        if changes.iter().all(|change| {
+                            !(change.layer_id() == layer_id && change.coord() == coord)
+                        }) {
                             changes.push(BrushChange::Mask {
                                 layer_id,
                                 coord,
@@ -370,52 +390,52 @@ impl BrushTool {
                                 coord.x * tile_size,
                                 coord.y * tile_size,
                             )?;
+                            let context = BrushTileContext::new(
+                                tile_size,
+                                canvas_tile_origin_x,
+                                canvas_tile_origin_y,
+                                dab_x,
+                                dab_y,
+                            )
+                            .with_clip(clip_rect, clip_inverted);
                             match mode {
-                                BrushToolMode::Paint => apply_round_mask_hide_dab_clipped(
-                                    &mut tile.alpha,
-                                    tile_size,
-                                    canvas_tile_origin_x,
-                                    canvas_tile_origin_y,
-                                    dab_x,
-                                    dab_y,
-                                    dab,
-                                    clip_rect,
-                                    clip_inverted,
-                                ),
+                                BrushToolMode::Paint => {
+                                    apply_round_mask_hide_dab_clipped(&mut tile.alpha, context, dab)
+                                }
                                 BrushToolMode::Erase => apply_round_mask_reveal_dab_clipped(
                                     &mut tile.alpha,
-                                    tile_size,
-                                    canvas_tile_origin_x,
-                                    canvas_tile_origin_y,
-                                    dab_x,
-                                    dab_y,
+                                    context,
                                     dab,
-                                    clip_rect,
-                                    clip_inverted,
                                 ),
                             }
                         };
 
-                        if let Some(selection_shape) = &selection_shape {
-                            if matches!(selection_shape, SelectionShape::Freeform(_)) {
-                                let before_tile = changes.iter().find_map(|change| match change {
-                                    BrushChange::Mask { layer_id: changed_layer_id, coord: changed_coord, before, .. }
-                                        if *changed_layer_id == layer_id && *changed_coord == coord => before.clone(),
-                                    _ => None,
-                                });
-                                if let Some(mask) = document.layer_mask_mut(layer_index) {
-                                    if let Some(tile) = mask.tiles.get_mut(&coord) {
-                                        restore_mask_outside_selection(
-                                            &mut tile.alpha,
-                                            before_tile.as_ref(),
-                                            tile_size,
-                                            canvas_tile_origin_x,
-                                            canvas_tile_origin_y,
-                                            selection_shape,
-                                            clip_inverted,
-                                        );
-                                    }
+                        if let Some(selection_shape) = &selection_shape
+                            && matches!(selection_shape, SelectionShape::Freeform(_))
+                        {
+                            let before_tile = changes.iter().find_map(|change| match change {
+                                BrushChange::Mask {
+                                    layer_id: changed_layer_id,
+                                    coord: changed_coord,
+                                    before,
+                                    ..
+                                } if *changed_layer_id == layer_id && *changed_coord == coord => {
+                                    before.clone()
                                 }
+                                _ => None,
+                            });
+                            if let Some(mask) = document.layer_mask_mut(layer_index)
+                                && let Some(tile) = mask.tiles.get_mut(&coord)
+                            {
+                                restore_mask_outside_selection(
+                                    &mut tile.alpha,
+                                    before_tile.as_ref(),
+                                    tile_size,
+                                    canvas_tile_origin_x,
+                                    canvas_tile_origin_y,
+                                    selection_shape,
+                                    clip_inverted,
+                                );
                             }
                         }
 
@@ -435,17 +455,26 @@ impl BrushTool {
         }
 
         changes.retain(|change| {
-            let after = document
-                .layer_index_by_id(change.layer_id())
-                .and_then(|idx| match change {
-                    BrushChange::Pixels { coord, .. } => document.tile_snapshot(idx, *coord).map(BrushChangeSnapshot::Pixels),
-                    BrushChange::Mask { coord, .. } => document.mask_tile_snapshot(idx, *coord).map(BrushChangeSnapshot::Mask),
-                });
+            let after =
+                document
+                    .layer_index_by_id(change.layer_id())
+                    .and_then(|idx| match change {
+                        BrushChange::Pixels { coord, .. } => document
+                            .tile_snapshot(idx, *coord)
+                            .map(BrushChangeSnapshot::Pixels),
+                        BrushChange::Mask { coord, .. } => document
+                            .mask_tile_snapshot(idx, *coord)
+                            .map(BrushChangeSnapshot::Mask),
+                    });
 
             match (change, after) {
-                (BrushChange::Pixels { before, .. }, Some(BrushChangeSnapshot::Pixels(after))) => *before != Some(after),
+                (BrushChange::Pixels { before, .. }, Some(BrushChangeSnapshot::Pixels(after))) => {
+                    *before != Some(after)
+                }
                 (BrushChange::Pixels { before, .. }, None) => before.is_some(),
-                (BrushChange::Mask { before, .. }, Some(BrushChangeSnapshot::Mask(after))) => *before != Some(after),
+                (BrushChange::Mask { before, .. }, Some(BrushChangeSnapshot::Mask(after))) => {
+                    *before != Some(after)
+                }
                 (BrushChange::Mask { before, .. }, None) => before.is_some(),
                 _ => false,
             }
@@ -497,8 +526,15 @@ impl MoveTool {
         if document.selection_shape().is_some() {
             let before = document.layer_state_snapshot(layer_index)?;
             let layer_id = document.layer(layer_index)?.id;
-            let _record =
-                SimpleTransformTool::transform_layer(document, layer_index, 1.0, 1.0, 0, delta_x, delta_y)?;
+            let _record = SimpleTransformTool::transform_layer(
+                document,
+                layer_index,
+                1.0,
+                1.0,
+                0,
+                delta_x,
+                delta_y,
+            )?;
             let after = document.layer_state_snapshot(layer_index)?;
             if before == after {
                 return None;
@@ -568,7 +604,8 @@ impl RectangularMarqueeTool {
     ) -> Option<SelectionRecord> {
         let before = document.selection_shape().cloned();
         let before_inverted = document.selection_inverted();
-        let after = Self::preview_rect(start_x, start_y, end_x, end_y).map(SelectionShape::Rectangular);
+        let after =
+            Self::preview_rect(start_x, start_y, end_x, end_y).map(SelectionShape::Rectangular);
 
         if before == after && !before_inverted {
             return None;
@@ -600,7 +637,10 @@ impl LassoTool {
         FreeformSelection::new(deduped)
     }
 
-    pub fn apply_selection(document: &mut Document, points: &[(i32, i32)]) -> Option<SelectionRecord> {
+    pub fn apply_selection(
+        document: &mut Document,
+        points: &[(i32, i32)],
+    ) -> Option<SelectionRecord> {
         let before = document.selection_shape().cloned();
         let before_inverted = document.selection_inverted();
         let after = Self::preview_selection(points).map(SelectionShape::Freeform);
@@ -728,18 +768,17 @@ impl SimpleTransformTool {
         let layer_id = document.layer(layer_index)?.id;
         let source_bounds = document.layer_canvas_bounds(layer_index)?;
         let rotate_quadrants = rotate_quadrants.rem_euclid(4);
+        let transform = TransformDelta {
+            scale_x,
+            scale_y,
+            rotate_quadrants,
+            translate_x,
+            translate_y,
+        };
 
         if document.selection_shape().is_some() {
-            let after = transform_selected_layer_state(
-                document,
-                &before,
-                source_bounds,
-                scale_x,
-                scale_y,
-                rotate_quadrants,
-                translate_x,
-                translate_y,
-            )?;
+            let after =
+                transform_selected_layer_state(document, &before, source_bounds, transform)?;
             if before == after {
                 return None;
             }
@@ -752,11 +791,8 @@ impl SimpleTransformTool {
             });
         }
 
-        let (source_width, source_height, source_pixels) = rasterize_layer_snapshot(
-            &before,
-            document.tile_size,
-            source_bounds,
-        )?;
+        let (source_width, source_height, source_pixels) =
+            rasterize_layer_snapshot(&before, document.tile_size, source_bounds)?;
         let scaled_width = ((source_width as f32) * scale_x).round().max(1.0) as u32;
         let scaled_height = ((source_height as f32) * scale_y).round().max(1.0) as u32;
         let scaled_pixels = resample_nearest_rgba(
@@ -766,8 +802,12 @@ impl SimpleTransformTool {
             scaled_width,
             scaled_height,
         );
-        let (target_width, target_height, transformed_pixels) =
-            rotate_rgba_quadrants(&scaled_pixels, scaled_width, scaled_height, rotate_quadrants);
+        let (target_width, target_height, transformed_pixels) = rotate_rgba_quadrants(
+            &scaled_pixels,
+            scaled_width,
+            scaled_height,
+            rotate_quadrants,
+        );
         let after = layer_state_from_pixels(
             document.tile_size,
             source_bounds.x + translate_x,
@@ -820,20 +860,21 @@ fn transform_selected_layer_state(
     document: &Document,
     before: &LayerStateSnapshot,
     source_bounds: CanvasRect,
-    scale_x: f32,
-    scale_y: f32,
-    rotate_quadrants: i32,
-    translate_x: i32,
-    translate_y: i32,
+    transform: TransformDelta,
 ) -> Option<LayerStateSnapshot> {
-    let (source_width, source_height, source_pixels) =
+    let (_source_width, _source_height, source_pixels) =
         rasterize_layer_snapshot(before, document.tile_size, source_bounds)?;
     let selected_bounds = selected_pixel_bounds(document, source_bounds, &source_pixels)?;
-    let selected_pixels = extract_selected_pixels(document, source_bounds, selected_bounds, &source_pixels);
+    let selected_pixels =
+        extract_selected_pixels(document, source_bounds, selected_bounds, &source_pixels);
     let base_pixels = clear_selected_pixels(document, source_bounds, &source_pixels);
 
-    let scaled_width = ((selected_bounds.width as f32) * scale_x).round().max(1.0) as u32;
-    let scaled_height = ((selected_bounds.height as f32) * scale_y).round().max(1.0) as u32;
+    let scaled_width = ((selected_bounds.width as f32) * transform.scale_x)
+        .round()
+        .max(1.0) as u32;
+    let scaled_height = ((selected_bounds.height as f32) * transform.scale_y)
+        .round()
+        .max(1.0) as u32;
     let scaled_pixels = resample_nearest_rgba(
         &selected_pixels,
         selected_bounds.width,
@@ -841,37 +882,28 @@ fn transform_selected_layer_state(
         scaled_width,
         scaled_height,
     );
-    let (target_width, target_height, transformed_pixels) =
-        rotate_rgba_quadrants(&scaled_pixels, scaled_width, scaled_height, rotate_quadrants);
+    let (target_width, target_height, transformed_pixels) = rotate_rgba_quadrants(
+        &scaled_pixels,
+        scaled_width,
+        scaled_height,
+        transform.rotate_quadrants,
+    );
 
     let destination_bounds = CanvasRect::new(
-        selected_bounds.x + translate_x,
-        selected_bounds.y + translate_y,
+        selected_bounds.x + transform.translate_x,
+        selected_bounds.y + transform.translate_y,
         target_width,
         target_height,
     );
     let union_bounds = union_rect(source_bounds, destination_bounds);
     let mut output = vec![0_u8; (union_bounds.width * union_bounds.height * 4) as usize];
 
-    blit_rgba(
-        &mut output,
-        union_bounds.width,
-        union_bounds.height,
-        union_bounds,
-        source_bounds,
-        &base_pixels,
-        source_width,
-        source_height,
-    );
+    blit_rgba(&mut output, union_bounds, source_bounds, &base_pixels);
     composite_rgba(
         &mut output,
-        union_bounds.width,
-        union_bounds.height,
         union_bounds,
         destination_bounds,
         &transformed_pixels,
-        target_width,
-        target_height,
     );
 
     Some(layer_state_from_pixels(
@@ -956,7 +988,11 @@ fn extract_selected_pixels(
     selected
 }
 
-fn clear_selected_pixels(document: &Document, source_bounds: CanvasRect, source_pixels: &[u8]) -> Vec<u8> {
+fn clear_selected_pixels(
+    document: &Document,
+    source_bounds: CanvasRect,
+    source_pixels: &[u8],
+) -> Vec<u8> {
     let mut base = source_pixels.to_vec();
     let width = source_bounds.width as usize;
     let height = source_bounds.height as usize;
@@ -986,14 +1022,14 @@ fn union_rect(left: CanvasRect, right: CanvasRect) -> CanvasRect {
 
 fn blit_rgba(
     destination: &mut [u8],
-    destination_width: u32,
-    destination_height: u32,
     union_bounds: CanvasRect,
     destination_bounds: CanvasRect,
     source: &[u8],
-    source_width: u32,
-    source_height: u32,
 ) {
+    let destination_width = union_bounds.width;
+    let destination_height = union_bounds.height;
+    let source_width = destination_bounds.width;
+    let source_height = destination_bounds.height;
     for y in 0..source_height as usize {
         for x in 0..source_width as usize {
             let canvas_x = destination_bounds.x + x as i32;
@@ -1018,14 +1054,14 @@ fn blit_rgba(
 
 fn composite_rgba(
     destination: &mut [u8],
-    destination_width: u32,
-    destination_height: u32,
     union_bounds: CanvasRect,
     destination_bounds: CanvasRect,
     source: &[u8],
-    source_width: u32,
-    source_height: u32,
 ) {
+    let destination_width = union_bounds.width;
+    let destination_height = union_bounds.height;
+    let source_width = destination_bounds.width;
+    let source_height = destination_bounds.height;
     for y in 0..source_height as usize {
         for x in 0..source_width as usize {
             let canvas_x = destination_bounds.x + x as i32;
@@ -1129,13 +1165,16 @@ fn resample_nearest_rgba(
         for target_x in 0..target_width {
             let source_x = ((target_x as f32 + 0.5) * source_width as f32 / target_width as f32)
                 .floor()
-                .clamp(0.0, source_width.saturating_sub(1) as f32) as u32;
+                .clamp(0.0, source_width.saturating_sub(1) as f32)
+                as u32;
             let source_y = ((target_y as f32 + 0.5) * source_height as f32 / target_height as f32)
                 .floor()
-                .clamp(0.0, source_height.saturating_sub(1) as f32) as u32;
+                .clamp(0.0, source_height.saturating_sub(1) as f32)
+                as u32;
             let source_index = ((source_y * source_width + source_x) * 4) as usize;
             let target_index = ((target_y * target_width + target_x) * 4) as usize;
-            output[target_index..target_index + 4].copy_from_slice(&source[source_index..source_index + 4]);
+            output[target_index..target_index + 4]
+                .copy_from_slice(&source[source_index..source_index + 4]);
         }
     }
 
@@ -1268,7 +1307,9 @@ mod tests {
         RectangularMarqueeTool, SimpleTransformTool,
     };
     use common::CanvasRect;
-    use doc_model::{Document, FreeformSelection, LayerEditTarget, SelectionPoint, SelectionShape, TileCoord};
+    use doc_model::{
+        Document, FreeformSelection, LayerEditTarget, SelectionPoint, SelectionShape, TileCoord,
+    };
     use history_engine::HistoryStack;
 
     fn brush_settings() -> BrushSettings {
@@ -1379,7 +1420,7 @@ mod tests {
 
         assert!(record.dab_count >= 2);
         assert!(!record.changes.is_empty());
-        assert!(document.layer(0).expect("layer exists").tiles.len() >= 1);
+        assert!(!document.layer(0).expect("layer exists").tiles.is_empty());
     }
 
     #[test]
@@ -1401,7 +1442,10 @@ mod tests {
         assert_eq!(document.layer(0).expect("layer exists").tiles.len(), 0);
 
         record.redo(&mut document);
-        assert_eq!(document.layer(0).expect("layer exists").tiles.len(), painted_tile_count);
+        assert_eq!(
+            document.layer(0).expect("layer exists").tiles.len(),
+            painted_tile_count
+        );
     }
 
     #[test]
@@ -1477,7 +1521,10 @@ mod tests {
 
         let redone = history.redo().expect("stroke should be redoable");
         redone.redo(&mut document);
-        assert_eq!(document.layer(0).expect("layer exists").tiles.len(), tile_count_after_stroke);
+        assert_eq!(
+            document.layer(0).expect("layer exists").tiles.len(),
+            tile_count_after_stroke
+        );
     }
 
     #[test]
@@ -1495,8 +1542,8 @@ mod tests {
     #[test]
     fn move_tool_can_be_undone_and_redone() {
         let mut document = Document::new(512, 512);
-        let record = MoveTool::move_layer(&mut document, 0, 20, 30)
-            .expect("move record should exist");
+        let record =
+            MoveTool::move_layer(&mut document, 0, 20, 30).expect("move record should exist");
 
         record.undo(&mut document);
         assert_eq!(document.layer_offset(0), Some((0, 0)));
@@ -1614,7 +1661,8 @@ mod tests {
         );
         document.set_selection(CanvasRect::new(16, 16, 16, 16));
 
-        let _record = MoveTool::move_layer(&mut document, 0, 10, 0).expect("selected move should apply");
+        let _record =
+            MoveTool::move_layer(&mut document, 0, 10, 0).expect("selected move should apply");
 
         assert_eq!(pixel_alpha(&document, 0, 20, 20), 0);
         assert!(pixel_alpha(&document, 0, 30, 20) > 0);
@@ -1695,7 +1743,9 @@ mod tests {
         .expect("mask hide stroke should create a record");
 
         assert_eq!(hide.target, LayerEditTarget::LayerMask);
-        let coord = document.tile_coord_for_pixel(32, 32).expect("mask stroke should map to tile");
+        let coord = document
+            .tile_coord_for_pixel(32, 32)
+            .expect("mask stroke should map to tile");
         let tile = document
             .layer_mask(0)
             .expect("mask exists")
@@ -1709,10 +1759,22 @@ mod tests {
         assert!(tile.alpha[mask_index] < 255);
 
         hide.undo(&mut document);
-        assert!(document.layer_mask(0).expect("mask exists").tiles.is_empty());
+        assert!(
+            document
+                .layer_mask(0)
+                .expect("mask exists")
+                .tiles
+                .is_empty()
+        );
 
         hide.redo(&mut document);
-        assert!(!document.layer_mask(0).expect("mask exists").tiles.is_empty());
+        assert!(
+            !document
+                .layer_mask(0)
+                .expect("mask exists")
+                .tiles
+                .is_empty()
+        );
 
         let reveal = BrushTool::apply_stroke(
             &mut document,
@@ -1725,7 +1787,13 @@ mod tests {
         .expect("mask reveal stroke should create a record");
 
         reveal.undo(&mut document);
-        assert!(!document.layer_mask(0).expect("mask exists").tiles.is_empty());
+        assert!(
+            !document
+                .layer_mask(0)
+                .expect("mask exists")
+                .tiles
+                .is_empty()
+        );
 
         reveal.redo(&mut document);
         let revealed_tile = document
@@ -1768,10 +1836,14 @@ mod tests {
             .expect("tile should be created");
         tile.pixels[(8 * tile_size + 8) * 4 + 3] = 255;
 
-        let before = document.layer_state_snapshot(0).expect("snapshot should exist");
+        let before = document
+            .layer_state_snapshot(0)
+            .expect("snapshot should exist");
         let record = SimpleTransformTool::transform_layer(&mut document, 0, 2.0, 2.0, 0, 15, 5)
             .expect("transform should produce a record");
-        let after = document.layer_state_snapshot(0).expect("snapshot should exist");
+        let after = document
+            .layer_state_snapshot(0)
+            .expect("snapshot should exist");
 
         assert_ne!(before, after);
         record.undo(&mut document);

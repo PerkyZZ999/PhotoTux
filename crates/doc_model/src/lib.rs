@@ -1,4 +1,4 @@
-use common::{CanvasRect, CanvasSize, DocumentId, GroupId, LayerId, DEFAULT_TILE_SIZE};
+use common::{CanvasRect, CanvasSize, DEFAULT_TILE_SIZE, DocumentId, GroupId, LayerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -83,6 +83,12 @@ impl RasterMask {
         let mut dirty_tiles = self.dirty_tiles.drain().collect::<Vec<_>>();
         dirty_tiles.sort_by_key(|coord| (coord.y, coord.x));
         dirty_tiles
+    }
+}
+
+impl Default for RasterMask {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -366,7 +372,10 @@ impl Document {
             return None;
         }
 
-        Some(TileCoord::new(pixel_x / self.tile_size, pixel_y / self.tile_size))
+        Some(TileCoord::new(
+            pixel_x / self.tile_size,
+            pixel_y / self.tile_size,
+        ))
     }
 
     pub fn layer_count(&self) -> usize {
@@ -423,7 +432,11 @@ impl Document {
     }
 
     pub fn group_for_layer(&self, layer_id: LayerId) -> Option<GroupId> {
-        Self::find_parent_group_for_ref(&self.layer_hierarchy, LayerHierarchyNodeRef::Layer(layer_id), None)
+        Self::find_parent_group_for_ref(
+            &self.layer_hierarchy,
+            LayerHierarchyNodeRef::Layer(layer_id),
+            None,
+        )
     }
 
     pub fn set_layer_hierarchy(
@@ -470,8 +483,10 @@ impl Document {
 
         let group = LayerGroup::new(name, grouped_children);
         let group_id = group.id;
-        self.layer_hierarchy
-            .insert(insertion_index.unwrap_or(self.layer_hierarchy.len()), LayerHierarchyNode::Group(group));
+        self.layer_hierarchy.insert(
+            insertion_index.unwrap_or(self.layer_hierarchy.len()),
+            LayerHierarchyNode::Group(group),
+        );
 
         self.validate_layer_hierarchy().ok()?;
         Some(group_id)
@@ -497,7 +512,11 @@ impl Document {
         self.set_layer_hierarchy(hierarchy).is_ok()
     }
 
-    pub fn move_node_into_group(&mut self, node_ref: LayerHierarchyNodeRef, group_id: GroupId) -> bool {
+    pub fn move_node_into_group(
+        &mut self,
+        node_ref: LayerHierarchyNodeRef,
+        group_id: GroupId,
+    ) -> bool {
         if node_ref == LayerHierarchyNodeRef::Group(group_id) {
             return false;
         }
@@ -539,7 +558,11 @@ impl Document {
     }
 
     pub fn validate_layer_hierarchy(&self) -> Result<(), &'static str> {
-        let known_layer_ids = self.layers.iter().map(|layer| layer.id).collect::<HashSet<_>>();
+        let known_layer_ids = self
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .collect::<HashSet<_>>();
         let mut referenced_layer_ids = HashSet::new();
         let mut referenced_group_ids = HashSet::new();
         Self::validate_hierarchy_nodes(
@@ -607,10 +630,15 @@ impl Document {
     }
 
     fn count_groups_in_nodes(nodes: &[LayerHierarchyNode]) -> usize {
-        nodes.iter().map(|node| match node {
-            LayerHierarchyNode::Layer(_) => 0,
-            LayerHierarchyNode::Group(group) => 1 + Self::count_groups_in_nodes(&group.children),
-        }).sum()
+        nodes
+            .iter()
+            .map(|node| match node {
+                LayerHierarchyNode::Layer(_) => 0,
+                LayerHierarchyNode::Group(group) => {
+                    1 + Self::count_groups_in_nodes(&group.children)
+                }
+            })
+            .sum()
     }
 
     fn find_group_in_nodes(nodes: &[LayerHierarchyNode], group_id: GroupId) -> Option<&LayerGroup> {
@@ -655,12 +683,11 @@ impl Document {
             if Self::node_matches_ref(node, target) {
                 return parent_group_id;
             }
-            if let LayerHierarchyNode::Group(group) = node {
-                if let Some(found) =
+            if let LayerHierarchyNode::Group(group) = node
+                && let Some(found) =
                     Self::find_parent_group_for_ref(&group.children, target, Some(group.id))
-                {
-                    return Some(found);
-                }
+            {
+                return Some(found);
             }
         }
 
@@ -692,12 +719,11 @@ impl Document {
                 nodes.insert(index, LayerHierarchyNode::Group(group));
                 return Some(group_id);
             }
-            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
-                if let Some(group_id) =
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index]
+                && let Some(group_id) =
                     Self::wrap_node_in_group_in_nodes(&mut group.children, target, name.clone())
-                {
-                    return Some(group_id);
-                }
+            {
+                return Some(group_id);
             }
         }
 
@@ -734,10 +760,10 @@ impl Document {
             if Self::node_matches_ref(&nodes[index], target) {
                 return Some(nodes.remove(index));
             }
-            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
-                if let Some(node) = Self::extract_node_from_nodes(&mut group.children, target) {
-                    return Some(node);
-                }
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index]
+                && let Some(node) = Self::extract_node_from_nodes(&mut group.children, target)
+            {
+                return Some(node);
             }
         }
 
@@ -753,12 +779,14 @@ impl Document {
             if Self::node_matches_ref(&nodes[index], target) {
                 return Some((nodes.remove(index), parent_group_id));
             }
-            if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
-                if let Some(result) =
-                    Self::extract_node_with_parent_group(&mut group.children, target, Some(group.id))
-                {
-                    return Some(result);
-                }
+            if let LayerHierarchyNode::Group(group) = &mut nodes[index]
+                && let Some(result) = Self::extract_node_with_parent_group(
+                    &mut group.children,
+                    target,
+                    Some(group.id),
+                )
+            {
+                return Some(result);
             }
         }
 
@@ -774,10 +802,16 @@ impl Document {
         for entry in nodes {
             if let LayerHierarchyNode::Group(group) = entry {
                 if group.id == group_id {
-                    group.children.push(pending_node.take().expect("node should still be present"));
+                    group
+                        .children
+                        .push(pending_node.take().expect("node should still be present"));
                     return Ok(());
                 }
-                if let Err(node) = Self::insert_node_into_group(&mut group.children, group_id, pending_node.take().expect("node should still be present")) {
+                if let Err(node) = Self::insert_node_into_group(
+                    &mut group.children,
+                    group_id,
+                    pending_node.take().expect("node should still be present"),
+                ) {
                     pending_node = Some(node);
                 } else {
                     return Ok(());
@@ -797,7 +831,10 @@ impl Document {
         for index in 0..nodes.len() {
             if let LayerHierarchyNode::Group(group) = &mut nodes[index] {
                 if group.id == group_id {
-                    nodes.insert(index + 1, pending_node.take().expect("node should still be present"));
+                    nodes.insert(
+                        index + 1,
+                        pending_node.take().expect("node should still be present"),
+                    );
                     return Ok(());
                 }
                 if let Err(node) = Self::insert_node_after_group(
@@ -936,7 +973,12 @@ impl Document {
         self.selection_contains_pixel(pixel_x, pixel_y) != self.selection_inverted
     }
 
-    pub fn tile_coords_in_radius(&self, center_x: f32, center_y: f32, radius: f32) -> Vec<TileCoord> {
+    pub fn tile_coords_in_radius(
+        &self,
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+    ) -> Vec<TileCoord> {
         if radius <= 0.0 {
             return Vec::new();
         }
@@ -956,8 +998,12 @@ impl Document {
 
         let start_tile_x = (min_x.max(0.0) as u32) / self.tile_size;
         let start_tile_y = (min_y.max(0.0) as u32) / self.tile_size;
-        let end_tile_x = (max_x.floor().max(0.0) as u32).min(self.canvas_size.width.saturating_sub(1)) / self.tile_size;
-        let end_tile_y = (max_y.floor().max(0.0) as u32).min(self.canvas_size.height.saturating_sub(1)) / self.tile_size;
+        let end_tile_x = (max_x.floor().max(0.0) as u32)
+            .min(self.canvas_size.width.saturating_sub(1))
+            / self.tile_size;
+        let end_tile_y = (max_y.floor().max(0.0) as u32)
+            .min(self.canvas_size.height.saturating_sub(1))
+            / self.tile_size;
 
         let mut coords = Vec::new();
         for tile_y in start_tile_y..=end_tile_y {
@@ -986,7 +1032,9 @@ impl Document {
         }
 
         self.active_layer_index = index;
-        if self.active_edit_target == LayerEditTarget::LayerMask && self.layers[index].mask.is_none() {
+        if self.active_edit_target == LayerEditTarget::LayerMask
+            && self.layers[index].mask.is_none()
+        {
             self.active_edit_target = LayerEditTarget::LayerPixels;
         }
         true
@@ -1085,7 +1133,11 @@ impl Document {
         })
     }
 
-    pub fn apply_layer_state_snapshot(&mut self, layer_id: LayerId, snapshot: LayerStateSnapshot) -> bool {
+    pub fn apply_layer_state_snapshot(
+        &mut self,
+        layer_id: LayerId,
+        snapshot: LayerStateSnapshot,
+    ) -> bool {
         let Some(layer_index) = self.layer_index_by_id(layer_id) else {
             return false;
         };
@@ -1138,7 +1190,13 @@ impl Document {
     }
 
     pub fn mask_tile_snapshot(&self, layer_index: usize, coord: TileCoord) -> Option<MaskTile> {
-        self.layers.get(layer_index)?.mask.as_ref()?.tiles.get(&coord).cloned()
+        self.layers
+            .get(layer_index)?
+            .mask
+            .as_ref()?
+            .tiles
+            .get(&coord)
+            .cloned()
     }
 
     pub fn apply_tile_snapshot(
@@ -1246,7 +1304,10 @@ impl Document {
     }
 
     pub fn move_layer(&mut self, from_index: usize, to_index: usize) -> bool {
-        if from_index >= self.layers.len() || to_index >= self.layers.len() || from_index == to_index {
+        if from_index >= self.layers.len()
+            || to_index >= self.layers.len()
+            || from_index == to_index
+        {
             return false;
         }
 
@@ -1305,7 +1366,10 @@ mod tests {
         assert_eq!(document.tile_grid_size().columns, 8);
         assert_eq!(document.tile_grid_size().rows, 5);
         assert!(document.validate_layer_hierarchy().is_ok());
-        assert_eq!(document.layer_hierarchy(), &[LayerHierarchyNode::Layer(document.active_layer().id)]);
+        assert_eq!(
+            document.layer_hierarchy(),
+            &[LayerHierarchyNode::Layer(document.active_layer().id)]
+        );
     }
 
     #[test]
@@ -1363,7 +1427,11 @@ mod tests {
         assert_eq!(document.group_count(), 1);
         assert!(document.validate_layer_hierarchy().is_ok());
 
-        let [LayerHierarchyNode::Layer(layer_id), LayerHierarchyNode::Group(group)] = document.layer_hierarchy() else {
+        let [
+            LayerHierarchyNode::Layer(layer_id),
+            LayerHierarchyNode::Group(group),
+        ] = document.layer_hierarchy()
+        else {
             panic!("expected one top-level layer followed by one top-level group");
         };
 
@@ -1383,15 +1451,21 @@ mod tests {
         let background_id = document.layers[0].id;
         let sketch_id = document.layers[1].id;
 
-        assert!(document
-            .create_layer_group("Invalid", &[background_id, background_id])
-            .is_none());
-        assert!(document
-            .create_layer_group("Valid", &[background_id, sketch_id])
-            .is_some());
-        assert!(document
-            .create_layer_group("Nested Duplicate", &[background_id])
-            .is_none());
+        assert!(
+            document
+                .create_layer_group("Invalid", &[background_id, background_id])
+                .is_none()
+        );
+        assert!(
+            document
+                .create_layer_group("Valid", &[background_id, sketch_id])
+                .is_some()
+        );
+        assert!(
+            document
+                .create_layer_group("Nested Duplicate", &[background_id])
+                .is_none()
+        );
     }
 
     #[test]
@@ -1420,7 +1494,10 @@ mod tests {
         let sketch_id = document.layers[1].id;
         let highlights_id = document.layers[2].id;
         let group_id = document
-            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(highlights_id), "Highlights Group")
+            .wrap_hierarchy_node_in_group(
+                LayerHierarchyNodeRef::Layer(highlights_id),
+                "Highlights Group",
+            )
             .expect("wrapping highlights should create a group");
 
         assert!(document.move_node_into_group(LayerHierarchyNodeRef::Layer(sketch_id), group_id));
@@ -1437,11 +1514,17 @@ mod tests {
         let mut document = Document::new(640, 480);
         let background_id = document.layers[0].id;
         let group_id = document
-            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(background_id), "Background Group")
+            .wrap_hierarchy_node_in_group(
+                LayerHierarchyNodeRef::Layer(background_id),
+                "Background Group",
+            )
             .expect("wrapping background should succeed");
 
         assert!(document.set_group_visibility(group_id, false));
-        assert_eq!(document.group(group_id).map(|group| group.visible), Some(false));
+        assert_eq!(
+            document.group(group_id).map(|group| group.visible),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1548,7 +1631,9 @@ mod tests {
         let _ = document.ensure_tile_for_pixel(0, 700, 500);
         assert!(document.set_layer_offset(0, 5, -3));
 
-        let bounds = document.layer_canvas_bounds(0).expect("bounds should exist");
+        let bounds = document
+            .layer_canvas_bounds(0)
+            .expect("bounds should exist");
 
         assert_eq!(bounds, CanvasRect::new(261, -3, 512, 512));
     }
@@ -1586,7 +1671,10 @@ mod tests {
         document.add_guide(Guide::horizontal(40));
         document.add_guide(Guide::vertical(60));
 
-        assert_eq!(document.guides(), &[Guide::horizontal(40), Guide::vertical(60)]);
+        assert_eq!(
+            document.guides(),
+            &[Guide::horizontal(40), Guide::vertical(60)]
+        );
         assert!(document.guides_visible());
 
         document.toggle_guides_visible();
@@ -1609,7 +1697,10 @@ mod tests {
         document.set_freeform_selection(freeform.clone());
 
         assert_eq!(document.selection(), Some(CanvasRect::new(12, 10, 19, 27)));
-        assert_eq!(document.selection_shape(), Some(&SelectionShape::Freeform(freeform)));
+        assert_eq!(
+            document.selection_shape(),
+            Some(&SelectionShape::Freeform(freeform))
+        );
     }
 
     #[test]
@@ -1679,9 +1770,18 @@ mod tests {
     fn tile_coord_for_pixel_maps_pixels_to_tile_grid() {
         let document = Document::new(1024, 1024);
 
-        assert_eq!(document.tile_coord_for_pixel(0, 0), Some(TileCoord::new(0, 0)));
-        assert_eq!(document.tile_coord_for_pixel(255, 255), Some(TileCoord::new(0, 0)));
-        assert_eq!(document.tile_coord_for_pixel(256, 256), Some(TileCoord::new(1, 1)));
+        assert_eq!(
+            document.tile_coord_for_pixel(0, 0),
+            Some(TileCoord::new(0, 0))
+        );
+        assert_eq!(
+            document.tile_coord_for_pixel(255, 255),
+            Some(TileCoord::new(0, 0))
+        );
+        assert_eq!(
+            document.tile_coord_for_pixel(256, 256),
+            Some(TileCoord::new(1, 1))
+        );
         assert_eq!(document.tile_coord_for_pixel(1024, 0), None);
     }
 
@@ -1694,10 +1794,12 @@ mod tests {
             .expect("tile should exist for a valid layer and pixel");
 
         assert_eq!(tile.pixels.len(), 256 * 256 * 4);
-        assert!(document
-            .dirty_tiles(0)
-            .expect("layer should exist")
-            .contains(&TileCoord::new(1, 0)));
+        assert!(
+            document
+                .dirty_tiles(0)
+                .expect("layer should exist")
+                .contains(&TileCoord::new(1, 0))
+        );
     }
 
     #[test]
@@ -1712,7 +1814,11 @@ mod tests {
 
         assert_eq!(
             dirty_tiles,
-            vec![TileCoord::new(0, 0), TileCoord::new(1, 0), TileCoord::new(1, 1)]
+            vec![
+                TileCoord::new(0, 0),
+                TileCoord::new(1, 0),
+                TileCoord::new(1, 1)
+            ]
         );
         assert!(layer.dirty_tiles.is_empty());
     }
@@ -1757,7 +1863,9 @@ mod tests {
         tile.pixels[0] = 180;
         tile.pixels[3] = 255;
 
-        let snapshot = document.layer_state_snapshot(0).expect("snapshot should exist");
+        let snapshot = document
+            .layer_state_snapshot(0)
+            .expect("snapshot should exist");
         let layer_id = document.layer(0).expect("layer exists").id;
         document.set_layer_offset(0, 0, 0);
         document.layer_mut(0).expect("layer exists").tiles.clear();

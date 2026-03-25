@@ -47,7 +47,8 @@ pub fn blend_rgba_over(
         let source_value = source[channel] as f32 / 255.0;
         let blended = blend_channel(backdrop, source_value, blend_mode);
         let premultiplied = (1.0 - source_alpha) * backdrop * destination_alpha
-            + source_alpha * ((1.0 - destination_alpha) * source_value + destination_alpha * blended);
+            + source_alpha
+                * ((1.0 - destination_alpha) * source_value + destination_alpha * blended);
         let unmultiplied = (premultiplied / output_alpha).clamp(0.0, 1.0);
         output[channel] = (unmultiplied * 255.0).round() as u8;
     }
@@ -75,23 +76,38 @@ fn blend_channel(backdrop: f32, source: f32, blend_mode: BlendModeMath) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{blend_rgba_over, BlendModeMath};
+    use super::{BlendModeMath, blend_rgba_over};
 
     #[test]
     fn normal_blend_over_transparent_matches_source() {
-        let result = blend_rgba_over([0, 0, 0, 0], [200, 100, 50, 255], 1.0, BlendModeMath::Normal);
+        let result = blend_rgba_over(
+            [0, 0, 0, 0],
+            [200, 100, 50, 255],
+            1.0,
+            BlendModeMath::Normal,
+        );
         assert_eq!(result, [200, 100, 50, 255]);
     }
 
     #[test]
     fn multiply_darkens_against_backdrop() {
-        let result = blend_rgba_over([128, 128, 128, 255], [128, 64, 255, 255], 1.0, BlendModeMath::Multiply);
+        let result = blend_rgba_over(
+            [128, 128, 128, 255],
+            [128, 64, 255, 255],
+            1.0,
+            BlendModeMath::Multiply,
+        );
         assert_eq!(result, [64, 32, 128, 255]);
     }
 
     #[test]
     fn screen_lightens_against_backdrop() {
-        let result = blend_rgba_over([64, 128, 32, 255], [128, 64, 128, 255], 1.0, BlendModeMath::Screen);
+        let result = blend_rgba_over(
+            [64, 128, 32, 255],
+            [128, 64, 128, 255],
+            1.0,
+            BlendModeMath::Screen,
+        );
         assert!(result[0] > 128);
         assert!(result[1] > 128);
         assert!(result[2] > 128);
@@ -100,8 +116,18 @@ mod tests {
 
     #[test]
     fn darken_and_lighten_choose_channel_extrema() {
-        let darken = blend_rgba_over([90, 180, 45, 255], [100, 120, 90, 255], 1.0, BlendModeMath::Darken);
-        let lighten = blend_rgba_over([90, 180, 45, 255], [100, 120, 90, 255], 1.0, BlendModeMath::Lighten);
+        let darken = blend_rgba_over(
+            [90, 180, 45, 255],
+            [100, 120, 90, 255],
+            1.0,
+            BlendModeMath::Darken,
+        );
+        let lighten = blend_rgba_over(
+            [90, 180, 45, 255],
+            [100, 120, 90, 255],
+            1.0,
+            BlendModeMath::Lighten,
+        );
 
         assert_eq!(darken, [90, 120, 45, 255]);
         assert_eq!(lighten, [100, 180, 90, 255]);

@@ -31,6 +31,7 @@ Target areas:
 - selection-mask logic
 - history bookkeeping
 - project manifest parsing and validation
+- template-backed shell metadata and required widget-ID coverage
 
 Unit tests should dominate the codebase because they are cheap and fast.
 
@@ -75,6 +76,7 @@ Target areas:
 - shell responsiveness under autosave
 - high-DPI and fractional-scaling behavior
 - multi-monitor behavior on Wayland
+- template-backed dialog and panel layout, focus, and sensitivity behavior under a real GTK session
 
 ## Representative Test Scenes
 
@@ -108,6 +110,12 @@ Current manual validation companion docs:
 - post-MVP painting checklist in `docs/tests/post-mvp-painting-checklist.md`
 
 These should be used repeatedly for regressions instead of inventing new ad hoc files every time.
+
+Current GTK template-migration validation expectations:
+
+- default automated coverage for template-backed shell surfaces lives in `crates/ui_shell/src/ui_templates.rs` and should verify embedded `.ui` metadata, required object IDs, CSS classes, and stable widget names where practical
+- GTK builder-runtime assertions that instantiate widgets are not reliable in the default Cargo harness because GTK requires the real process main thread; keep those checks manual or explicitly ignored until a dedicated harness exists
+- when migrating a new dialog or panel shell, manually confirm label hierarchy, tooltips, CSS class application, focus behavior, sensitivity, and overall GTK-native layout on a real desktop session
 
 ## Feature-Level Testing Requirements
 
