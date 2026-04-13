@@ -1420,6 +1420,99 @@ impl ShellUiState {
         }
     }
 
+    fn refresh_snapshot_views(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        self.tool_options_label
+            .set_label(&snapshot.active_tool_name);
+        set_image_resource_or_fallback(
+            &self.tool_options_icon,
+            &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
+            &snapshot.active_tool_name,
+            18,
+        );
+        self.update_tool_option_labels(snapshot);
+        self.refresh_tool_buttons(snapshot);
+        self.refresh_color_panel(snapshot);
+        self.refresh_properties_panel(snapshot);
+        self.refresh_layers_panel(snapshot);
+        self.refresh_history_panel(snapshot);
+    }
+
+    fn current_refresh_snapshot(&self) -> ShellSnapshot {
+        self.last_snapshot
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.controller.borrow().snapshot())
+    }
+
+    fn present_pending_alert(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        if let Some(alert) = snapshot.latest_alert.as_ref() {
+            let already_presented = self.presented_alert_id.get() == Some(alert.id);
+            if !already_presented && !self.alert_dialog_visible.get() {
+                self.presented_alert_id.set(Some(alert.id));
+                self.present_shell_alert(alert);
+            }
+        }
+    }
+
+    fn finish_pending_close_after_save(&self, snapshot: &ShellSnapshot) {
+        if self.pending_close_after_save.get() && !snapshot.dirty {
+            self.pending_close_after_save.set(false);
+            self.allow_close_once.set(true);
+            if let Some(window) = self.window.borrow().as_ref() {
+                window.close();
+            }
+        }
+    }
+
+    fn perform_pending_document_action_after_save(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        if !snapshot.dirty
+            && let Some(action) = self.pending_document_action_after_save.borrow_mut().take()
+        {
+            self.perform_document_replacement(action);
+        }
+    }
+
+    fn present_pending_recovery_prompt(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        let should_prompt_recovery = snapshot.recovery_offer_pending
+            && self.prompted_recovery_path.borrow().as_ref() != snapshot.recovery_path.as_ref();
+        if should_prompt_recovery && !self.recovery_prompt_visible.get() {
+            self.prompted_recovery_path
+                .replace(snapshot.recovery_path.clone());
+            self.present_recovery_prompt(snapshot);
+        }
+    }
+
+    fn present_pending_text_dialog(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        if snapshot.text.editing
+            && snapshot.text.request_id.is_some()
+            && self.presented_text_request_id.get() != snapshot.text.request_id
+            && !self.text_dialog_visible.get()
+        {
+            self.presented_text_request_id.set(snapshot.text.request_id);
+            self.present_text_dialog(&snapshot.text);
+        }
+    }
+
+    fn present_pending_import_report(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        if let Some(report) = snapshot.latest_import_report.as_ref() {
+            let already_presented = self.presented_import_report_id.get() == Some(report.id);
+            if !already_presented && !self.import_report_visible.get() {
+                self.presented_import_report_id.set(Some(report.id));
+                self.present_import_report(report);
+            }
+        }
+    }
+
+    fn process_post_refresh_actions(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        self.present_pending_alert(snapshot);
+        self.finish_pending_close_after_save(snapshot);
+        self.perform_pending_document_action_after_save(snapshot);
+        self.present_pending_recovery_prompt(snapshot);
+        self.present_pending_text_dialog(snapshot);
+        self.present_pending_import_report(snapshot);
+    }
+
     fn refresh(self: &Rc<Self>) {
         self.controller.borrow_mut().poll_background_tasks();
         let snapshot = self.controller.borrow().snapshot();
@@ -1467,20 +1560,7 @@ impl ShellUiState {
             .set_label(&format_vertical_ruler(snapshot.canvas_size.height));
 
         if snapshot_changed {
-            self.tool_options_label
-                .set_label(&snapshot.active_tool_name);
-            set_image_resource_or_fallback(
-                &self.tool_options_icon,
-                &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
-                &snapshot.active_tool_name,
-                18,
-            );
-            self.update_tool_option_labels(&snapshot);
-            self.refresh_tool_buttons(&snapshot);
-            self.refresh_color_panel(&snapshot);
-            self.refresh_properties_panel(&snapshot);
-            self.refresh_layers_panel(&snapshot);
-            self.refresh_history_panel(&snapshot);
+            self.refresh_snapshot_views(&snapshot);
             self.last_snapshot.replace(Some(snapshot));
         } else if ui_changed {
             self.refresh_layers_panel(&snapshot);
@@ -1488,61 +1568,8 @@ impl ShellUiState {
 
         self.last_ui_revision.set(self.ui_revision.get());
 
-        let current_snapshot = self
-            .last_snapshot
-            .borrow()
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| self.controller.borrow().snapshot());
-
-        if let Some(alert) = current_snapshot.latest_alert.as_ref() {
-            let already_presented = self.presented_alert_id.get() == Some(alert.id);
-            if !already_presented && !self.alert_dialog_visible.get() {
-                self.presented_alert_id.set(Some(alert.id));
-                self.present_shell_alert(alert);
-            }
-        }
-
-        if self.pending_close_after_save.get() && !current_snapshot.dirty {
-            self.pending_close_after_save.set(false);
-            self.allow_close_once.set(true);
-            if let Some(window) = self.window.borrow().as_ref() {
-                window.close();
-            }
-        }
-
-        if !current_snapshot.dirty
-            && let Some(action) = self.pending_document_action_after_save.borrow_mut().take()
-        {
-            self.perform_document_replacement(action);
-        }
-
-        let should_prompt_recovery = current_snapshot.recovery_offer_pending
-            && self.prompted_recovery_path.borrow().as_ref()
-                != current_snapshot.recovery_path.as_ref();
-        if should_prompt_recovery && !self.recovery_prompt_visible.get() {
-            self.prompted_recovery_path
-                .replace(current_snapshot.recovery_path.clone());
-            self.present_recovery_prompt(&current_snapshot);
-        }
-
-        if current_snapshot.text.editing
-            && current_snapshot.text.request_id.is_some()
-            && self.presented_text_request_id.get() != current_snapshot.text.request_id
-            && !self.text_dialog_visible.get()
-        {
-            self.presented_text_request_id
-                .set(current_snapshot.text.request_id);
-            self.present_text_dialog(&current_snapshot.text);
-        }
-
-        if let Some(report) = current_snapshot.latest_import_report.as_ref() {
-            let already_presented = self.presented_import_report_id.get() == Some(report.id);
-            if !already_presented && !self.import_report_visible.get() {
-                self.presented_import_report_id.set(Some(report.id));
-                self.present_import_report(report);
-            }
-        }
+        let current_snapshot = self.current_refresh_snapshot();
+        self.process_post_refresh_actions(&current_snapshot);
 
         self.last_zoom_percent.replace(zoom_percent);
     }
