@@ -61,15 +61,11 @@ impl<T> HistoryStack<T> {
     }
 
     pub fn undo(&mut self) -> Option<&T> {
-        let entry = self.undo_entries.pop()?;
-        self.redo_entries.push(entry);
-        self.redo_entries.last()
+        Self::transfer_entry(&mut self.undo_entries, &mut self.redo_entries)
     }
 
     pub fn redo(&mut self) -> Option<&T> {
-        let entry = self.redo_entries.pop()?;
-        self.undo_entries.push(entry);
-        self.undo_entries.last()
+        Self::transfer_entry(&mut self.redo_entries, &mut self.undo_entries)
     }
 
     pub fn current_undo(&self) -> Option<&T> {
@@ -86,6 +82,12 @@ impl<T> HistoryStack<T> {
 
     pub fn redo_entries(&self) -> &[T] {
         &self.redo_entries
+    }
+
+    fn transfer_entry<'a>(source: &mut Vec<T>, destination: &'a mut Vec<T>) -> Option<&'a T> {
+        let entry = source.pop()?;
+        destination.push(entry);
+        destination.last()
     }
 }
 
