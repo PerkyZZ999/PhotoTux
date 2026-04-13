@@ -163,41 +163,7 @@ impl ShellUiState {
     }
 
     fn append_props_overview_rows(&self, snapshot: &ShellSnapshot) {
-        for row in [
-            format!("Tool: {}", snapshot.active_tool_name),
-            format!(
-                "Tool Shortcut: {}",
-                shell_tool_shortcut(snapshot.active_tool)
-            ),
-            format!("Layer: {}", snapshot.active_layer_name),
-            format!("Selection: {}", snapshot.selected_structure_name),
-            format!("Edit Target: {}", snapshot.active_edit_target_name),
-            format!("Blend: {}", snapshot.active_layer_blend_mode),
-            format!("Opacity: {}%", snapshot.active_layer_opacity_percent),
-            format!(
-                "Visible: {}",
-                if snapshot.active_layer_visible {
-                    "Yes"
-                } else {
-                    "No"
-                }
-            ),
-            format!(
-                "Mask: {}",
-                if !snapshot.active_layer_has_mask {
-                    "None"
-                } else if snapshot.active_layer_mask_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-            ),
-            format!("Brush Preset: {}", snapshot.brush_preset_name),
-            format!("Brush Radius: {} px", snapshot.brush_radius),
-            format!("Brush Hardness: {}%", snapshot.brush_hardness_percent),
-            format!("Brush Spacing: {} px", snapshot.brush_spacing),
-            format!("Brush Flow: {}%", snapshot.brush_flow_percent),
-        ] {
+        for row in props_overview_rows(snapshot) {
             let label = Label::new(Some(&row));
             label.set_xalign(0.0);
             label.add_css_class("panel-row");
@@ -206,35 +172,7 @@ impl ShellUiState {
     }
 
     fn append_props_text_section(&self, snapshot: &ShellSnapshot) {
-        for row in [
-            format!(
-                "Text Content: {}",
-                if snapshot.text.content.is_empty() {
-                    "<empty>"
-                } else {
-                    snapshot.text.content.as_str()
-                }
-            ),
-            format!(
-                "Text Style: {} {}px | Line {}% | Track {}",
-                snapshot.text.font_family,
-                snapshot.text.font_size_px,
-                snapshot.text.line_height_percent,
-                snapshot.text.letter_spacing
-            ),
-            format!(
-                "Text Fill: #{:02X}{:02X}{:02X}{:02X} | Align {:?}",
-                snapshot.text.fill_rgba[0],
-                snapshot.text.fill_rgba[1],
-                snapshot.text.fill_rgba[2],
-                snapshot.text.fill_rgba[3],
-                snapshot.text.alignment
-            ),
-            format!(
-                "Text Origin: {}, {}",
-                snapshot.text.origin_x, snapshot.text.origin_y
-            ),
-        ] {
+        for row in props_text_rows(snapshot) {
             let label = Label::new(Some(&row));
             label.set_xalign(0.0);
             label.add_css_class("panel-row");
@@ -332,23 +270,10 @@ impl ShellUiState {
     }
 
     fn append_props_selection_rows(&self, snapshot: &ShellSnapshot) {
-        let Some(selection) = snapshot.selection_rect else {
+        let Some(rows) = props_selection_rows(snapshot) else {
             return;
         };
-        for row in [
-            format!(
-                "Selection: {},{}  {}x{}",
-                selection.x, selection.y, selection.width, selection.height
-            ),
-            format!(
-                "Selection Mode: {}",
-                if snapshot.selection_inverted {
-                    "Inverted"
-                } else {
-                    "Normal"
-                }
-            ),
-        ] {
+        for row in rows {
             let label = Label::new(Some(&row));
             label.set_xalign(0.0);
             label.add_css_class("panel-row");
@@ -356,32 +281,15 @@ impl ShellUiState {
         }
 
         if snapshot.transform_active {
-            let label = Label::new(Some(&format!(
-                "Transform: {}% | X {}% | Y {}% | {}deg",
-                snapshot.transform_scale_percent,
-                snapshot.transform_scale_x_percent,
-                snapshot.transform_scale_y_percent,
-                snapshot.transform_rotation_degrees
-            )));
+            let row = props_transform_row(snapshot);
+            let label = Label::new(Some(&row));
             label.set_xalign(0.0);
             label.add_css_class("panel-row");
             self.properties_body.append(&label);
         }
 
-        let guides_label = Label::new(Some(&format!(
-            "Guides: {} ({}) | Snapping {}",
-            snapshot.guide_count,
-            if snapshot.guides_visible {
-                "Visible"
-            } else {
-                "Hidden"
-            },
-            if snapshot.snapping_enabled {
-                "On"
-            } else {
-                "Off"
-            }
-        )));
+        let guides_row = props_guides_row(snapshot);
+        let guides_label = Label::new(Some(&guides_row));
         guides_label.set_xalign(0.0);
         guides_label.add_css_class("panel-row");
         self.properties_body.append(&guides_label);
@@ -1188,6 +1096,121 @@ impl ShellUiState {
             self.history_body.append(&row);
         }
     }
+}
+
+fn props_overview_rows(snapshot: &ShellSnapshot) -> [String; 14] {
+    [
+        format!("Tool: {}", snapshot.active_tool_name),
+        format!(
+            "Tool Shortcut: {}",
+            shell_tool_shortcut(snapshot.active_tool)
+        ),
+        format!("Layer: {}", snapshot.active_layer_name),
+        format!("Selection: {}", snapshot.selected_structure_name),
+        format!("Edit Target: {}", snapshot.active_edit_target_name),
+        format!("Blend: {}", snapshot.active_layer_blend_mode),
+        format!("Opacity: {}%", snapshot.active_layer_opacity_percent),
+        format!(
+            "Visible: {}",
+            if snapshot.active_layer_visible {
+                "Yes"
+            } else {
+                "No"
+            }
+        ),
+        format!(
+            "Mask: {}",
+            if !snapshot.active_layer_has_mask {
+                "None"
+            } else if snapshot.active_layer_mask_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        format!("Brush Preset: {}", snapshot.brush_preset_name),
+        format!("Brush Radius: {} px", snapshot.brush_radius),
+        format!("Brush Hardness: {}%", snapshot.brush_hardness_percent),
+        format!("Brush Spacing: {} px", snapshot.brush_spacing),
+        format!("Brush Flow: {}%", snapshot.brush_flow_percent),
+    ]
+}
+
+fn props_text_rows(snapshot: &ShellSnapshot) -> [String; 4] {
+    [
+        format!(
+            "Text Content: {}",
+            if snapshot.text.content.is_empty() {
+                "<empty>"
+            } else {
+                snapshot.text.content.as_str()
+            }
+        ),
+        format!(
+            "Text Style: {} {}px | Line {}% | Track {}",
+            snapshot.text.font_family,
+            snapshot.text.font_size_px,
+            snapshot.text.line_height_percent,
+            snapshot.text.letter_spacing
+        ),
+        format!(
+            "Text Fill: #{:02X}{:02X}{:02X}{:02X} | Align {:?}",
+            snapshot.text.fill_rgba[0],
+            snapshot.text.fill_rgba[1],
+            snapshot.text.fill_rgba[2],
+            snapshot.text.fill_rgba[3],
+            snapshot.text.alignment
+        ),
+        format!(
+            "Text Origin: {}, {}",
+            snapshot.text.origin_x, snapshot.text.origin_y
+        ),
+    ]
+}
+
+fn props_selection_rows(snapshot: &ShellSnapshot) -> Option<[String; 2]> {
+    let selection = snapshot.selection_rect?;
+    Some([
+        format!(
+            "Selection: {},{}  {}x{}",
+            selection.x, selection.y, selection.width, selection.height
+        ),
+        format!(
+            "Selection Mode: {}",
+            if snapshot.selection_inverted {
+                "Inverted"
+            } else {
+                "Normal"
+            }
+        ),
+    ])
+}
+
+fn props_transform_row(snapshot: &ShellSnapshot) -> String {
+    format!(
+        "Transform: {}% | X {}% | Y {}% | {}deg",
+        snapshot.transform_scale_percent,
+        snapshot.transform_scale_x_percent,
+        snapshot.transform_scale_y_percent,
+        snapshot.transform_rotation_degrees
+    )
+}
+
+fn props_guides_row(snapshot: &ShellSnapshot) -> String {
+    format!(
+        "Guides: {} ({}) | Snapping {}",
+        snapshot.guide_count,
+        if snapshot.guides_visible {
+            "Visible"
+        } else {
+            "Hidden"
+        },
+        if snapshot.snapping_enabled {
+            "On"
+        } else {
+            "Off"
+        }
+    )
 }
 
 #[derive(Clone, Copy)]
