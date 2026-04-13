@@ -7,7 +7,7 @@ use doc_model::{
     TileCoord,
 };
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
+use image::{ImageBuffer, ImageFormat, Pixel, PixelWithColorType, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
@@ -983,53 +983,57 @@ pub fn import_psd_from_path_with_sidecar(
 }
 
 pub fn export_png_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
-    let flattened = flatten_document_rgba(document);
-    let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
-        document.canvas_size.width,
-        document.canvas_size.height,
-        flattened,
+    export_flattened_image::<Rgba<u8>>(
+        path,
+        document,
+        flatten_document_rgba(document),
+        ImageFormat::Png,
+        "failed to build PNG image buffer from flattened document",
     )
-    .ok_or_else(|| anyhow::anyhow!("failed to build PNG image buffer from flattened document"))?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    image.save_with_format(path, ImageFormat::Png)?;
-    Ok(())
 }
 
 pub fn export_jpeg_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
-    let flattened = flatten_document_rgb(document, [255, 255, 255]);
-    let image = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(
-        document.canvas_size.width,
-        document.canvas_size.height,
-        flattened,
+    export_flattened_image::<Rgb<u8>>(
+        path,
+        document,
+        flatten_document_rgb(document, [255, 255, 255]),
+        ImageFormat::Jpeg,
+        "failed to build JPEG image buffer from flattened document",
     )
-    .ok_or_else(|| anyhow::anyhow!("failed to build JPEG image buffer from flattened document"))?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    image.save_with_format(path, ImageFormat::Jpeg)?;
-    Ok(())
 }
 
 pub fn export_webp_to_path(path: &Path, document: &Document) -> anyhow::Result<()> {
-    let flattened = flatten_document_rgba(document);
-    let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+    export_flattened_image::<Rgba<u8>>(
+        path,
+        document,
+        flatten_document_rgba(document),
+        ImageFormat::WebP,
+        "failed to build WebP image buffer from flattened document",
+    )
+}
+
+fn export_flattened_image<P>(
+    path: &Path,
+    document: &Document,
+    flattened: Vec<u8>,
+    format: ImageFormat,
+    buffer_error_message: &str,
+) -> anyhow::Result<()>
+where
+    P: Pixel<Subpixel = u8> + PixelWithColorType,
+{
+    let image = ImageBuffer::<P, Vec<u8>>::from_raw(
         document.canvas_size.width,
         document.canvas_size.height,
         flattened,
     )
-    .ok_or_else(|| anyhow::anyhow!("failed to build WebP image buffer from flattened document"))?;
+    .ok_or_else(|| anyhow::Error::msg(buffer_error_message.to_owned()))?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    image.save_with_format(path, ImageFormat::WebP)?;
+    image.save_with_format(path, format)?;
     Ok(())
 }
 
