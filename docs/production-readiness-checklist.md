@@ -240,6 +240,7 @@ Progress notes:
   - single-layer visual edits such as blend-mode changes, visibility toggles, and opacity changes now refresh only the affected layer or text bounds in the cached flattened canvas instead of invalidating and rebuilding the whole composite.
   - completing rectangular or freeform selection interactions now preserves the flattened raster cache too, so selection-only edits no longer trigger a useless full recomposite at mouse-up.
   - group visibility toggles and layer-mask add/remove/enable state changes now reuse bounded cached refreshes as well, and the same behavior now holds when those mask-state edits are replayed through undo/redo.
+  - move and transform commit/history paths now union the layer's old and new bounds and refresh only that region in the cached flattened canvas, eliminating another full-composite invalidation path during common iteration and undo/redo flows.
 
 ### PROD13 - Add startup splash screen and renderer warm-up path
 

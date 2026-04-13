@@ -1642,6 +1642,38 @@ impl PhotoTuxController {
         })
     }
 
+    fn visual_bounds_for_layer_state_snapshot(
+        snapshot: &LayerStateSnapshot,
+        tile_size: u32,
+    ) -> Option<CanvasRect> {
+        let mut coords = snapshot.tiles.keys().copied();
+        let first = coords.next()?;
+        let mut min_tile_x = first.x as i64;
+        let mut min_tile_y = first.y as i64;
+        let mut max_tile_x = first.x as i64;
+        let mut max_tile_y = first.y as i64;
+
+        for coord in coords {
+            min_tile_x = min_tile_x.min(coord.x as i64);
+            min_tile_y = min_tile_y.min(coord.y as i64);
+            max_tile_x = max_tile_x.max(coord.x as i64);
+            max_tile_y = max_tile_y.max(coord.y as i64);
+        }
+
+        let tile_size = tile_size as i64;
+        let min_x = snapshot.offset_x as i64 + min_tile_x * tile_size;
+        let min_y = snapshot.offset_y as i64 + min_tile_y * tile_size;
+        let max_x = snapshot.offset_x as i64 + (max_tile_x + 1) * tile_size;
+        let max_y = snapshot.offset_y as i64 + (max_tile_y + 1) * tile_size;
+
+        Some(CanvasRect::new(
+            min_x as i32,
+            min_y as i32,
+            max_x.saturating_sub(min_x) as u32,
+            max_y.saturating_sub(min_y) as u32,
+        ))
+    }
+
     fn mark_visual_region_dirty(&mut self, rect: Option<CanvasRect>) {
         self.mark_document_dirty_without_raster_invalidation();
         if let Some(rect) = rect {
@@ -3610,7 +3642,12 @@ impl ShellController for PhotoTuxController {
             session.translate_y,
         ) {
             self.bump_canvas_revision();
-            self.mark_document_dirty();
+            self.mark_visual_region_dirty(Self::union_canvas_rects([
+                Self::visual_bounds_for_layer_state_snapshot(&record.before, self.document.tile_size),
+                Self::visual_bounds_for_layer_state_snapshot(&record.after, self.document.tile_size),
+            ]
+            .into_iter()
+            .flatten()));
             self.push_operation("Transform Layer", EditorOperation::TransformLayer(record));
         } else {
             self.bump_canvas_revision();
@@ -3637,14 +3674,24 @@ impl ShellController for PhotoTuxController {
                     self.mark_document_dirty();
                 }
                 EditorOperation::TransformLayer(record) => {
+                    let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(Self::union_canvas_rects(
+                        before_bounds
+                            .into_iter()
+                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    ));
                 }
                 EditorOperation::MoveLayer(record) => {
+                    let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(Self::union_canvas_rects(
+                        before_bounds
+                            .into_iter()
+                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    ));
                 }
                 EditorOperation::TextLayer(record) => {
                     record.undo(self);
@@ -3692,14 +3739,24 @@ impl ShellController for PhotoTuxController {
                     self.mark_document_dirty();
                 }
                 EditorOperation::TransformLayer(record) => {
+                    let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(Self::union_canvas_rects(
+                        before_bounds
+                            .into_iter()
+                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    ));
                 }
                 EditorOperation::MoveLayer(record) => {
+                    let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(Self::union_canvas_rects(
+                        before_bounds
+                            .into_iter()
+                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    ));
                 }
                 EditorOperation::TextLayer(record) => {
                     record.redo(self);
@@ -6860,6 +6917,45 @@ mod tests {
             controller.snapshot().selection_rect,
             Some(CanvasRect::new(10, 10, 20, 30))
         );
+    }
+
+    #[test]
+    fn move_and_transform_history_preserve_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(25, 10);
+        controller.end_canvas_interaction();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Transform);
+        controller.begin_transform();
+        controller.scale_transform_up();
+        controller.begin_canvas_interaction(0, 0);
+        controller.update_canvas_interaction(20, 10);
+        controller.end_canvas_interaction();
+        controller.commit_transform();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
     }
 
     #[test]
