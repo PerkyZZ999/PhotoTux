@@ -7,7 +7,8 @@
     <file alias="src/ui/fragments/tool-options-bar.ui">src/ui/fragments/tool-options-bar.ui</file>
     <file alias="src/ui/fragments/document-tabs.ui">src/ui/fragments/document-tabs.ui</file>
     <file alias="src/ui/fragments/status-bar.ui">src/ui/fragments/status-bar.ui</file>
-    <file alias="assets/logo/Logo_01.png">assets/logo/Logo_01.png</file>
+    <file alias="assets/logo/Logo_Dark.png">assets/logo/Logo_Dark.png</file>
+    <file alias="assets/logo/Logo_White.png">assets/logo/Logo_White.png</file>
     <file alias="assets/icons/remixicon/brush-2-line.svg">assets/icons/remixicon/brush-2-line.svg</file>
     <file alias="assets/icons/remixicon/drag-move-line.svg">assets/icons/remixicon/drag-move-line.svg</file>
     <file alias="assets/icons/remixicon/eraser-line.svg">assets/icons/remixicon/eraser-line.svg</file>

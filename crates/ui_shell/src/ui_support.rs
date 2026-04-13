@@ -4,12 +4,16 @@ pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
     format!("{UI_RESOURCE_PREFIX}/assets/icons/remixicon/{icon_name}")
 }
 
-pub(super) fn logo_icon_resource_path() -> &'static str {
-    "/com/phototux/assets/logo/Logo_01.png"
+pub(super) fn logo_icon_resource_path(dark_background: bool) -> &'static str {
+    if dark_background {
+        "/com/phototux/assets/logo/Logo_White.png"
+    } else {
+        "/com/phototux/assets/logo/Logo_Dark.png"
+    }
 }
 
-pub(super) fn build_logo_icon(alt_text: &str, size: i32) -> Image {
-    build_optional_resource_image(logo_icon_resource_path(), alt_text, size)
+pub(super) fn build_logo_icon(dark_background: bool, alt_text: &str, size: i32) -> Image {
+    build_optional_resource_image(logo_icon_resource_path(dark_background), alt_text, size)
 }
 
 pub(super) fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {

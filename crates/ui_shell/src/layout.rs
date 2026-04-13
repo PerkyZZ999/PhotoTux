@@ -61,7 +61,7 @@ fn build_header_bar() -> HeaderBar {
                 .set_tooltip_text(Some("Current workspace preset"));
             set_image_resource_or_fallback(
                 &template.logo_image,
-                logo_icon_resource_path(),
+                logo_icon_resource_path(true),
                 APP_NAME,
                 16,
             );
@@ -92,7 +92,7 @@ fn build_header_bar_fallback() -> HeaderBar {
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);
     title_row.add_css_class("app-brand");
-    let title_icon = build_logo_icon(APP_NAME, 16);
+    let title_icon = build_logo_icon(true, APP_NAME, 16);
     title_icon.add_css_class("titlebar-icon");
     title_row.append(&title_icon);
     header.pack_start(&title_row);
