@@ -432,6 +432,76 @@ impl PendingDocumentAction {
     }
 }
 
+type ShellTextUpdateCallback = Rc<dyn Fn()>;
+
+#[derive(Clone)]
+struct ShellTextDialogControls {
+    content_entry: Entry,
+    font_family: ComboBoxText,
+    font_size: SpinButton,
+    line_height: SpinButton,
+    letter_spacing: SpinButton,
+    alignment: ComboBoxText,
+    color_r: SpinButton,
+    color_g: SpinButton,
+    color_b: SpinButton,
+    color_a: SpinButton,
+}
+
+impl ShellTextDialogControls {
+    fn build_update(&self, fallback_font_family: &str) -> ShellTextUpdate {
+        ShellTextUpdate {
+            content: self.content_entry.text().to_string(),
+            font_family: self
+                .font_family
+                .active_text()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| fallback_font_family.to_string()),
+            font_size_px: self.font_size.value().round() as u32,
+            line_height_percent: self.line_height.value().round() as u32,
+            letter_spacing: self.letter_spacing.value().round() as i32,
+            fill_rgba: [
+                self.color_r.value().round() as u8,
+                self.color_g.value().round() as u8,
+                self.color_b.value().round() as u8,
+                self.color_a.value().round() as u8,
+            ],
+            alignment: match self.alignment.active_id().as_ref().map(|id| id.as_str()) {
+                Some("center") => ShellTextAlignment::Center,
+                Some("right") => ShellTextAlignment::Right,
+                _ => ShellTextAlignment::Left,
+            },
+        }
+    }
+
+    fn connect_update_signals(&self, sync: &ShellTextUpdateCallback) {
+        {
+            let sync = sync.clone();
+            self.content_entry.connect_changed(move |_| sync());
+        }
+        for spin in [
+            &self.font_size,
+            &self.line_height,
+            &self.letter_spacing,
+            &self.color_r,
+            &self.color_g,
+            &self.color_b,
+            &self.color_a,
+        ] {
+            let sync = sync.clone();
+            spin.connect_value_changed(move |_| sync());
+        }
+        {
+            let sync = sync.clone();
+            self.font_family.connect_changed(move |_| sync());
+        }
+        {
+            let sync = sync.clone();
+            self.alignment.connect_changed(move |_| sync());
+        }
+    }
+}
+
 struct ShellUiState {
     controller: Rc<RefCell<dyn ShellController>>,
     window: RefCell<Option<ApplicationWindow>>,
@@ -1166,68 +1236,27 @@ impl ShellUiState {
 
         let controller = self.controller.clone();
         let fallback_font_family = text.font_family.clone();
-        let sync: Rc<dyn Fn()> = Rc::new({
-            let content_entry = content_entry.clone();
-            let font_family = font_family.clone();
-            let font_size = font_size.clone();
-            let line_height = line_height.clone();
-            let letter_spacing = letter_spacing.clone();
-            let alignment = alignment.clone();
-            let color_r = color_r.clone();
-            let color_g = color_g.clone();
-            let color_b = color_b.clone();
-            let color_a = color_a.clone();
+        let controls = ShellTextDialogControls {
+            content_entry: content_entry.clone(),
+            font_family: font_family.clone(),
+            font_size: font_size.clone(),
+            line_height: line_height.clone(),
+            letter_spacing: letter_spacing.clone(),
+            alignment: alignment.clone(),
+            color_r: color_r.clone(),
+            color_g: color_g.clone(),
+            color_b: color_b.clone(),
+            color_a: color_a.clone(),
+        };
+        let sync: ShellTextUpdateCallback = Rc::new({
+            let controls = controls.clone();
             move || {
                 controller
                     .borrow_mut()
-                    .update_text_session(ShellTextUpdate {
-                        content: content_entry.text().to_string(),
-                        font_family: font_family
-                            .active_text()
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| fallback_font_family.clone()),
-                        font_size_px: font_size.value().round() as u32,
-                        line_height_percent: line_height.value().round() as u32,
-                        letter_spacing: letter_spacing.value().round() as i32,
-                        fill_rgba: [
-                            color_r.value().round() as u8,
-                            color_g.value().round() as u8,
-                            color_b.value().round() as u8,
-                            color_a.value().round() as u8,
-                        ],
-                        alignment: match alignment.active_id().as_ref().map(|id| id.as_str()) {
-                            Some("center") => ShellTextAlignment::Center,
-                            Some("right") => ShellTextAlignment::Right,
-                            _ => ShellTextAlignment::Left,
-                        },
-                    });
+                    .update_text_session(controls.build_update(&fallback_font_family));
             }
         });
-
-        {
-            let sync = sync.clone();
-            content_entry.connect_changed(move |_| sync());
-        }
-        for spin in [
-            &font_size,
-            &line_height,
-            &letter_spacing,
-            &color_r,
-            &color_g,
-            &color_b,
-            &color_a,
-        ] {
-            let sync = sync.clone();
-            spin.connect_value_changed(move |_| sync());
-        }
-        {
-            let sync = sync.clone();
-            font_family.connect_changed(move |_| sync());
-        }
-        {
-            let sync = sync.clone();
-            alignment.connect_changed(move |_| sync());
-        }
+        controls.connect_update_signals(&sync);
 
         let shell_state = self.clone();
         dialog.connect_response(move |dialog, response| {
