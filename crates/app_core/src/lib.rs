@@ -3463,6 +3463,28 @@ impl ShellController for PhotoTuxController {
         self.push_history("Reset Colors");
     }
 
+    fn set_foreground_color(&mut self, rgba: [u8; 4]) {
+        if self.foreground_color == rgba {
+            return;
+        }
+        self.foreground_color = rgba;
+        self.push_history(format!(
+            "Set Foreground #{:02X}{:02X}{:02X}",
+            rgba[0], rgba[1], rgba[2]
+        ));
+    }
+
+    fn set_background_color(&mut self, rgba: [u8; 4]) {
+        if self.background_color == rgba {
+            return;
+        }
+        self.background_color = rgba;
+        self.push_history(format!(
+            "Set Background #{:02X}{:02X}{:02X}",
+            rgba[0], rgba[1], rgba[2]
+        ));
+    }
+
     fn clear_selection(&mut self) {
         let before = self.document.selection_shape().cloned();
         let before_inverted = self.document.selection_inverted();
@@ -5337,6 +5359,12 @@ mod tests {
         let reset = controller.snapshot();
         assert_eq!(reset.foreground_color, [232, 236, 243, 255]);
         assert_eq!(reset.background_color, [27, 29, 33, 255]);
+
+        controller.set_foreground_color([255, 140, 0, 255]);
+        controller.set_background_color([12, 24, 36, 255]);
+        let recolored = controller.snapshot();
+        assert_eq!(recolored.foreground_color, [255, 140, 0, 255]);
+        assert_eq!(recolored.background_color, [12, 24, 36, 255]);
     }
 
     #[test]

@@ -8,6 +8,7 @@ enum UiTemplate {
     InfoDialog,
     PanelGroup,
     Titlebar,
+    #[allow(dead_code)]
     ToolOptionsBar,
     DocumentTabs,
     StatusBar,
@@ -65,6 +66,7 @@ pub(crate) struct TitlebarTemplate {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ToolOptionsBarTemplate {
     pub(crate) root: GtkBox,
     pub(crate) tool_icon: Image,
@@ -160,6 +162,7 @@ pub(crate) fn load_titlebar_template() -> Result<TitlebarTemplate> {
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn load_tool_options_bar_template() -> Result<ToolOptionsBarTemplate> {
     let builder = load_builder(UiTemplate::ToolOptionsBar);
 

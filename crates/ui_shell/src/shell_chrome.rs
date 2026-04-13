@@ -13,37 +13,9 @@ pub(super) fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
 
 pub(super) fn build_tool_options_bar(
     controller: Rc<RefCell<dyn ShellController>>,
-) -> (GtkBox, Image, Label) {
+) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
     let snapshot = controller.borrow().snapshot();
-    let chip_titles = [
-        "Preset: Soft Round",
-        "Size 24",
-        "Hardness 80%",
-        "Opacity 100%",
-        "Flow 100%",
-        "Mode Normal",
-    ];
-
-    match load_tool_options_bar_template() {
-        Ok(template) => {
-            set_image_resource_or_fallback(
-                &template.tool_icon,
-                &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
-                &snapshot.active_tool_name,
-                12,
-            );
-            template.tool_label.set_label(&snapshot.active_tool_name);
-            for (button, title) in template.option_chips.iter().zip(chip_titles) {
-                button.set_label(title);
-                button.set_has_frame(false);
-            }
-            (template.root, template.tool_icon, template.tool_label)
-        }
-        Err(error) => {
-            tracing::error!(%error, "failed to load tool options template");
-            build_tool_options_bar_fallback(snapshot)
-        }
-    }
+    build_tool_options_bar_fallback(snapshot)
 }
 
 pub(super) fn build_left_tool_rail(
@@ -122,24 +94,49 @@ pub(super) fn build_left_tool_rail(
     rail.append(&spacer);
 
     let swatches = gtk4::Overlay::new();
-    swatches.set_size_request(24, 24);
+    swatches.set_size_request(30, 30);
     swatches.add_css_class("swatch-stack");
 
     let bg = build_color_chip("", "swatch-bg");
     bg.set_tooltip_text(Some("Background Color"));
     bg.set_halign(gtk4::Align::End);
     bg.set_valign(gtk4::Align::End);
+    bg.set_margin_bottom(1);
+    bg.set_margin_end(1);
     swatches.set_child(Some(&bg));
 
     let fg = build_color_chip("", "swatch-fg");
     fg.set_tooltip_text(Some("Foreground Color"));
     fg.set_halign(gtk4::Align::Start);
     fg.set_valign(gtk4::Align::Start);
+    fg.set_margin_top(1);
+    fg.set_margin_start(1);
     swatches.add_overlay(&fg);
 
     let rail_spacer = GtkBox::new(Orientation::Vertical, 4);
     rail_spacer.set_halign(gtk4::Align::Center);
     rail_spacer.append(&swatches);
+
+    let swatch_actions = GtkBox::new(Orientation::Horizontal, 2);
+    swatch_actions.add_css_class("swatch-stack-actions");
+
+    let reset_colors = build_icon_only_button("refresh-line.svg", "Default colors", "chrome-button", 10);
+    reset_colors.add_css_class("swatch-stack-action");
+    {
+        let controller = controller.clone();
+        reset_colors.connect_clicked(move |_| controller.borrow_mut().reset_colors());
+    }
+    swatch_actions.append(&reset_colors);
+
+    let swap_colors = build_icon_only_button("swap-line.svg", "Swap foreground/background", "chrome-button", 10);
+    swap_colors.add_css_class("swatch-stack-action");
+    {
+        let controller = controller.clone();
+        swap_colors.connect_clicked(move |_| controller.borrow_mut().swap_colors());
+    }
+    swatch_actions.append(&swap_colors);
+
+    rail_spacer.append(&swatch_actions);
     rail.append(&rail_spacer);
 
     (rail, buttons)
@@ -299,31 +296,32 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     let workspace = GtkBox::new(Orientation::Vertical, 0);
     workspace.add_css_class("document-workspace");
 
+    let canvas_cluster = GtkBox::new(Orientation::Vertical, 0);
+    canvas_cluster.add_css_class("canvas-cluster");
+    canvas_cluster.set_hexpand(true);
+    canvas_cluster.set_vexpand(true);
+    canvas_cluster.set_halign(Align::Center);
+    canvas_cluster.set_valign(Align::Center);
+
     let top_strip = GtkBox::new(Orientation::Horizontal, 0);
+    top_strip.set_halign(Align::Center);
     let top_left_corner = Label::new(Some(""));
     top_left_corner.add_css_class("ruler-corner");
     top_left_corner.set_size_request(24, 24);
     top_strip.append(&top_left_corner);
 
-    let horizontal_ruler = Label::new(Some("0    250    500    750    1000    1250    1500"));
-    horizontal_ruler.add_css_class("ruler-horizontal");
-    horizontal_ruler.set_hexpand(true);
-    top_strip.append(&horizontal_ruler);
-
-    workspace.append(&top_strip);
+    top_strip.append(&shell_state.horizontal_ruler_label);
+    canvas_cluster.append(&top_strip);
 
     let content = GtkBox::new(Orientation::Horizontal, 0);
-    let vertical_ruler = Label::new(Some("0\n250\n500\n750\n1000"));
-    vertical_ruler.add_css_class("ruler-vertical");
-    vertical_ruler.set_size_request(24, -1);
-    content.append(&vertical_ruler);
+    content.set_halign(Align::Center);
+    content.set_valign(Align::Center);
+    content.append(&shell_state.vertical_ruler_label);
 
     let canvas_frame = GtkBox::new(Orientation::Vertical, 0);
     canvas_frame.add_css_class("canvas-frame");
-    canvas_frame.set_hexpand(true);
-    canvas_frame.set_vexpand(true);
-    canvas_frame.set_halign(Align::Center);
-    canvas_frame.set_valign(Align::Center);
+    canvas_frame.set_halign(Align::Start);
+    canvas_frame.set_valign(Align::Start);
 
     let canvas_overlay = gtk4::Overlay::new();
     canvas_overlay.set_hexpand(true);
@@ -398,7 +396,8 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     canvas_frame.append(&canvas_overlay);
 
     content.append(&canvas_frame);
-    workspace.append(&content);
+    canvas_cluster.append(&content);
+    workspace.append(&canvas_cluster);
 
     workspace
 }
@@ -450,8 +449,126 @@ fn build_status_notice_label(text: &str) -> Label {
     label
 }
 
-fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, Label) {
-    let bar = GtkBox::new(Orientation::Horizontal, 6);
+pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String); 6] {
+    match snapshot.active_tool {
+        ShellToolKind::Brush | ShellToolKind::Eraser => [
+            ("Preset".to_string(), snapshot.brush_preset_name.clone()),
+            ("Size".to_string(), format!("{} px", snapshot.brush_radius)),
+            (
+                "Hardness".to_string(),
+                format!("{}%", snapshot.brush_hardness_percent),
+            ),
+            ("Spacing".to_string(), format!("{} px", snapshot.brush_spacing)),
+            ("Flow".to_string(), format!("{}%", snapshot.brush_flow_percent)),
+            (
+                "Pressure".to_string(),
+                match (
+                    snapshot.pressure_size_enabled,
+                    snapshot.pressure_opacity_enabled,
+                ) {
+                    (true, true) => "Size + Opacity".to_string(),
+                    (true, false) => "Size".to_string(),
+                    (false, true) => "Opacity".to_string(),
+                    (false, false) => "Off".to_string(),
+                },
+            ),
+        ],
+        ShellToolKind::Text => [
+            ("Font".to_string(), snapshot.text.font_family.clone()),
+            ("Size".to_string(), format!("{} px", snapshot.text.font_size_px)),
+            (
+                "Leading".to_string(),
+                format!("{}%", snapshot.text.line_height_percent),
+            ),
+            (
+                "Tracking".to_string(),
+                snapshot.text.letter_spacing.to_string(),
+            ),
+            (
+                "Align".to_string(),
+                match snapshot.text.alignment {
+                    ShellTextAlignment::Left => "Left",
+                    ShellTextAlignment::Center => "Center",
+                    ShellTextAlignment::Right => "Right",
+                }
+                .to_string(),
+            ),
+            (
+                "Fill".to_string(),
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    snapshot.text.fill_rgba[0],
+                    snapshot.text.fill_rgba[1],
+                    snapshot.text.fill_rgba[2]
+                ),
+            ),
+        ],
+        ShellToolKind::Transform => [
+            (
+                "Scale".to_string(),
+                format!("{}%", snapshot.transform_scale_percent),
+            ),
+            (
+                "Scale X".to_string(),
+                format!("{}%", snapshot.transform_scale_x_percent),
+            ),
+            (
+                "Scale Y".to_string(),
+                format!("{}%", snapshot.transform_scale_y_percent),
+            ),
+            (
+                "Rotate".to_string(),
+                format!("{}°", snapshot.transform_rotation_degrees),
+            ),
+            ("Target".to_string(), snapshot.active_edit_target_name.clone()),
+            (
+                "Snap".to_string(),
+                if snapshot.snapping_enabled {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_string(),
+            ),
+        ],
+        _ => [
+            ("Layer".to_string(), snapshot.active_layer_name.clone()),
+            (
+                "Canvas".to_string(),
+                format!("{}×{}", snapshot.canvas_size.width, snapshot.canvas_size.height),
+            ),
+            ("Blend".to_string(), snapshot.active_layer_blend_mode.clone()),
+            (
+                "Opacity".to_string(),
+                format!("{}%", snapshot.active_layer_opacity_percent),
+            ),
+            (
+                "Selection".to_string(),
+                if snapshot.selection_rect.is_some()
+                    || snapshot.selection_path.is_some()
+                    || snapshot.selection_preview_path.is_some()
+                {
+                    "Active"
+                } else {
+                    "None"
+                }
+                .to_string(),
+            ),
+            (
+                "Snap".to_string(),
+                if snapshot.snapping_enabled {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_string(),
+            ),
+        ],
+    }
+}
+
+fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
+    let bar = GtkBox::new(Orientation::Horizontal, 0);
     bar.add_css_class("tool-options-bar");
     let tool_icon = build_remix_icon(
         shell_tool_icon(snapshot.active_tool),
@@ -461,25 +578,39 @@ fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, L
     tool_icon.add_css_class("tool-options-icon");
     bar.append(&tool_icon);
 
-    let tool_name = snapshot.active_tool_name;
+    let tool_name = snapshot.active_tool_name.clone();
     let tool_label = Label::new(Some(&tool_name));
     tool_label.add_css_class("tool-options-label");
     bar.append(&tool_label);
 
-    for title in [
-        "Preset: Soft Round",
-        "Size 24",
-        "Hardness 80%",
-        "Opacity 100%",
-        "Flow 100%",
-        "Mode Normal",
-    ] {
-        let chip = Button::with_label(title);
-        chip.add_css_class("tool-chip");
-        chip.add_css_class("tool-option-chip");
-        chip.set_has_frame(false);
-        bar.append(&chip);
+    let groups = tool_option_groups(&snapshot);
+    let option_keys = std::array::from_fn(|index| {
+        let label = Label::new(Some(&groups[index].0));
+        label.add_css_class("tool-option-key");
+        label
+    });
+    let option_values = std::array::from_fn(|index| {
+        let label = Label::new(Some(&groups[index].1));
+        label.add_css_class("tool-option-value");
+        label.set_tooltip_text(Some(&format!("{}: {}", groups[index].0, groups[index].1)));
+        label
+    });
+
+    for index in 0..groups.len() {
+        let divider = Separator::new(Orientation::Vertical);
+        divider.add_css_class("tool-options-divider");
+        bar.append(&divider);
+
+        let group = GtkBox::new(Orientation::Horizontal, 4);
+        group.add_css_class("tool-options-group");
+        group.append(&option_keys[index]);
+
+        let value_box = GtkBox::new(Orientation::Horizontal, 0);
+        value_box.add_css_class("tool-option-box");
+        value_box.append(&option_values[index]);
+        group.append(&value_box);
+        bar.append(&group);
     }
 
-    (bar, tool_icon, tool_label)
+    (bar, tool_icon, tool_label, option_keys, option_values)
 }

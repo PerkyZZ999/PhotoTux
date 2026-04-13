@@ -1,6 +1,7 @@
 use super::*;
 use crate::ui_support::{
-    build_tool_chip_icon_button, build_tool_chip_icon_label_button,
+    build_icon_only_button, build_remix_icon, build_tool_chip_icon_button,
+    build_tool_chip_icon_label_button,
 };
 
 impl ShellUiState {
@@ -16,13 +17,39 @@ impl ShellUiState {
 
     pub(super) fn refresh_color_panel(&self, snapshot: &ShellSnapshot) {
         clear_box_children(&self.color_body);
+        self.color_body.add_css_class("color-panel-body");
 
-        let chip_row = GtkBox::new(Orientation::Horizontal, 6);
-        chip_row.append(&build_color_swatch_label("FG", snapshot.foreground_color));
-        chip_row.append(&build_color_swatch_label("BG", snapshot.background_color));
-        self.color_body.append(&chip_row);
+        let summary = GtkBox::new(Orientation::Horizontal, 8);
+        summary.add_css_class("color-summary-row");
+        summary.append(&build_color_summary_chip("FG", snapshot.foreground_color));
+        summary.append(&build_color_summary_chip("BG", snapshot.background_color));
+        self.color_body.append(&summary);
+
+        let picker_row = GtkBox::new(Orientation::Horizontal, 6);
+        picker_row.append(&build_color_gradient_preview(snapshot.foreground_color));
+        picker_row.append(&build_color_spectrum_preview(snapshot.foreground_color));
+        self.color_body.append(&picker_row);
+
+        let fg_hex = rgba_hex(snapshot.foreground_color);
+        self.color_body.append(&build_color_value_row(&[(
+            "#",
+            fg_hex.trim_start_matches('#').to_string(),
+        )]));
+        self.color_body.append(&build_color_value_row(&[
+            ("R", snapshot.foreground_color[0].to_string()),
+            ("G", snapshot.foreground_color[1].to_string()),
+            ("B", snapshot.foreground_color[2].to_string()),
+        ]));
+        let [c, m, y, k] = rgba_to_cmyk(snapshot.foreground_color);
+        self.color_body.append(&build_color_value_row(&[
+            ("C", c.to_string()),
+            ("M", m.to_string()),
+            ("Y", y.to_string()),
+            ("K", k.to_string()),
+        ]));
 
         let buttons = GtkBox::new(Orientation::Horizontal, 6);
+        buttons.add_css_class("color-panel-actions");
         let swap = build_tool_chip_icon_button("swap-line.svg", "Swap foreground and background colors");
         {
             let controller = self.controller.clone();
@@ -36,8 +63,55 @@ impl ShellUiState {
             reset.connect_clicked(move |_| controller.borrow_mut().reset_colors());
         }
         buttons.append(&reset);
-
         self.color_body.append(&buttons);
+
+        let swatch_header = GtkBox::new(Orientation::Horizontal, 4);
+        swatch_header.add_css_class("color-swatches-header");
+        let swatch_title = Label::new(Some("Swatches"));
+        swatch_title.set_xalign(0.0);
+        swatch_title.add_css_class("color-swatches-title");
+        swatch_header.append(&swatch_title);
+
+        let swatch_menu = Button::with_label("☰");
+        swatch_menu.add_css_class("panel-inline-menu");
+        swatch_menu.set_hexpand(true);
+        swatch_menu.set_halign(Align::End);
+        swatch_menu.set_sensitive(false);
+        swatch_menu.set_tooltip_text(Some("Swatch options"));
+        swatch_header.append(&swatch_menu);
+        self.color_body.append(&swatch_header);
+
+        let swatch_grid = gtk4::Grid::new();
+        swatch_grid.set_column_spacing(2);
+        swatch_grid.set_row_spacing(2);
+        swatch_grid.add_css_class("color-swatches-grid");
+        for (index, color) in DEFAULT_COLOR_SWATCHES.iter().copied().enumerate() {
+            let swatch = Button::new();
+            swatch.set_has_frame(false);
+            swatch.add_css_class("panel-swatch-button");
+            if color == [
+                snapshot.foreground_color[0],
+                snapshot.foreground_color[1],
+                snapshot.foreground_color[2],
+            ] {
+                swatch.add_css_class("panel-swatch-button-active");
+            }
+            swatch.set_tooltip_text(Some(&format!(
+                "Set foreground color to #{:02X}{:02X}{:02X}",
+                color[0], color[1], color[2]
+            )));
+            swatch.set_child(Some(&build_color_patch([color[0], color[1], color[2], 255], 14)));
+            {
+                let controller = self.controller.clone();
+                swatch.connect_clicked(move |_| {
+                    controller
+                        .borrow_mut()
+                        .set_foreground_color([color[0], color[1], color[2], 255]);
+                });
+            }
+            swatch_grid.attach(&swatch, (index % 18) as i32, (index / 18) as i32, 1, 1);
+        }
+        self.color_body.append(&swatch_grid);
     }
 
     pub(super) fn refresh_properties_panel(&self, snapshot: &ShellSnapshot) {
@@ -686,11 +760,138 @@ impl ShellUiState {
         }
     }
 
-    pub(super) fn refresh_layers_panel(&self, snapshot: &ShellSnapshot) {
+    pub(super) fn refresh_layers_panel(self: &Rc<Self>, snapshot: &ShellSnapshot) {
         clear_box_children(&self.layers_body);
 
+        let filter_row = GtkBox::new(Orientation::Horizontal, 6);
+        filter_row.add_css_class("layers-toolbar");
+
+        let filter_box = GtkBox::new(Orientation::Horizontal, 4);
+        filter_box.add_css_class("layer-filter-box");
+        filter_box.append(&build_remix_icon("search-line.svg", "Find layers", 12));
+
+        let filter_entry = Entry::new();
+        filter_entry.set_hexpand(true);
+        filter_entry.set_placeholder_text(Some("Find"));
+        filter_entry.set_text(&self.layers_filter_text.borrow());
+        filter_entry.add_css_class("layers-filter-entry");
+        {
+            let shell_state = self.clone();
+            filter_entry.connect_changed(move |entry| {
+                let next = entry.text().to_string();
+                if *shell_state.layers_filter_text.borrow() != next {
+                    shell_state.layers_filter_text.replace(next);
+                    shell_state.bump_ui_revision();
+                }
+            });
+        }
+        filter_box.append(&filter_entry);
+
+        let clear_filter = build_icon_only_button("close-line.svg", "Clear layer filter", "chrome-button", 10);
+        clear_filter.add_css_class("layer-filter-clear");
+        clear_filter.set_sensitive(!self.layers_filter_text.borrow().is_empty());
+        {
+            let shell_state = self.clone();
+            clear_filter.connect_clicked(move |_| {
+                if !shell_state.layers_filter_text.borrow().is_empty() {
+                    shell_state.layers_filter_text.replace(String::new());
+                    shell_state.bump_ui_revision();
+                }
+            });
+        }
+        filter_box.append(&clear_filter);
+        filter_row.append(&filter_box);
+        self.layers_body.append(&filter_row);
+
+        let controls_row = GtkBox::new(Orientation::Horizontal, 8);
+        controls_row.add_css_class("layers-blend-row");
+
+        let blend_group = GtkBox::new(Orientation::Horizontal, 4);
+        blend_group.add_css_class("layer-control-group");
+        let blend_prev =
+            build_icon_only_button("arrow-go-back-line.svg", "Previous blend mode", "chrome-button", 10);
+        {
+            let controller = self.controller.clone();
+            blend_prev.connect_clicked(move |_| controller.borrow_mut().previous_active_layer_blend_mode());
+        }
+        blend_group.append(&blend_prev);
+
+        let blend_box = GtkBox::new(Orientation::Horizontal, 0);
+        blend_box.add_css_class("layer-value-box");
+        let blend_label = Label::new(Some(&snapshot.active_layer_blend_mode));
+        blend_label.add_css_class("layer-value-label");
+        blend_box.append(&blend_label);
+        blend_group.append(&blend_box);
+
+        let blend_next =
+            build_icon_only_button("arrow-go-forward-line.svg", "Next blend mode", "chrome-button", 10);
+        {
+            let controller = self.controller.clone();
+            blend_next.connect_clicked(move |_| controller.borrow_mut().next_active_layer_blend_mode());
+        }
+        blend_group.append(&blend_next);
+        controls_row.append(&blend_group);
+
+        let opacity_group = GtkBox::new(Orientation::Horizontal, 4);
+        opacity_group.add_css_class("layer-control-group");
+        let opacity_label = Label::new(Some("Opacity:"));
+        opacity_label.add_css_class("layer-control-label");
+        opacity_group.append(&opacity_label);
+        let opacity_down =
+            build_icon_only_button("subtract-line.svg", "Decrease layer opacity", "chrome-button", 10);
+        {
+            let controller = self.controller.clone();
+            opacity_down.connect_clicked(move |_| controller.borrow_mut().decrease_active_layer_opacity());
+        }
+        opacity_group.append(&opacity_down);
+        let opacity_box = GtkBox::new(Orientation::Horizontal, 0);
+        opacity_box.add_css_class("layer-value-box");
+        let opacity_value = Label::new(Some(&format!("{}%", snapshot.active_layer_opacity_percent)));
+        opacity_value.add_css_class("layer-value-label");
+        opacity_box.append(&opacity_value);
+        opacity_group.append(&opacity_box);
+        let opacity_up =
+            build_icon_only_button("add-line.svg", "Increase layer opacity", "chrome-button", 10);
+        {
+            let controller = self.controller.clone();
+            opacity_up.connect_clicked(move |_| controller.borrow_mut().increase_active_layer_opacity());
+        }
+        opacity_group.append(&opacity_up);
+        controls_row.append(&opacity_group);
+
+        self.layers_body.append(&controls_row);
+
+        let info_row = GtkBox::new(Orientation::Horizontal, 6);
+        info_row.add_css_class("layers-info-row");
+        for text in [
+            format!(
+                "Visible: {}",
+                if snapshot.active_layer_visible { "On" } else { "Off" }
+            ),
+            format!(
+                "Mask: {}",
+                if !snapshot.active_layer_has_mask {
+                    "None"
+                } else if snapshot.active_layer_mask_enabled {
+                    "On"
+                } else {
+                    "Off"
+                }
+            ),
+            format!("Target: {}", snapshot.active_edit_target_name),
+        ] {
+            let chip = Label::new(Some(&text));
+            chip.add_css_class("layers-info-chip");
+            info_row.append(&chip);
+        }
+        self.layers_body.append(&info_row);
+
+        let filter_text = self.layers_filter_text.borrow().trim().to_ascii_lowercase();
+        let list = GtkBox::new(Orientation::Vertical, 0);
+        list.add_css_class("layers-list");
+
         let actions = GtkBox::new(Orientation::Horizontal, 4);
-        actions.add_css_class("layers-toolbar");
+        actions.add_css_class("layers-bottom");
         for (icon_name, label, action) in [
             ("add-line.svg", "+ Layer", LayerAction::Add),
             ("group-line.svg", "+ Group", LayerAction::AddGroup),
@@ -785,10 +986,14 @@ impl ShellUiState {
             });
             actions.append(&button);
         }
-        self.layers_body.append(&actions);
 
         for layer in &snapshot.layers {
+            if !layer_matches_filter(layer, &filter_text) {
+                continue;
+            }
+
             let row = GtkBox::new(Orientation::Horizontal, 4);
+            row.add_css_class("layer-item-shell");
             row.add_css_class(if layer.is_selected {
                 "layer-row-active"
             } else {
@@ -826,6 +1031,8 @@ impl ShellUiState {
             }
             row.append(&visibility);
 
+            row.append(&build_layer_preview(layer));
+
             if layer.is_group {
                 let target_strip = GtkBox::new(Orientation::Horizontal, 3);
                 target_strip.add_css_class("layer-target-strip");
@@ -838,20 +1045,21 @@ impl ShellUiState {
                 }
                 target_strip.append(&group_chip);
                 row.append(&target_strip);
+                let group_id = layer.group_id;
 
-                let select = Button::with_label(&format!(
-                    "{}  ({}%) [Group]",
-                    layer.name, layer.opacity_percent
+                row.append(&build_layer_content_button(
+                    layer,
+                    &format!("Group • {}%", layer.opacity_percent),
+                    None,
+                    {
+                        let controller = self.controller.clone();
+                        move || {
+                            if let Some(group_id) = group_id {
+                                controller.borrow_mut().select_group(group_id);
+                            }
+                        }
+                    },
                 ));
-                select.add_css_class("layer-select-button");
-                if layer.is_selected {
-                    select.add_css_class("layer-select-button-active");
-                }
-                if let Some(group_id) = layer.group_id {
-                    let controller = self.controller.clone();
-                    select.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
-                }
-                row.append(&select);
             } else {
                 let target_strip = GtkBox::new(Orientation::Horizontal, 3);
                 target_strip.add_css_class("layer-target-strip");
@@ -878,22 +1086,20 @@ impl ShellUiState {
                     }
                     target_strip.append(&edit_target);
                     row.append(&target_strip);
-
-                    let select = Button::with_label(&format!(
-                        "{}  ({}%) [Text]",
-                        layer.name, layer.opacity_percent
+                    let layer_id = layer.layer_id;
+                    row.append(&build_layer_content_button(
+                        layer,
+                        &format!("Text • {}%", layer.opacity_percent),
+                        None,
+                        {
+                            let controller = self.controller.clone();
+                            move || {
+                                if let Some(layer_id) = layer_id {
+                                    controller.borrow_mut().select_layer(layer_id);
+                                }
+                            }
+                        },
                     ));
-                    select.add_css_class("layer-select-button");
-                    if layer.is_selected {
-                        select.add_css_class("layer-select-button-active");
-                    }
-                    if let Some(layer_id) = layer.layer_id {
-                        let controller = self.controller.clone();
-                        select.connect_clicked(move |_| {
-                            controller.borrow_mut().select_layer(layer_id)
-                        });
-                    }
-                    row.append(&select);
                 } else {
                     let layer_target = build_target_chip(
                         "L",
@@ -943,26 +1149,36 @@ impl ShellUiState {
                     } else {
                         "  [Mask Off]".to_string()
                     };
-                    let select = Button::with_label(&format!(
-                        "{}  ({}%){}",
-                        layer.name, layer.opacity_percent, mask_suffix
+                    let layer_id = layer.layer_id;
+                    row.append(&build_layer_content_button(
+                        layer,
+                        &format!("{}%{}", layer.opacity_percent, mask_suffix),
+                        Some(if layer.is_active { "Active" } else { "" }),
+                        {
+                            let controller = self.controller.clone();
+                            move || {
+                                if let Some(layer_id) = layer_id {
+                                    controller.borrow_mut().select_layer(layer_id);
+                                }
+                            }
+                        },
                     ));
-                    select.add_css_class("layer-select-button");
-                    if layer.is_selected {
-                        select.add_css_class("layer-select-button-active");
-                    }
-                    if let Some(layer_id) = layer.layer_id {
-                        let controller = self.controller.clone();
-                        select.connect_clicked(move |_| {
-                            controller.borrow_mut().select_layer(layer_id)
-                        });
-                    }
-                    row.append(&select);
                 }
             }
 
-            self.layers_body.append(&row);
+            list.append(&row);
         }
+
+        if list.first_child().is_none() {
+            let empty = Label::new(Some("No layers match the current filter."));
+            empty.set_xalign(0.0);
+            empty.add_css_class("panel-row");
+            empty.add_css_class("panel-hint-row");
+            list.append(&empty);
+        }
+
+        self.layers_body.append(&list);
+        self.layers_body.append(&actions);
     }
 
     pub(super) fn refresh_history_panel(&self, snapshot: &ShellSnapshot) {
@@ -1034,14 +1250,331 @@ fn clear_box_children(container: &GtkBox) {
     }
 }
 
-fn build_color_swatch_label(prefix: &str, rgba: [u8; 4]) -> Label {
-    let label = Label::new(Some(&format!(
-        "{}: #{:02X}{:02X}{:02X}",
-        prefix, rgba[0], rgba[1], rgba[2]
-    )));
+const DEFAULT_COLOR_SWATCHES: [[u8; 3]; 36] = [
+    [0x00, 0x00, 0x00],
+    [0x3a, 0x3a, 0x3a],
+    [0x66, 0x66, 0x66],
+    [0x99, 0x99, 0x99],
+    [0xcc, 0xcc, 0xcc],
+    [0xff, 0xff, 0xff],
+    [0xff, 0x3b, 0x30],
+    [0xff, 0x95, 0x00],
+    [0xff, 0xea, 0x00],
+    [0x8a, 0xff, 0x00],
+    [0x00, 0xe6, 0x5a],
+    [0x00, 0xc7, 0xff],
+    [0x00, 0x7a, 0xff],
+    [0x36, 0x3f, 0xe0],
+    [0x7b, 0x2c, 0xff],
+    [0xb1, 0x20, 0xff],
+    [0xd0, 0x3b, 0xff],
+    [0xff, 0x4d, 0x9d],
+    [0x6d, 0x4c, 0x41],
+    [0xa1, 0x88, 0x7f],
+    [0xc0, 0xca, 0x33],
+    [0x66, 0xbb, 0x6a],
+    [0x26, 0xa6, 0x9a],
+    [0x42, 0xa5, 0xf5],
+    [0x5c, 0x6b, 0xc0],
+    [0xab, 0x47, 0xbc],
+    [0xef, 0x53, 0x50],
+    [0xff, 0x70, 0x43],
+    [0xff, 0xca, 0x28],
+    [0xd4, 0xe1, 0x57],
+    [0x9c, 0xcc, 0x65],
+    [0x4d, 0xd0, 0xe1],
+    [0x4f, 0xc3, 0xf7],
+    [0x90, 0xa4, 0xae],
+    [0xf4, 0xa2, 0xc5],
+    [0xcf, 0xd8, 0xdc],
+];
+
+fn rgba_hex(rgba: [u8; 4]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgba[0], rgba[1], rgba[2])
+}
+
+fn rgba_to_cmyk(rgba: [u8; 4]) -> [u8; 4] {
+    let r = rgba[0] as f32 / 255.0;
+    let g = rgba[1] as f32 / 255.0;
+    let b = rgba[2] as f32 / 255.0;
+    let k = 1.0 - r.max(g).max(b);
+    if k >= 0.999 {
+        return [0, 0, 0, 100];
+    }
+    let c = ((1.0 - r - k) / (1.0 - k) * 100.0).round() as u8;
+    let m = ((1.0 - g - k) / (1.0 - k) * 100.0).round() as u8;
+    let y = ((1.0 - b - k) / (1.0 - k) * 100.0).round() as u8;
+    [c, m, y, (k * 100.0).round() as u8]
+}
+
+fn rgba_to_hsv(rgba: [u8; 4]) -> (f64, f64, f64) {
+    let r = rgba[0] as f64 / 255.0;
+    let g = rgba[1] as f64 / 255.0;
+    let b = rgba[2] as f64 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let hue = if delta <= f64::EPSILON {
+        0.0
+    } else if (max - r).abs() < f64::EPSILON {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if (max - g).abs() < f64::EPSILON {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+
+    let saturation = if max <= f64::EPSILON { 0.0 } else { delta / max };
+    (hue, saturation, max)
+}
+
+fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> [u8; 3] {
+    let c = value * saturation;
+    let x = c * (1.0 - (((hue / 60.0) % 2.0) - 1.0).abs());
+    let m = value - c;
+    let (r1, g1, b1) = match hue as i32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    ]
+}
+
+fn build_color_patch(rgba: [u8; 4], size: i32) -> gtk4::DrawingArea {
+    let patch = gtk4::DrawingArea::new();
+    patch.set_content_width(size);
+    patch.set_content_height(size);
+    patch.set_draw_func(move |_, ctx, width, height| {
+        let width = width as f64;
+        let height = height as f64;
+        ctx.set_source_rgba(
+            rgba[0] as f64 / 255.0,
+            rgba[1] as f64 / 255.0,
+            rgba[2] as f64 / 255.0,
+            rgba[3] as f64 / 255.0,
+        );
+        ctx.rectangle(0.5, 0.5, width - 1.0, height - 1.0);
+        let _ = ctx.fill_preserve();
+        ctx.set_source_rgba(0.15, 0.15, 0.15, 0.9);
+        ctx.set_line_width(1.0);
+        let _ = ctx.stroke();
+    });
+    patch
+}
+
+fn build_color_summary_chip(prefix: &str, rgba: [u8; 4]) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("color-summary-chip");
+    row.append(&build_color_patch(rgba, 18));
+    let label = Label::new(Some(&format!("{prefix}: {}", rgba_hex(rgba))));
     label.set_xalign(0.0);
-    label.add_css_class("panel-row");
-    label
+    label.add_css_class("color-summary-label");
+    row.append(&label);
+    row
+}
+
+fn build_color_gradient_preview(rgba: [u8; 4]) -> gtk4::Overlay {
+    let (hue, saturation, value) = rgba_to_hsv(rgba);
+    let hue_rgb = hsv_to_rgb(hue, 1.0, 1.0);
+
+    let overlay = gtk4::Overlay::new();
+    overlay.add_css_class("color-gradient-frame");
+
+    let surface = gtk4::DrawingArea::new();
+    surface.set_content_width(220);
+    surface.set_content_height(175);
+    surface.set_draw_func(move |_, ctx, width, height| {
+        let width = width as f64;
+        let height = height as f64;
+        let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, width, 0.0);
+        base.add_color_stop_rgb(0.0, 1.0, 1.0, 1.0);
+        base.add_color_stop_rgb(
+            1.0,
+            hue_rgb[0] as f64 / 255.0,
+            hue_rgb[1] as f64 / 255.0,
+            hue_rgb[2] as f64 / 255.0,
+        );
+        let _ = ctx.set_source(&base);
+        ctx.rectangle(0.0, 0.0, width, height);
+        let _ = ctx.fill();
+
+        let shade = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, height);
+        shade.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+        shade.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 1.0);
+        let _ = ctx.set_source(&shade);
+        ctx.rectangle(0.0, 0.0, width, height);
+        let _ = ctx.fill();
+    });
+    overlay.set_child(Some(&surface));
+
+    let cursor = GtkBox::new(Orientation::Horizontal, 0);
+    cursor.add_css_class("color-picker-cursor");
+    cursor.set_halign(Align::Start);
+    cursor.set_valign(Align::Start);
+    cursor.set_margin_start((saturation * 210.0).round() as i32);
+    cursor.set_margin_top(((1.0 - value) * 165.0).round() as i32);
+    overlay.add_overlay(&cursor);
+    overlay
+}
+
+fn build_color_spectrum_preview(rgba: [u8; 4]) -> gtk4::Overlay {
+    let (hue, _, _) = rgba_to_hsv(rgba);
+
+    let overlay = gtk4::Overlay::new();
+    overlay.add_css_class("color-spectrum-frame");
+
+    let spectrum = gtk4::DrawingArea::new();
+    spectrum.set_content_width(14);
+    spectrum.set_content_height(175);
+    spectrum.set_draw_func(move |_, ctx, width, height| {
+        let width = width as f64;
+        let height = height as f64;
+        let gradient = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, height);
+        for (offset, color) in [
+            (0.0, [255, 0, 0]),
+            (0.16, [255, 128, 0]),
+            (0.32, [255, 255, 0]),
+            (0.48, [0, 255, 0]),
+            (0.64, [0, 255, 255]),
+            (0.80, [0, 0, 255]),
+            (1.0, [255, 0, 255]),
+        ] {
+            gradient.add_color_stop_rgb(
+                offset,
+                color[0] as f64 / 255.0,
+                color[1] as f64 / 255.0,
+                color[2] as f64 / 255.0,
+            );
+        }
+        let _ = ctx.set_source(&gradient);
+        ctx.rectangle(0.0, 0.0, width, height);
+        let _ = ctx.fill();
+    });
+    overlay.set_child(Some(&spectrum));
+
+    let cursor = GtkBox::new(Orientation::Horizontal, 0);
+    cursor.add_css_class("color-spectrum-cursor");
+    cursor.set_halign(Align::Start);
+    cursor.set_valign(Align::Start);
+    cursor.set_margin_top(((hue / 360.0) * 171.0).round() as i32);
+    overlay.add_overlay(&cursor);
+    overlay
+}
+
+fn build_color_value_row(fields: &[(&str, String)]) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.add_css_class("color-value-row");
+    for (label_text, value_text) in fields {
+        let field = GtkBox::new(Orientation::Horizontal, 4);
+        field.add_css_class("color-value-field");
+
+        let label = Label::new(Some(label_text));
+        label.add_css_class("color-value-key");
+        field.append(&label);
+
+        let value = Label::new(Some(value_text));
+        value.set_xalign(1.0);
+        value.set_hexpand(true);
+        value.add_css_class("color-value-text");
+        field.append(&value);
+
+        row.append(&field);
+    }
+    row
+}
+
+fn layer_matches_filter(layer: &LayerPanelItem, filter_text: &str) -> bool {
+    if filter_text.is_empty() {
+        return true;
+    }
+    let haystack = format!(
+        "{} {} {} {}",
+        layer.name,
+        if layer.is_group { "group" } else { "layer" },
+        if layer.is_text { "text" } else { "" },
+        if layer.has_mask { "mask" } else { "" }
+    )
+    .to_ascii_lowercase();
+    haystack.contains(filter_text)
+}
+
+fn build_layer_preview(layer: &LayerPanelItem) -> GtkBox {
+    let preview = GtkBox::new(Orientation::Vertical, 0);
+    preview.add_css_class("layer-preview");
+    if layer.is_group {
+        preview.add_css_class("layer-preview-group");
+    } else if layer.is_text {
+        preview.add_css_class("layer-preview-text");
+    } else {
+        preview.add_css_class("layer-preview-raster");
+    }
+    if layer.has_mask {
+        preview.add_css_class("layer-preview-masked");
+    }
+
+    let glyph = Label::new(Some(if layer.is_group {
+        "G"
+    } else if layer.is_text {
+        "T"
+    } else {
+        "L"
+    }));
+    glyph.add_css_class("layer-preview-glyph");
+    preview.append(&glyph);
+    preview
+}
+
+fn build_layer_content_button<F>(
+    layer: &LayerPanelItem,
+    meta_text: &str,
+    badge: Option<&str>,
+    on_click: F,
+) -> Button
+where
+    F: Fn() + 'static,
+{
+    let button = Button::new();
+    button.add_css_class("layer-content-button");
+    if layer.is_selected {
+        button.add_css_class("layer-content-button-active");
+    }
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_hexpand(true);
+
+    let title_row = GtkBox::new(Orientation::Horizontal, 4);
+    title_row.set_hexpand(true);
+    let title = Label::new(Some(&layer.name));
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.add_css_class("layer-name-title");
+    title_row.append(&title);
+
+    if let Some(badge_text) = badge
+        && !badge_text.is_empty()
+    {
+        let badge_label = Label::new(Some(badge_text));
+        badge_label.add_css_class("layer-state-badge");
+        title_row.append(&badge_label);
+    }
+    content.append(&title_row);
+
+    let meta = Label::new(Some(meta_text));
+    meta.set_xalign(0.0);
+    meta.add_css_class("layer-meta-label");
+    content.append(&meta);
+
+    button.set_child(Some(&content));
+    button.connect_clicked(move |_| on_click());
+    button
 }
 
 fn build_target_chip(label: &str, tooltip: &str, active: bool, enabled: bool) -> Button {

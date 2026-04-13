@@ -55,10 +55,11 @@ pub(super) fn build_ui(
 fn build_header_bar() -> HeaderBar {
     match load_titlebar_template() {
         Ok(template) => {
-            template.app_name_label.set_visible(false);
-            template
-                .workspace_button
-                .set_tooltip_text(Some("Current workspace preset"));
+            let spacer = GtkBox::new(Orientation::Horizontal, 0);
+            spacer.set_hexpand(true);
+            template.root.set_title_widget(Some(&spacer));
+            template.app_name_label.set_visible(true);
+            template.workspace_button.set_visible(false);
             set_image_resource_or_fallback(
                 &template.logo_image,
                 logo_icon_resource_path(true),
@@ -95,15 +96,13 @@ fn build_header_bar_fallback() -> HeaderBar {
     let title_icon = build_logo_icon(true, APP_NAME, 16);
     title_icon.add_css_class("titlebar-icon");
     title_row.append(&title_icon);
+    let title_label = Label::new(Some(APP_NAME));
+    title_label.add_css_class("titlebar-app-name");
+    title_row.append(&title_label);
     header.pack_start(&title_row);
 
     let actions = GtkBox::new(Orientation::Horizontal, 6);
     actions.add_css_class("titlebar-actions");
-    let preset = Button::with_label("Essentials");
-    preset.add_css_class("chrome-button");
-    preset.add_css_class("workspace-chip");
-    actions.append(&preset);
-
     let search = build_icon_only_button("search-line.svg", "Search", "chrome-button", 12);
     search.add_css_class("chrome-icon-button");
     actions.append(&search);

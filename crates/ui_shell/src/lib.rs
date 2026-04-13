@@ -24,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use ui_templates::{
     build_panel_group_shell, load_document_tabs_template, load_info_dialog_template,
-    load_status_bar_template, load_titlebar_template, load_tool_options_bar_template,
+    load_status_bar_template, load_titlebar_template,
 };
 
 mod layout;
@@ -270,6 +270,8 @@ pub trait ShellController {
     fn move_active_layer_down(&mut self);
     fn swap_colors(&mut self);
     fn reset_colors(&mut self);
+    fn set_foreground_color(&mut self, rgba: [u8; 4]);
+    fn set_background_color(&mut self, rgba: [u8; 4]);
     fn clear_selection(&mut self);
     fn invert_selection(&mut self);
     fn add_horizontal_guide(&mut self);
@@ -373,6 +375,27 @@ fn build_color_chip(label_text: &str, css_class: &str) -> Button {
     button
 }
 
+fn build_ruler_stops(max: u32) -> [u32; 5] {
+    let quarter = (max / 4).max(1);
+    [0, quarter, quarter * 2, quarter * 3, max.max(1)]
+}
+
+fn format_horizontal_ruler(max: u32) -> String {
+    build_ruler_stops(max)
+        .into_iter()
+        .map(|value| format!("{value:>5}"))
+        .collect::<Vec<_>>()
+        .join("    ")
+}
+
+fn format_vertical_ruler(max: u32) -> String {
+    build_ruler_stops(max)
+        .into_iter()
+        .map(|value| format!("{value:>4}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingDocumentAction {
     ChooseOpenProject,
@@ -430,6 +453,8 @@ struct ShellUiState {
     tool_options_bar: GtkBox,
     tool_options_icon: Image,
     tool_options_label: Label,
+    tool_option_keys: [Label; 6],
+    tool_option_values: [Label; 6],
     canvas_picture: Picture,
     tool_rail: GtkBox,
     tool_buttons: Vec<(ShellToolKind, Button)>,
@@ -451,13 +476,24 @@ struct ShellUiState {
     status_notice: Label,
     status_mode: Label,
     canvas_info_label: Label,
+    horizontal_ruler_label: Label,
+    vertical_ruler_label: Label,
+    layers_filter_text: RefCell<String>,
+    ui_revision: Cell<u64>,
+    last_ui_revision: Cell<u64>,
     last_snapshot: RefCell<Option<ShellSnapshot>>,
     last_zoom_percent: RefCell<u32>,
 }
 
 impl ShellUiState {
     fn new(controller: Rc<RefCell<dyn ShellController>>) -> Rc<Self> {
-        let (tool_options_bar, tool_options_icon, tool_options_label) =
+        let (
+            tool_options_bar,
+            tool_options_icon,
+            tool_options_label,
+            tool_option_keys,
+            tool_option_values,
+        ) =
             shell_chrome::build_tool_options_bar(controller.clone());
         let (tool_rail, tool_buttons) = shell_chrome::build_left_tool_rail(controller.clone());
         let (document_tabs, document_tab_label) = shell_chrome::build_document_tabs();
@@ -465,7 +501,7 @@ impl ShellUiState {
         let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
 
         let (color_group, color_body) =
-            shell_chrome::build_panel_group("color", &["Color", "Swatches"], 6, false);
+            shell_chrome::build_panel_group("color", &["Color", "Swatches", "Navigator"], 6, false);
 
         let (properties_group, properties_body) =
             shell_chrome::build_panel_group("properties", &["Properties", "Adjust"], 4, false);
@@ -482,6 +518,12 @@ impl ShellUiState {
         menu_zoom_label.add_css_class("menu-zoom-display");
         let canvas_info_label = Label::new(Some("untitled.ptx @ 100% (RGB/8)"));
         canvas_info_label.add_css_class("canvas-info");
+        let horizontal_ruler_label = Label::new(Some(""));
+        horizontal_ruler_label.add_css_class("ruler-horizontal");
+        horizontal_ruler_label.set_xalign(0.0);
+        let vertical_ruler_label = Label::new(Some(""));
+        vertical_ruler_label.add_css_class("ruler-vertical");
+        vertical_ruler_label.set_yalign(0.0);
 
         Rc::new(Self {
             controller,
@@ -504,6 +546,8 @@ impl ShellUiState {
             tool_options_bar,
             tool_options_icon,
             tool_options_label,
+            tool_option_keys,
+            tool_option_values,
             canvas_picture,
             tool_rail,
             tool_buttons,
@@ -525,9 +569,18 @@ impl ShellUiState {
             status_notice,
             status_mode,
             canvas_info_label,
+            horizontal_ruler_label,
+            vertical_ruler_label,
+            layers_filter_text: RefCell::new(String::new()),
+            ui_revision: Cell::new(0),
+            last_ui_revision: Cell::new(0),
             last_snapshot: RefCell::new(None),
             last_zoom_percent: RefCell::new(0),
         })
+    }
+
+    fn bump_ui_revision(&self) {
+        self.ui_revision.set(self.ui_revision.get().wrapping_add(1));
     }
 
     fn handle_shortcut(self: &Rc<Self>, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
@@ -1328,8 +1381,9 @@ impl ShellUiState {
         let zoom_percent = self.canvas_state.borrow().zoom_percent();
         let snapshot_changed = self.last_snapshot.borrow().as_ref() != Some(&snapshot);
         let zoom_changed = *self.last_zoom_percent.borrow() != zoom_percent;
+        let ui_changed = self.ui_revision.get() != self.last_ui_revision.get();
 
-        if !snapshot_changed && !zoom_changed {
+        if !snapshot_changed && !zoom_changed && !ui_changed {
             return;
         }
 
@@ -1362,6 +1416,10 @@ impl ShellUiState {
             "{} @ {}% ({})",
             snapshot.document_title, zoom_percent, "RGB/8"
         ));
+        self.horizontal_ruler_label
+            .set_label(&format_horizontal_ruler(snapshot.canvas_size.width));
+        self.vertical_ruler_label
+            .set_label(&format_vertical_ruler(snapshot.canvas_size.height));
 
         if snapshot_changed {
             self.tool_options_label
@@ -1372,13 +1430,27 @@ impl ShellUiState {
                 &snapshot.active_tool_name,
                 18,
             );
+            let tool_options = shell_chrome::tool_option_groups(&snapshot);
+            for ((key, value), (key_label, value_label)) in tool_options.into_iter().zip(
+                self.tool_option_keys
+                    .iter()
+                    .zip(self.tool_option_values.iter()),
+            ) {
+                key_label.set_label(&key);
+                value_label.set_label(&value);
+                value_label.set_tooltip_text(Some(&format!("{key}: {value}")));
+            }
             self.refresh_tool_buttons(&snapshot);
             self.refresh_color_panel(&snapshot);
             self.refresh_properties_panel(&snapshot);
             self.refresh_layers_panel(&snapshot);
             self.refresh_history_panel(&snapshot);
             self.last_snapshot.replace(Some(snapshot));
+        } else if ui_changed {
+            self.refresh_layers_panel(&snapshot);
         }
+
+        self.last_ui_revision.set(self.ui_revision.get());
 
         let current_snapshot = self
             .last_snapshot
@@ -1506,12 +1578,17 @@ const THEME_CSS: &str = r#"
     font-weight: 600;
     font-size: 11px;
     color: #e0e0e0;
+    letter-spacing: 0.02em;
 }
 
 .titlebar-icon,
 .remix-icon {
     min-width: 12px;
     min-height: 12px;
+}
+
+.remix-icon {
+    color: inherit;
 }
 
 .titlebar-icon {
@@ -1557,7 +1634,7 @@ const THEME_CSS: &str = r#"
 
 .tool-chip {
     background: transparent;
-    color: #999999;
+    color: #bfc6d0;
     padding: 2px 7px;
 }
 
@@ -1657,33 +1734,48 @@ menubutton.menu-button > button.toggle:focus-visible {
 .tool-options-bar {
     min-height: 32px;
     padding: 0 12px;
-    background: #232323;
-    border-bottom: 1px solid #3a3a3a;
+    background: #2b2b2b;
+    border-bottom: 1px solid #1a1a1a;
 }
 
 .tool-options-label {
-    margin: 0 6px 0 1px;
+    margin: 0 10px 0 6px;
     font-weight: 600;
     color: #e0e0e0;
 }
 
-.tool-option-chip {
-    background: #3c3c3c;
-    border: 1px solid #444444;
-    border-radius: 3px;
-    color: #d0d0d0;
-    padding: 2px 8px;
+.tool-options-group {
+    margin: 0 8px;
+}
+
+.tool-options-divider {
+    margin: 7px 10px;
+    color: #444444;
+    min-height: 18px;
+}
+
+.tool-option-key {
+    color: #a0a0a0;
     font-size: 11px;
 }
 
-.tool-option-chip:hover {
-    background: #464646;
-    border: 1px solid #555555;
-    color: #e0e0e0;
+.tool-option-box {
+    background: #3c3c3c;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    padding: 2px 6px;
+    min-width: 62px;
+}
+
+.tool-option-value {
+    color: #d0d0d0;
+    font-size: 11px;
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
 .tool-options-icon {
     margin-left: 2px;
+    margin-right: 2px;
 }
 
 .template-dialog-content {
@@ -1727,7 +1819,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     background: transparent;
     border: none;
     border-radius: 4px;
-    color: #a8a8a8;
+    color: #c4cad3;
 }
 
 .tool-button:hover {
@@ -1755,15 +1847,15 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .swatch-stack {
     margin-top: 10px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
 }
 
 .color-chip {
-    min-width: 14px;
-    min-height: 14px;
+    min-width: 18px;
+    min-height: 18px;
     padding: 0;
     border-radius: 2px;
-    border: 2px solid #3f3f3f;
+    border: 1px solid #666666;
     box-shadow: 0 1px 2px rgba(0,0,0,0.45);
 }
 
@@ -1779,6 +1871,21 @@ menubutton.menu-button > button.toggle:focus-visible {
 .swatch-bg {
     background: #111317;
     color: #E8ECF3;
+}
+
+.swatch-stack-actions {
+    margin-bottom: 2px;
+}
+
+.swatch-stack-action {
+    min-width: 12px;
+    min-height: 12px;
+    padding: 0;
+    color: #9ea7b3;
+}
+
+.swatch-stack-action:hover {
+    color: #eef2f8;
 }
 
 .document-region {
@@ -1804,6 +1911,10 @@ menubutton.menu-button > button.toggle:focus-visible {
     padding: 0;
 }
 
+.canvas-cluster {
+    padding: 10px 16px 16px 16px;
+}
+
 .document-tab-add:disabled {
     color: #5a5a5a;
     opacity: 1;
@@ -1812,8 +1923,8 @@ menubutton.menu-button > button.toggle:focus-visible {
 .ruler-corner,
 .ruler-horizontal,
 .ruler-vertical {
-    background: #232323;
-    color: #666666;
+    background: #202020;
+    color: #7d8591;
     border: 1px solid #3a3a3a;
     font-size: 9px; /* font.size.xs */
     font-family: "JetBrains Mono", "Cascadia Code", monospace;
@@ -1821,12 +1932,12 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .ruler-horizontal {
     min-height: 20px;
-    padding: 2px 8px;
+    padding: 2px 10px 3px 10px;
 }
 
 .ruler-vertical {
-    min-width: 20px;
-    padding: 8px 2px;
+    min-width: 24px;
+    padding: 8px 4px 8px 2px;
 }
 
 .canvas-frame {
@@ -1884,14 +1995,14 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .right-sidebar {
-    background: #232323;
+    background: #262626;
     border-left: 1px solid #3a3a3a;
     min-width: 300px;
 }
 
 .panel-icon-strip {
     min-width: 40px;
-    padding: 6px 0;
+    padding: 8px 0;
     background: #2a2a2a;
     border-right: 1px solid #4a4a4a;
 }
@@ -1903,7 +2014,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     background: transparent;
     border: none;
     border-radius: 3px;
-    color: #a8a8a8;
+    color: #c0c7d1;
 }
 
 .dock-icon-button:hover {
@@ -1931,20 +2042,21 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .panel-dock {
     padding: 0;
-    background: #232323;
+    background: #262626;
 }
 
 .panel-group {
     border: 0;
     border-bottom: 1px solid #3a3a3a;
-    background: #232323;
+    background: #262626;
     border-radius: 0;
     margin-bottom: 0;
 }
 
 .panel-group-header {
-    padding: 6px 8px;
-    background: #232323;
+    padding: 0 8px;
+    min-height: 28px;
+    background: #2b2b2b;
     border-bottom: 1px solid #3a3a3a;
     border-radius: 0;
 }
@@ -1952,15 +2064,15 @@ menubutton.menu-button > button.toggle:focus-visible {
 .panel-tab {
     background: transparent;
     border: 1px solid transparent;
-    padding: 0 0 6px 0;
-    font-size: 10px;
+    padding: 4px 0 5px 0;
+    font-size: 11px;
     font-weight: 500;
-    color: #666666;
+    color: #7f8792;
     border-bottom: 2px solid transparent;
 }
 
 .panel-tab:hover {
-    color: #999999;
+    color: #d8dde6;
 }
 
 .panel-tab-active {
@@ -1975,6 +2087,127 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .panel-group-body {
     padding: 8px;
+}
+
+#layers-panel-body {
+    padding: 0;
+}
+
+#color-panel-body {
+    padding: 6px 8px 10px 8px;
+}
+
+.color-summary-row {
+    margin-bottom: 6px;
+}
+
+.color-summary-chip {
+    padding: 0;
+}
+
+.color-summary-label {
+    color: #aeb6c1;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.color-gradient-frame,
+.color-spectrum-frame {
+    background: #1f1f1f;
+    border: 1px solid #444444;
+    border-radius: 4px;
+    padding: 1px;
+}
+
+.color-picker-cursor {
+    min-width: 10px;
+    min-height: 10px;
+    border-radius: 999px;
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.45);
+}
+
+.color-spectrum-cursor {
+    min-width: 18px;
+    min-height: 4px;
+    margin-left: -2px;
+    border-radius: 3px;
+    border: 1px solid rgba(0,0,0,0.85);
+    background: rgba(255,255,255,0.7);
+}
+
+.color-value-row {
+    margin-top: 3px;
+}
+
+.color-value-field {
+    background: #303030;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    padding: 2px 5px;
+}
+
+.color-value-key {
+    color: #7f8792;
+    font-size: 9px;
+    font-weight: 700;
+}
+
+.color-value-text {
+    color: #dfe5ee;
+    font-size: 11px;
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.color-panel-actions {
+    margin-top: 6px;
+    margin-bottom: 8px;
+}
+
+.color-swatches-header {
+    margin: 0 0 5px 0;
+}
+
+.color-swatches-title {
+    color: #aeb6c1;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.panel-inline-menu {
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #8c949f;
+}
+
+.panel-inline-menu:disabled {
+    opacity: 1;
+}
+
+.color-swatches-grid {
+    margin-top: 2px;
+}
+
+.panel-swatch-button {
+    padding: 0;
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    background: transparent;
+}
+
+.panel-swatch-button:hover {
+    border-color: #ffffff;
+    background: transparent;
+}
+
+.panel-swatch-button-active {
+    border-color: #3b8beb;
+    background: rgba(59,139,235,0.14);
 }
 
 popover.menu-dropdown contents {
@@ -2040,7 +2273,7 @@ popover.menu-dropdown contents {
 
 .layers-toolbar,
 .history-toolbar {
-    padding: 6px 0 8px 0;
+    padding: 8px;
 }
 
 .layer-action-chip {
@@ -2053,12 +2286,89 @@ popover.menu-dropdown contents {
     padding: 0 6px;
 }
 
+.layer-filter-box {
+    background: #2f2f2f;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    padding: 2px 6px;
+}
+
+.layers-filter-entry {
+    background: transparent;
+    border: none;
+    color: #d8dde6;
+    padding: 0;
+    min-height: 20px;
+    font-size: 11px;
+}
+
+.layers-filter-entry:focus {
+    box-shadow: none;
+    outline: none;
+}
+
+.layer-filter-clear {
+    min-width: 14px;
+    min-height: 14px;
+    padding: 0;
+    color: #8f98a5;
+}
+
+.layers-blend-row {
+    padding: 0 8px 8px 8px;
+}
+
+.layer-control-group {
+    margin-right: 8px;
+}
+
+.layer-control-label {
+    color: #9ea7b3;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.layer-value-box {
+    background: #303030;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    padding: 2px 7px;
+    min-width: 64px;
+}
+
+.layer-value-label {
+    color: #dfe5ee;
+    font-size: 11px;
+}
+
+.layers-info-row {
+    padding: 0 8px 8px 8px;
+}
+
+.layers-info-chip {
+    background: #2f2f2f;
+    border: 1px solid #3f454d;
+    border-radius: 3px;
+    padding: 2px 6px;
+    color: #9ea7b3;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.layers-list {
+    padding: 0 0 6px 0;
+}
+
 .layer-row,
 .layer-row-active {
     padding: 6px 8px;
     border-radius: 0;
     margin-bottom: 0;
     border-left: 3px solid transparent;
+}
+
+.layer-item-shell {
+    border-bottom: 1px solid rgba(255,255,255,0.03);
 }
 
 .layer-row:hover {
@@ -2102,6 +2412,7 @@ popover.menu-dropdown contents {
 
 .layer-target-strip {
     margin-right: 4px;
+    margin-top: 3px;
 }
 
 .mask-target-chip {
@@ -2115,6 +2426,76 @@ popover.menu-dropdown contents {
     font-size: 10px;
     font-weight: 700;
     font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+.layer-preview {
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 3px;
+    border: 1px solid #505050;
+    background: linear-gradient(180deg, #4b4b4b, #2f2f2f);
+    margin-right: 6px;
+}
+
+.layer-preview-group {
+    background: linear-gradient(180deg, #51657d, #354250);
+}
+
+.layer-preview-text {
+    background: linear-gradient(180deg, #72595b, #4a393b);
+}
+
+.layer-preview-masked {
+    border-color: #79b5ff;
+}
+
+.layer-preview-glyph {
+    color: #eef2f8;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.layer-content-button {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: inherit;
+}
+
+.layer-content-button:hover {
+    background: transparent;
+    border: none;
+}
+
+.layer-content-button-active {
+    color: #eaf1fb;
+}
+
+.layer-name-title {
+    color: #dfe5ee;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.layer-meta-label {
+    color: #8f98a5;
+    font-size: 10px;
+}
+
+.layer-state-badge {
+    background: rgba(59,139,235,0.2);
+    border: 1px solid rgba(121,181,255,0.35);
+    border-radius: 3px;
+    padding: 1px 4px;
+    color: #dcecff;
+    font-size: 9px;
+    font-weight: 700;
+}
+
+.layers-bottom {
+    padding: 8px;
+    border-top: 1px solid #3a3a3a;
+    background: #2b2b2b;
 }
 
 .mask-target-chip:hover {
@@ -2177,7 +2558,7 @@ popover.menu-dropdown contents {
 }
 
 .history-icon {
-    color: #666666;
+    color: #9aa3af;
     min-width: 12px;
 }
 

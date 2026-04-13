@@ -304,13 +304,6 @@ impl CanvasHostState {
         let scale_factor = self.picture.scale_factor() as f64;
         let mut overlays = Vec::new();
         let mut overlay_paths = Vec::new();
-        if let Some(bounds) = snapshot.active_layer_bounds {
-            overlays.push(CanvasOverlayRect {
-                rect: bounds,
-                stroke_rgba: [79, 140, 255, 255],
-                fill_rgba: None,
-            });
-        }
         if let Some(bounds) = snapshot.transform_preview_rect {
             overlays.push(CanvasOverlayRect {
                 rect: bounds,
