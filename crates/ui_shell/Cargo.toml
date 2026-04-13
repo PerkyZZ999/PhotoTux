@@ -13,5 +13,8 @@ pollster.workspace = true
 render_wgpu = { path = "../render_wgpu" }
 tracing.workspace = true
 
+[build-dependencies]
+glib-build-tools = "0.22.0"
+
 [lints]
 workspace = true

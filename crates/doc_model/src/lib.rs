@@ -721,7 +721,9 @@ impl Document {
     }
 
     pub fn text_layer_index_by_id(&self, layer_id: LayerId) -> Option<usize> {
-        self.text_layers.iter().position(|layer| layer.id == layer_id)
+        self.text_layers
+            .iter()
+            .position(|layer| layer.id == layer_id)
     }
 
     pub fn has_visible_text_layers(&self) -> bool {
@@ -739,14 +741,17 @@ impl Document {
             if let Some(after_layer_id) = after_layer_id {
                 self.insert_flat_layer_after(after_layer_id, layer.id);
             } else {
-                self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer.id));
+                self.layer_hierarchy
+                    .push(LayerHierarchyNode::Layer(layer.id));
             }
         } else {
-            self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer.id));
+            self.layer_hierarchy
+                .push(LayerHierarchyNode::Layer(layer.id));
         }
 
         if self.validate_layer_hierarchy().is_err() {
-            self.text_layers.retain(|candidate| candidate.id != layer.id);
+            self.text_layers
+                .retain(|candidate| candidate.id != layer.id);
             self.layer_hierarchy = backup_hierarchy;
             return false;
         }
@@ -818,7 +823,11 @@ impl Document {
         true
     }
 
-    pub fn set_text_layer_content(&mut self, layer_id: LayerId, content: impl Into<String>) -> bool {
+    pub fn set_text_layer_content(
+        &mut self,
+        layer_id: LayerId,
+        content: impl Into<String>,
+    ) -> bool {
         let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
             return false;
         };
@@ -834,7 +843,11 @@ impl Document {
         true
     }
 
-    pub fn set_text_layer_transform(&mut self, layer_id: LayerId, transform: TextTransform) -> bool {
+    pub fn set_text_layer_transform(
+        &mut self,
+        layer_id: LayerId,
+        transform: TextTransform,
+    ) -> bool {
         let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
             return false;
         };
@@ -1154,7 +1167,11 @@ impl Document {
     }
 
     fn rebuild_flat_layer_hierarchy(&mut self) {
-        if self.layer_hierarchy.iter().any(|node| matches!(node, LayerHierarchyNode::Group(_))) {
+        if self
+            .layer_hierarchy
+            .iter()
+            .any(|node| matches!(node, LayerHierarchyNode::Group(_)))
+        {
             return;
         }
 
@@ -1185,7 +1202,9 @@ impl Document {
         }
 
         for layer in &self.text_layers {
-            if !rebuilt.iter().any(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == layer.id)) {
+            if !rebuilt.iter().any(
+                |node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == layer.id),
+            ) {
                 rebuilt.push(LayerHierarchyNode::Layer(layer.id));
             }
         }
@@ -1206,8 +1225,10 @@ impl Document {
             .position(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == after_layer_id))
             .map(|index| index + 1)
             .unwrap_or(self.layer_hierarchy.len());
-        self.layer_hierarchy
-            .insert(insertion_index, LayerHierarchyNode::Layer(inserted_layer_id));
+        self.layer_hierarchy.insert(
+            insertion_index,
+            LayerHierarchyNode::Layer(inserted_layer_id),
+        );
     }
 
     pub fn selection(&self) -> Option<RectSelection> {
@@ -1344,7 +1365,8 @@ impl Document {
         if self.group_count() == 0 {
             self.insert_flat_layer_after(active_layer_id, layer_id);
         } else {
-            self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer_id));
+            self.layer_hierarchy
+                .push(LayerHierarchyNode::Layer(layer_id));
         }
         layer_id
     }
@@ -1743,11 +1765,8 @@ mod tests {
     fn text_layers_are_document_owned_and_hierarchy_addressable() {
         let mut document = Document::new(640, 480);
 
-        let text_layer_id = document.add_text_layer(
-            "Title",
-            "PhotoTux",
-            TextTransform::new(120, 80),
-        );
+        let text_layer_id =
+            document.add_text_layer("Title", "PhotoTux", TextTransform::new(120, 80));
         let text_index = document
             .text_layer_index_by_id(text_layer_id)
             .expect("text layer should be tracked");
@@ -1757,27 +1776,26 @@ mod tests {
 
         assert_eq!(document.text_layer_count(), 1);
         assert_eq!(document.total_layer_count(), 2);
-        assert_eq!(document.layer_kind_by_id(text_layer_id), Some(LayerKind::Text));
+        assert_eq!(
+            document.layer_kind_by_id(text_layer_id),
+            Some(LayerKind::Text)
+        );
         assert_eq!(text_layer.name, "Title");
         assert_eq!(text_layer.content, "PhotoTux");
         assert_eq!(text_layer.transform, TextTransform::new(120, 80));
         assert_eq!(text_layer.style.alignment, TextAlignment::Left);
         assert!(document.has_visible_text_layers());
         assert!(document.validate_layer_hierarchy().is_ok());
-        assert!(document
-            .layer_hierarchy()
-            .iter()
-            .any(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == text_layer_id)));
+        assert!(document.layer_hierarchy().iter().any(
+            |node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == text_layer_id)
+        ));
     }
 
     #[test]
     fn text_layers_can_be_grouped_like_other_layer_nodes() {
         let mut document = Document::new(640, 480);
-        let text_layer_id = document.add_text_layer(
-            "Caption",
-            "Editable",
-            TextTransform::new(12, 18),
-        );
+        let text_layer_id =
+            document.add_text_layer("Caption", "Editable", TextTransform::new(12, 18));
 
         let group_id = document
             .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(text_layer_id), "Type")
@@ -1790,11 +1808,7 @@ mod tests {
     #[test]
     fn text_style_updates_can_be_applied_headlessly() {
         let mut document = Document::new(640, 480);
-        let text_layer_id = document.add_text_layer(
-            "Label",
-            "Draft",
-            TextTransform::new(20, 32),
-        );
+        let text_layer_id = document.add_text_layer("Label", "Draft", TextTransform::new(20, 32));
         let text_layer = document
             .text_layer_mut(
                 document

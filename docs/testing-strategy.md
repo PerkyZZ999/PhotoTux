@@ -185,6 +185,20 @@ Minimum checks:
 - large import and export behavior
 - cold-start and warm-start launch behavior for any startup preload, shader warm-up, or splash-screen path
 
+Current automated headless baseline budgets:
+
+| Path | Budget | Current check |
+| --- | --- | --- |
+| controller startup initialization | <= 250 ms | `crates/app_core::tests::startup_headless_baseline_stays_within_budget` |
+| initial startup canvas raster | <= 500 ms | `crates/app_core::tests::startup_headless_baseline_stays_within_budget` |
+| medium-canvas representative 12-stroke brush pass | <= 2000 ms | `crates/app_core::tests::pressure_enabled_repeated_strokes_remain_stable_on_medium_canvas` |
+| medium-canvas dirty upload set after representative brush pass | <= 48 dirty tiles | `crates/app_core::tests::pressure_enabled_repeated_strokes_remain_stable_on_medium_canvas` |
+| representative PNG export background job | <= 3000 ms | `crates/app_core::tests::export_and_import_commands_roundtrip_through_background_jobs` |
+| representative autosave background job | <= 2000 ms | `crates/app_core::tests::autosave_writes_recovery_file_after_idle_period` |
+| headless viewport pan/zoom state updates (2000 iterations) | <= 40 ms | `crates/render_wgpu::tests::repeated_pan_and_zoom_updates_stay_within_headless_budget` |
+
+These budgets are deliberately conservative release-safety gates, not marketing numbers. Tighten them only after measuring the same paths repeatedly on representative Linux hardware.
+
 ## Regression Policy
 
 Any bug in these categories should produce a new test when practical:

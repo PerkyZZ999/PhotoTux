@@ -18,7 +18,12 @@ Read these documents in this order when planning or implementing major work:
 8. `production-readiness-checklist.md`
 9. `psd-compatibility.md`
 
-Design-specific references:
+Current UI source-of-truth references:
+
+- `design-ui/mockup/index.html`
+- `design-ui/mockup/Screenshot.png`
+
+Legacy design notes retained for historical reference only:
 
 - `design-ui/design-system.md`
 - `design-ui/ui-layout-spec.md`

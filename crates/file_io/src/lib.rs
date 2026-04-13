@@ -1,6 +1,6 @@
 use anyhow::Context;
 use color_math::{BlendModeMath, blend_rgba_over};
-use common::{CanvasSize, GroupId, LayerId};
+use common::{APP_NAME, CanvasSize, GroupId, LayerId};
 use doc_model::{
     BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerGroup, LayerHierarchyNode,
     MaskTile, RasterLayer, RasterTile, TextAlignment, TextLayer, TextStyle, TextTransform,
@@ -11,13 +11,18 @@ use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const PROJECT_FILE_EXTENSION: &str = "ptx";
 pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 2;
 pub const CURRENT_PSD_IMPORT_MANIFEST_VERSION: u32 = 1;
 pub const RECOVERY_FILE_SUFFIX: &str = ".autosave";
+const PSD_IMPORT_SIDECAR_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -195,14 +200,11 @@ struct PsdImportWorkspace {
 
 impl PsdImportWorkspace {
     fn create() -> anyhow::Result<Self> {
-        let unique_suffix = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        );
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock is before UNIX epoch; cannot create PSD import workspace")?
+            .as_nanos();
+        let unique_suffix = format!("{}-{}", std::process::id(), timestamp);
         let root_dir = std::env::temp_dir().join(format!("phototux-psd-import-{unique_suffix}"));
         fs::create_dir_all(&root_dir).with_context(|| {
             format!(
@@ -236,6 +238,102 @@ pub fn recovery_path_for_project_path(path: &Path) -> std::path::PathBuf {
     let mut file_name = OsString::from(path.as_os_str());
     file_name.push(RECOVERY_FILE_SUFFIX);
     std::path::PathBuf::from(file_name)
+}
+
+pub fn recovery_path_for_document(document_path: Option<&Path>, document_name: &str) -> PathBuf {
+    recovery_path_for_document_with_state_root(document_path, document_name, None)
+}
+
+fn recovery_path_for_document_with_state_root(
+    document_path: Option<&Path>,
+    document_name: &str,
+    state_root_override: Option<&Path>,
+) -> PathBuf {
+    recovery_storage_directory(state_root_override).join(match document_path {
+        Some(path) => recovery_file_name_for_saved_document(path),
+        None => recovery_file_name_for_unsaved_document(document_name),
+    })
+}
+
+fn recovery_storage_directory(state_root_override: Option<&Path>) -> PathBuf {
+    let preferred_root = state_root_override
+        .map(Path::to_path_buf)
+        .or_else(default_state_root);
+    if let Some(root) = preferred_root {
+        let recovery_dir = root.join("recovery");
+        if fs::create_dir_all(&recovery_dir).is_ok() {
+            return recovery_dir;
+        }
+    }
+
+    let fallback_dir = std::env::temp_dir()
+        .join(APP_NAME.to_ascii_lowercase())
+        .join("recovery");
+    let _ = fs::create_dir_all(&fallback_dir);
+    fallback_dir
+}
+
+fn default_state_root() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".local").join("state"))
+        })
+        .map(|root| root.join(APP_NAME.to_ascii_lowercase()))
+}
+
+fn recovery_file_name_for_saved_document(path: &Path) -> String {
+    let display_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(sanitize_recovery_component)
+        .unwrap_or_else(|| format!("document.{PROJECT_FILE_EXTENSION}"));
+    format!(
+        "{}-{:016x}{}",
+        display_name,
+        stable_path_hash(path),
+        RECOVERY_FILE_SUFFIX
+    )
+}
+
+fn recovery_file_name_for_unsaved_document(document_name: &str) -> String {
+    let normalized_name = if document_name.is_empty() {
+        format!("untitled.{PROJECT_FILE_EXTENSION}")
+    } else if document_name.ends_with(&format!(".{PROJECT_FILE_EXTENSION}")) {
+        document_name.to_string()
+    } else {
+        format!("{document_name}.{PROJECT_FILE_EXTENSION}")
+    };
+    format!(
+        "{}{}",
+        sanitize_recovery_component(&normalized_name),
+        RECOVERY_FILE_SUFFIX
+    )
+}
+
+fn sanitize_recovery_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => character,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "document".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn stable_path_hash(path: &Path) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    hasher.write(path.to_string_lossy().as_bytes());
+    hasher.finish()
 }
 
 pub fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
@@ -447,6 +545,162 @@ pub struct MaskTilePayload {
     pub alpha: Vec<u8>,
 }
 
+fn validate_project_file(project_file: &ProjectFile) -> anyhow::Result<()> {
+    let manifest = &project_file.manifest;
+    anyhow::ensure!(
+        manifest.canvas_size.width > 0 && manifest.canvas_size.height > 0,
+        "project canvas dimensions must be greater than zero"
+    );
+    anyhow::ensure!(
+        !manifest.layers.is_empty(),
+        "project manifest must contain at least one raster layer"
+    );
+
+    let mut known_layer_ids = std::collections::HashSet::new();
+    for layer in &manifest.layers {
+        anyhow::ensure!(
+            known_layer_ids.insert(layer.id),
+            "project manifest references raster layer {} more than once",
+            layer.id.0
+        );
+        anyhow::ensure!(
+            layer.opacity_percent <= 100,
+            "raster layer {} has invalid opacity {}",
+            layer.id.0,
+            layer.opacity_percent
+        );
+    }
+    for layer in &manifest.text_layers {
+        anyhow::ensure!(
+            known_layer_ids.insert(layer.id),
+            "project manifest references text layer {} more than once",
+            layer.id.0
+        );
+        anyhow::ensure!(
+            layer.opacity_percent <= 100,
+            "text layer {} has invalid opacity {}",
+            layer.id.0,
+            layer.opacity_percent
+        );
+    }
+
+    validate_manifest_group_nodes(&manifest.layer_hierarchy)?;
+
+    let expected_tile_len = common::DEFAULT_TILE_SIZE as usize * common::DEFAULT_TILE_SIZE as usize;
+    let expected_rgba_tile_len = expected_tile_len * 4;
+    let manifest_layer_ids = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut payload_layer_ids = std::collections::HashSet::new();
+
+    for payload in &project_file.layers {
+        anyhow::ensure!(
+            payload_layer_ids.insert(payload.id),
+            "project payload references raster layer {} more than once",
+            payload.id.0
+        );
+        anyhow::ensure!(
+            manifest_layer_ids.contains(&payload.id),
+            "project payload references unknown raster layer {}",
+            payload.id.0
+        );
+
+        let mut tile_coords = std::collections::HashSet::new();
+        for tile in &payload.tiles {
+            anyhow::ensure!(
+                tile_coords.insert(tile.coord),
+                "raster layer {} contains duplicate tile coordinates ({}, {})",
+                payload.id.0,
+                tile.coord.x,
+                tile.coord.y
+            );
+            anyhow::ensure!(
+                tile.pixels.len() == expected_rgba_tile_len,
+                "raster layer {} tile ({}, {}) has {} bytes, expected {}",
+                payload.id.0,
+                tile.coord.x,
+                tile.coord.y,
+                tile.pixels.len(),
+                expected_rgba_tile_len
+            );
+        }
+
+        let mut mask_coords = std::collections::HashSet::new();
+        if let Some(mask_tiles) = &payload.mask_tiles {
+            for tile in mask_tiles {
+                anyhow::ensure!(
+                    mask_coords.insert(tile.coord),
+                    "mask layer {} contains duplicate tile coordinates ({}, {})",
+                    payload.id.0,
+                    tile.coord.x,
+                    tile.coord.y
+                );
+                anyhow::ensure!(
+                    tile.alpha.len() == expected_tile_len,
+                    "mask layer {} tile ({}, {}) has {} bytes, expected {}",
+                    payload.id.0,
+                    tile.coord.x,
+                    tile.coord.y,
+                    tile.alpha.len(),
+                    expected_tile_len
+                );
+            }
+        }
+    }
+
+    for layer in &manifest.layers {
+        let payload = project_file
+            .layers
+            .iter()
+            .find(|payload| payload.id == layer.id)
+            .ok_or_else(|| anyhow::anyhow!("missing layer payload for {}", layer.id.0))?;
+        anyhow::ensure!(
+            layer.mask_payload_path.is_some() == payload.mask_tiles.is_some(),
+            "raster layer {} mask payload metadata does not match its stored mask tiles",
+            layer.id.0
+        );
+        if layer.mask_enabled {
+            anyhow::ensure!(
+                payload.mask_tiles.is_some(),
+                "mask-enabled raster layer {} is missing mask tiles",
+                layer.id.0
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_group_nodes(nodes: &[ManifestHierarchyNode]) -> anyhow::Result<()> {
+    fn validate_nodes(
+        nodes: &[ManifestHierarchyNode],
+        group_ids: &mut std::collections::HashSet<GroupId>,
+    ) -> anyhow::Result<()> {
+        for node in nodes {
+            if let ManifestHierarchyNode::Group(group) = node {
+                anyhow::ensure!(
+                    group.opacity_percent <= 100,
+                    "group {} has invalid opacity {}",
+                    group.id.0,
+                    group.opacity_percent
+                );
+                anyhow::ensure!(
+                    group_ids.insert(group.id),
+                    "project hierarchy references group {} more than once",
+                    group.id.0
+                );
+                validate_nodes(&group.children, group_ids)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut group_ids = std::collections::HashSet::new();
+    validate_nodes(nodes, &mut group_ids)
+}
+
 impl From<&Document> for ProjectFile {
     fn from(document: &Document) -> Self {
         let layers = document
@@ -486,7 +740,8 @@ impl TryFrom<ProjectFile> for Document {
 
     fn try_from(project_file: ProjectFile) -> anyhow::Result<Self> {
         let ProjectFile { manifest, layers } = project_file;
-        if manifest.format_version == 0 || manifest.format_version > CURRENT_PROJECT_FORMAT_VERSION {
+        if manifest.format_version == 0 || manifest.format_version > CURRENT_PROJECT_FORMAT_VERSION
+        {
             anyhow::bail!(
                 "unsupported .ptx version: supported up to {}, got {}",
                 CURRENT_PROJECT_FORMAT_VERSION,
@@ -642,9 +897,15 @@ pub fn save_document_to_path(path: &Path, document: &Document) -> anyhow::Result
 }
 
 pub fn load_document_from_path(path: &Path) -> anyhow::Result<Document> {
-    let bytes = fs::read(path)?;
-    let project_file: ProjectFile = serde_json::from_slice(&bytes)?;
-    project_file.try_into()
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read project file from {}", path.display()))?;
+    let project_file: ProjectFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse project file {}", path.display()))?;
+    validate_project_file(&project_file)
+        .with_context(|| format!("invalid project file {}", path.display()))?;
+    project_file
+        .try_into()
+        .with_context(|| format!("failed to restore project document from {}", path.display()))
 }
 
 pub fn load_psd_import_manifest_from_path(path: &Path) -> anyhow::Result<PsdImportManifest> {
@@ -842,18 +1103,77 @@ fn run_psd_import_sidecar(
     psd_path: &Path,
     workspace: &PsdImportWorkspace,
 ) -> anyhow::Result<()> {
-    let output = Command::new(sidecar.executable_path())
+    run_psd_import_sidecar_with_timeout(sidecar, psd_path, workspace, PSD_IMPORT_SIDECAR_TIMEOUT)
+}
+
+fn run_psd_import_sidecar_with_timeout(
+    sidecar: &PsdImportSidecar,
+    psd_path: &Path,
+    workspace: &PsdImportWorkspace,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let mut child = Command::new(sidecar.executable_path())
         .args(sidecar.base_args())
         .arg(psd_path)
         .arg(workspace.root_dir())
         .arg(workspace.manifest_path())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| {
             format!(
                 "failed to start PSD import sidecar {}",
                 sidecar.executable_path().display()
             )
         })?;
+
+    let started_at = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .with_context(|| {
+                format!(
+                    "failed to poll PSD import sidecar {}",
+                    sidecar.executable_path().display()
+                )
+            })?
+            .is_some()
+        {
+            break;
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child.wait_with_output().with_context(|| {
+                format!(
+                    "failed to collect timed-out PSD import sidecar {} output",
+                    sidecar.executable_path().display()
+                )
+            })?;
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() {
+                format!(" stderr: {stderr}")
+            } else if !stdout.is_empty() {
+                format!(" stdout: {stdout}")
+            } else {
+                String::new()
+            };
+            anyhow::bail!(
+                "PSD import sidecar timed out for {} after {:.1}s. PhotoTux only supports PSD import through the configured bounded sidecar workflow.{}",
+                psd_path.display(),
+                timeout.as_secs_f32(),
+                detail
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = child.wait_with_output().with_context(|| {
+        format!(
+            "failed to collect PSD import sidecar {} output",
+            sidecar.executable_path().display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -866,7 +1186,7 @@ fn run_psd_import_sidecar(
             format!("process exited with status {}", output.status)
         };
         anyhow::bail!(
-            "PSD import sidecar failed for {}: {}",
+            "PSD import sidecar failed for {}: {}. PhotoTux only supports PSD import through the configured bounded sidecar workflow.",
             psd_path.display(),
             detail
         );
@@ -1316,7 +1636,13 @@ fn composite_hierarchy_nodes(
                     continue;
                 }
 
-                composite_text_layer_into(text_layer, output, clip_rect, effective_opacity, document.canvas_size);
+                composite_text_layer_into(
+                    text_layer,
+                    output,
+                    clip_rect,
+                    effective_opacity,
+                    document.canvas_size,
+                );
             }
             LayerHierarchyNode::Group(group) => {
                 if !ancestors_visible || !group.visible {
@@ -1521,10 +1847,10 @@ fn text_layout_metrics(layer: &TextLayer) -> Option<TextLayoutMetrics> {
         return None;
     }
 
-    let scale = ((layer.style.font_size_px.max(1) + 7) / 8) as i32;
+    let scale = layer.style.font_size_px.max(1).div_ceil(8) as i32;
     let glyph_height_px = 8 * scale;
-    let line_height_px = ((layer.style.font_size_px.max(1) * layer.style.line_height_percent)
-        .div_ceil(100)) as i32;
+    let line_height_px =
+        ((layer.style.font_size_px.max(1) * layer.style.line_height_percent).div_ceil(100)) as i32;
     let line_height_px = line_height_px.max(glyph_height_px);
     let family = bitmap_text_family(&layer.style.font_family);
     let line_widths = layer
@@ -1614,8 +1940,7 @@ fn composite_text_layer_into(
                                 continue;
                             }
                             if let Some(rect) = clip_rect
-                                && (canvas_y < rect.y
-                                    || canvas_y >= rect.y + rect.height as i32)
+                                && (canvas_y < rect.y || canvas_y >= rect.y + rect.height as i32)
                             {
                                 continue;
                             }
@@ -1626,8 +1951,7 @@ fn composite_text_layer_into(
                                     continue;
                                 }
                                 if let Some(rect) = clip_rect
-                                    && (canvas_x < rect.x
-                                        || canvas_x >= rect.x + rect.width as i32)
+                                    && (canvas_x < rect.x || canvas_x >= rect.x + rect.width as i32)
                                 {
                                     continue;
                                 }
@@ -1659,11 +1983,13 @@ mod tests {
         ProjectFile, ProjectManifest, PsdImportBoundsRecord, PsdImportCanvasRecord,
         PsdImportColorMode, PsdImportCompositeRecord, PsdImportDiagnostic,
         PsdImportDiagnosticSeverity, PsdImportLayerKind, PsdImportLayerRecord, PsdImportManifest,
-        PsdImportOffsetRecord, PsdImportSidecar, PsdImportSourceKind, export_jpeg_to_path,
-        export_png_to_path, export_webp_to_path, flatten_document_rgba, import_jpeg_from_path,
-        import_png_from_path, import_psd_from_manifest_path, import_psd_from_path_with_sidecar,
-        import_webp_from_path, load_document_from_path, recovery_path_for_project_path,
-        save_document_to_path, update_flattened_region_rgba,
+        PsdImportOffsetRecord, PsdImportSidecar, PsdImportSourceKind, PsdImportWorkspace,
+        export_jpeg_to_path, export_png_to_path, export_webp_to_path, flatten_document_rgba,
+        import_jpeg_from_path, import_png_from_path, import_psd_from_manifest_path,
+        import_psd_from_path_with_sidecar, import_webp_from_path, load_document_from_path,
+        recovery_path_for_document_with_state_root, recovery_path_for_project_path,
+        run_psd_import_sidecar_with_timeout, save_document_to_path, stable_path_hash,
+        update_flattened_region_rgba,
     };
     use color_math::{BlendModeMath, blend_rgba_over};
     use doc_model::{
@@ -1677,7 +2003,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     #[cfg(unix)]
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn set_pixel(document: &mut Document, layer_index: usize, x: u32, y: u32, rgba: [u8; 4]) {
         let tile_size = document.tile_size as usize;
@@ -1901,11 +2227,8 @@ mod tests {
 
     fn build_text_scene() -> Document {
         let mut document = Document::new(128, 96);
-        let text_layer_id = document.add_text_layer(
-            "Title",
-            "PhotoTux",
-            TextTransform::new(18, 24),
-        );
+        let text_layer_id =
+            document.add_text_layer("Title", "PhotoTux", TextTransform::new(18, 24));
         let text_layer = document
             .text_layer_mut(
                 document
@@ -1999,10 +2322,16 @@ mod tests {
         assert_eq!(restored.text_layers.len(), 1);
         assert_eq!(restored.text_layers[0].name, "Title");
         assert_eq!(restored.text_layers[0].content, "PhotoTux");
-        assert_eq!(restored.text_layers[0].transform, TextTransform::new(18, 24));
+        assert_eq!(
+            restored.text_layers[0].transform,
+            TextTransform::new(18, 24)
+        );
         assert_eq!(restored.text_layers[0].style.font_family, "Noto Sans");
         assert_eq!(restored.text_layers[0].style.font_size_px, 54);
-        assert_eq!(restored.text_layers[0].style.alignment, TextAlignment::Center);
+        assert_eq!(
+            restored.text_layers[0].style.alignment,
+            TextAlignment::Center
+        );
     }
 
     #[test]
@@ -2955,6 +3284,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn psd_sidecar_runtime_times_out_and_cleans_workspace() {
+        let fixture_dir = temporary_workspace_path("psd-sidecar-timeout");
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should exist");
+        let source_psd = fixture_dir.join("source.psd");
+        fs::write(&source_psd, b"placeholder psd source").expect("source psd should be written");
+        let workspace_log = fixture_dir.join("workspace-path.txt");
+        let script_path = fixture_dir.join("sidecar-timeout.sh");
+        write_shell_script(
+            &script_path,
+            &format!(
+                "#!/bin/sh\nset -eu\nprintf '%s' \"$2\" > \"{}\"\nsleep 1\n",
+                workspace_log.display(),
+            ),
+        );
+
+        let workspace_probe = PsdImportWorkspace::create().expect("workspace should be created");
+        let workspace_path = workspace_probe.root_dir().to_path_buf();
+        drop(workspace_probe);
+
+        let error = run_psd_import_sidecar_with_timeout(
+            &PsdImportSidecar::new("/bin/sh").with_arg(script_path.as_os_str()),
+            &source_psd,
+            &PsdImportWorkspace {
+                root_dir: workspace_path.clone(),
+                manifest_path: workspace_path.join("manifest.json"),
+            },
+            Duration::from_millis(50),
+        )
+        .expect_err("slow sidecar should time out");
+
+        assert!(format!("{error:#}").contains("timed out"));
+        assert!(format!("{error:#}").contains("bounded sidecar workflow"));
+        assert!(!workspace_path.exists());
+        let logged_workspace =
+            fs::read_to_string(&workspace_log).expect("workspace path log should be written");
+        assert_eq!(PathBuf::from(logged_workspace), workspace_path);
+
+        fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn psd_repo_fixture_supported_layers_import_through_real_sidecar() {
         if !repo_psd_sidecar_runtime_available() {
             eprintln!(
@@ -3208,6 +3579,98 @@ mod tests {
             recovery_path_for_project_path(&project_path),
             PathBuf::from("/tmp/example.ptx.autosave")
         );
+    }
+
+    #[test]
+    fn recovery_path_for_unsaved_document_uses_state_storage() {
+        let state_root = temporary_workspace_path("recovery-state-root");
+        let recovery_path =
+            recovery_path_for_document_with_state_root(None, "untitled.ptx", Some(&state_root));
+
+        assert_eq!(
+            recovery_path,
+            state_root.join("recovery").join("untitled.ptx.autosave")
+        );
+
+        fs::remove_dir_all(&state_root).expect("temporary recovery state root should be removed");
+    }
+
+    #[test]
+    fn recovery_path_for_saved_document_is_namespaced_by_path_hash() {
+        let state_root = temporary_workspace_path("recovery-saved-root");
+        let project_path = PathBuf::from("/projects/demo/example.ptx");
+        let recovery_path = recovery_path_for_document_with_state_root(
+            Some(&project_path),
+            "ignored.ptx",
+            Some(&state_root),
+        );
+
+        assert_eq!(
+            recovery_path,
+            state_root.join("recovery").join(format!(
+                "example.ptx-{:016x}.autosave",
+                stable_path_hash(&project_path)
+            ))
+        );
+
+        fs::remove_dir_all(&state_root).expect("temporary recovery state root should be removed");
+    }
+
+    #[test]
+    fn recovery_path_falls_back_when_state_root_is_not_directory() {
+        let invalid_root = std::env::temp_dir().join(format!(
+            "phototux-recovery-root-file-{}",
+            temporary_suffix()
+        ));
+        fs::write(&invalid_root, b"not a directory").expect("temporary invalid state root");
+
+        let recovery_path =
+            recovery_path_for_document_with_state_root(None, "untitled.ptx", Some(&invalid_root));
+
+        assert!(!recovery_path.starts_with(&invalid_root));
+        assert!(recovery_path.ends_with("untitled.ptx.autosave"));
+
+        fs::remove_file(&invalid_root)
+            .expect("temporary invalid state root file should be removed");
+    }
+
+    #[test]
+    fn malformed_project_with_zero_canvas_is_rejected() {
+        let path = temporary_project_path();
+        let document = Document::new(32, 32);
+        let mut project = ProjectFile::from(&document);
+        project.manifest.canvas_size.width = 0;
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&project).expect("corrupt project should serialize"),
+        )
+        .expect("corrupt project fixture should be written");
+
+        let error = load_document_from_path(&path).expect_err("zero-canvas project should fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("canvas dimensions must be greater than zero"));
+
+        fs::remove_file(&path).expect("temporary corrupt project should be removed");
+    }
+
+    #[test]
+    fn malformed_project_with_truncated_tile_payload_is_rejected() {
+        let path = temporary_project_path();
+        let mut document = Document::new(32, 32);
+        set_pixel(&mut document, 0, 0, 0, [0, 0, 0, 255]);
+        let mut project = ProjectFile::from(&document);
+        project.layers[0].tiles[0].pixels.truncate(4);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&project).expect("corrupt tile project should serialize"),
+        )
+        .expect("corrupt tile fixture should be written");
+
+        let error = load_document_from_path(&path).expect_err("truncated tile payload should fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("expected 262144"));
+
+        fs::remove_file(&path).expect("temporary corrupt project should be removed");
     }
 
     fn temporary_suffix() -> u128 {

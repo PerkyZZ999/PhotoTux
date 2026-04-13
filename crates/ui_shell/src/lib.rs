@@ -1,28 +1,36 @@
 use anyhow::Result;
-use common::{APP_NAME, CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId, LayerId};
+use common::{
+    APP_NAME, CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId, LayerId,
+};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, CssProvider, Dialog,
-    ComboBoxText, Entry,
-    EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
-    FileChooserAction, FileChooserNative, FileFilter, GestureDrag, GestureStylus, HeaderBar, Image,
-    Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
-    ResponseType, Separator, gdk,
-    SpinButton,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
+    CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
+    EventControllerScrollFlags, FileChooserAction, FileChooserNative, FileFilter, GestureDrag,
+    GestureStylus, HeaderBar, Image, Label, MenuButton, MessageDialog, MessageType, Orientation,
+    Paned, Picture, Popover, ResponseType, Separator, SpinButton, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
     ViewportSize, ViewportState,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use ui_templates::{build_panel_group_shell, load_info_dialog_template};
+use ui_templates::{
+    build_panel_group_shell, load_document_tabs_template, load_info_dialog_template,
+    load_status_bar_template, load_titlebar_template, load_tool_options_bar_template,
+};
 
 mod ui_templates;
+
+const UI_RESOURCE_PREFIX: &str = "/com/phototux";
+const OPTIONAL_ICON_FALLBACK_NAME: &str = "image-missing";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
@@ -80,6 +88,17 @@ pub struct ShellTextSnapshot {
     pub origin_y: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellTextUpdate {
+    pub content: String,
+    pub font_family: String,
+    pub font_size_px: u32,
+    pub line_height_percent: u32,
+    pub letter_spacing: i32,
+    pub fill_rgba: [u8; 4],
+    pub alignment: ShellTextAlignment,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellGuide {
     Horizontal { y: i32 },
@@ -117,6 +136,22 @@ pub struct ShellImportReport {
     pub diagnostics: Vec<ShellImportDiagnostic>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellAlertTone {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellAlert {
+    pub id: u64,
+    pub tone: ShellAlertTone,
+    pub title: String,
+    pub body: String,
+    pub secondary_text: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSnapshot {
     pub document_title: String,
@@ -125,7 +160,10 @@ pub struct ShellSnapshot {
     pub recovery_offer_pending: bool,
     pub recovery_path: Option<PathBuf>,
     pub status_message: String,
+    pub latest_alert: Option<ShellAlert>,
     pub latest_import_report: Option<ShellImportReport>,
+    pub file_job_active: bool,
+    pub autosave_job_active: bool,
     pub canvas_size: CanvasSize,
     pub canvas_revision: u64,
     pub active_tool_name: String,
@@ -249,16 +287,7 @@ pub trait ShellController {
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
     fn begin_text_edit(&mut self);
-    fn update_text_session(
-        &mut self,
-        content: String,
-        font_family: String,
-        font_size_px: u32,
-        line_height_percent: u32,
-        letter_spacing: i32,
-        fill_rgba: [u8; 4],
-        alignment: ShellTextAlignment,
-    );
+    fn update_text_session(&mut self, update: ShellTextUpdate);
     fn commit_text_session(&mut self);
     fn cancel_text_session(&mut self);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
@@ -285,6 +314,7 @@ pub trait ShellController {
 }
 
 pub fn run(controller: Rc<RefCell<dyn ShellController>>) -> Result<()> {
+    ensure_ui_resources_registered()?;
     let application = Application::builder()
         .application_id("com.phototux.app")
         .build();
@@ -299,6 +329,7 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
     install_theme();
 
     let shell_state = ShellUiState::new(controller.clone());
+    let header_bar = build_header_bar();
 
     let window = ApplicationWindow::builder()
         .application(application)
@@ -306,12 +337,11 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
         .default_width(1600)
         .default_height(900)
         .build();
-    window.set_decorated(false);
     window.add_css_class("app-window");
+    window.set_titlebar(Some(&header_bar));
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class("app-root");
-    root.append(&build_header_bar());
     root.append(&build_menu_bar(&window, shell_state.clone()));
     root.append(&shell_state.tool_options_bar);
     let workspace = build_workspace_body(&shell_state);
@@ -323,6 +353,7 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
     wire_window_shortcuts(&window, shell_state.clone());
     wire_window_close_request(&window, shell_state.clone());
     window.present();
+    shell_state.focus_canvas();
 
     shell_state.refresh();
     glib::timeout_add_local(Duration::from_millis(33), move || {
@@ -331,9 +362,50 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
     });
 }
 
+fn ensure_ui_resources_registered() -> Result<()> {
+    static REGISTRATION: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    match REGISTRATION.get_or_init(|| {
+        gio::resources_register_include!("phototux-ui.gresource").map_err(|error| error.to_string())
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => anyhow::bail!("failed to register bundled PhotoTux UI resources: {error}"),
+    }
+}
+
 fn build_header_bar() -> HeaderBar {
+    match load_titlebar_template() {
+        Ok(template) => {
+            template.app_name_label.set_label(APP_NAME);
+            template
+                .workspace_button
+                .set_tooltip_text(Some("Current workspace preset"));
+            set_image_resource_or_fallback(
+                &template.logo_image,
+                logo_icon_resource_path(),
+                APP_NAME,
+                16,
+            );
+            template.search_icon.add_css_class("remix-icon");
+            set_image_resource_or_fallback(
+                &template.search_icon,
+                &remix_icon_resource_path("search-line.svg"),
+                "Search",
+                12,
+            );
+            template.search_button.set_tooltip_text(Some("Search"));
+            template.root
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load titlebar template");
+            build_header_bar_fallback()
+        }
+    }
+}
+
+fn build_header_bar_fallback() -> HeaderBar {
     let header = HeaderBar::new();
     header.add_css_class("titlebar");
+    header.set_show_title_buttons(true);
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);
     title_row.add_css_class("app-brand");
@@ -375,6 +447,15 @@ fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> 
     bar.append(&build_view_menu_button(shell_state.clone()));
     bar.append(&build_window_menu_button(shell_state.clone()));
     bar.append(&build_help_menu_button(window));
+
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bar.append(&spacer);
+
+    let separator = Separator::new(Orientation::Vertical);
+    separator.add_css_class("menu-divider");
+    bar.append(&separator);
+    bar.append(&shell_state.menu_zoom_label);
 
     bar
 }
@@ -753,7 +834,9 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             toggle_mask.set_sensitive(!text_selected && has_mask);
             edit_pixels.set_sensitive(layer_count > 0 && !text_selected);
             edit_mask.set_sensitive(!text_selected && has_mask);
-            move_up.set_sensitive(!text_selected && has_multiple_layers && active_index + 1 < layer_count);
+            move_up.set_sensitive(
+                !text_selected && has_multiple_layers && active_index + 1 < layer_count,
+            );
             move_down.set_sensitive(!text_selected && has_multiple_layers && active_index > 0);
         });
     }
@@ -1052,11 +1135,11 @@ fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiSta
     open_project.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
-        let controller = shell_state.controller.clone();
+        let shell_state = shell_state.clone();
         let popover = popover.clone();
         open_project.connect_clicked(move |_| {
             popover.popdown();
-            choose_open_project(&parent, controller.clone());
+            choose_open_project(&parent, shell_state.clone());
         });
     }
     menu.append(&open_project);
@@ -1065,11 +1148,11 @@ fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiSta
     import_image.add_css_class("menu-dropdown-item");
     {
         let parent = window.clone();
-        let controller = shell_state.controller.clone();
+        let shell_state = shell_state.clone();
         let popover = popover.clone();
         import_image.connect_clicked(move |_| {
             popover.popdown();
-            choose_import_image(&parent, controller.clone());
+            choose_import_image(&parent, shell_state.clone());
         });
     }
     menu.append(&import_image);
@@ -1454,7 +1537,7 @@ fn show_info_dialog(
     dialog.present();
 }
 
-fn choose_open_project(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+fn choose_open_project(parent: &ApplicationWindow, shell_state: Rc<ShellUiState>) {
     choose_path(
         parent,
         "Open Project",
@@ -1462,11 +1545,13 @@ fn choose_open_project(parent: &ApplicationWindow, controller: Rc<RefCell<dyn Sh
         "Open",
         None,
         &[build_extension_filter("PhotoTux Project", &["*.ptx"])],
-        move |path| controller.borrow_mut().open_document(path),
+        move |path| {
+            shell_state.request_document_replacement(PendingDocumentAction::OpenProject(path))
+        },
     );
 }
 
-fn choose_import_image(parent: &ApplicationWindow, controller: Rc<RefCell<dyn ShellController>>) {
+fn choose_import_image(parent: &ApplicationWindow, shell_state: Rc<ShellUiState>) {
     choose_path(
         parent,
         "Import Image Or PSD",
@@ -1477,7 +1562,9 @@ fn choose_import_image(parent: &ApplicationWindow, controller: Rc<RefCell<dyn Sh
             "Supported Imports",
             &["*.png", "*.jpg", "*.jpeg", "*.webp", "*.psd"],
         )],
-        move |path| controller.borrow_mut().import_image(path),
+        move |path| {
+            shell_state.request_document_replacement(PendingDocumentAction::ImportImage(path))
+        },
     );
 }
 
@@ -1545,10 +1632,41 @@ fn choose_save_project_path_with_callback(
 }
 
 fn build_tool_options_bar(controller: Rc<RefCell<dyn ShellController>>) -> (GtkBox, Image, Label) {
+    let snapshot = controller.borrow().snapshot();
+    let chip_titles = [
+        "Preset: Soft Round",
+        "Size 24",
+        "Hardness 80%",
+        "Opacity 100%",
+        "Flow 100%",
+        "Mode Normal",
+    ];
+
+    match load_tool_options_bar_template() {
+        Ok(template) => {
+            set_image_resource_or_fallback(
+                &template.tool_icon,
+                &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
+                &snapshot.active_tool_name,
+                12,
+            );
+            template.tool_label.set_label(&snapshot.active_tool_name);
+            for (button, title) in template.option_chips.iter().zip(chip_titles) {
+                button.set_label(title);
+                button.set_has_frame(false);
+            }
+            (template.root, template.tool_icon, template.tool_label)
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load tool options template");
+            build_tool_options_bar_fallback(snapshot)
+        }
+    }
+}
+
+fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, Label) {
     let bar = GtkBox::new(Orientation::Horizontal, 6);
     bar.add_css_class("tool-options-bar");
-
-    let snapshot = controller.borrow().snapshot();
     let tool_icon = build_remix_icon(
         shell_tool_icon(snapshot.active_tool),
         &snapshot.active_tool_name,
@@ -1707,6 +1825,23 @@ fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
 }
 
 fn build_document_tabs() -> (GtkBox, Label) {
+    match load_document_tabs_template() {
+        Ok(template) => {
+            template.active_tab_button.set_can_focus(false);
+            template.add_tab_button.set_sensitive(false);
+            template
+                .add_tab_button
+                .set_tooltip_text(Some("Multiple document tabs are not active yet"));
+            (template.root, template.active_tab_label)
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load document tabs template");
+            build_document_tabs_fallback()
+        }
+    }
+}
+
+fn build_document_tabs_fallback() -> (GtkBox, Label) {
     let tabs = GtkBox::new(Orientation::Horizontal, 4);
     tabs.add_css_class("document-tabs");
 
@@ -1758,8 +1893,87 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     canvas_frame.add_css_class("canvas-frame");
     canvas_frame.set_hexpand(true);
     canvas_frame.set_vexpand(true);
+    canvas_frame.set_halign(Align::Center);
+    canvas_frame.set_valign(Align::Center);
 
-    canvas_frame.append(&shell_state.canvas_picture);
+    let canvas_overlay = gtk4::Overlay::new();
+    canvas_overlay.set_hexpand(true);
+    canvas_overlay.set_vexpand(true);
+    canvas_overlay.set_child(Some(&shell_state.canvas_picture));
+    shell_state.canvas_info_label.set_halign(Align::Center);
+    shell_state.canvas_info_label.set_valign(Align::Start);
+    shell_state.canvas_info_label.set_margin_top(8);
+    canvas_overlay.add_overlay(&shell_state.canvas_info_label);
+
+    let task_bar = GtkBox::new(Orientation::Horizontal, 4);
+    task_bar.add_css_class("contextual-task-bar");
+    task_bar.set_halign(Align::Center);
+    task_bar.set_valign(Align::End);
+    task_bar.set_margin_bottom(16);
+
+    let fit_button = Button::with_label("Fit View");
+    fit_button.add_css_class("contextual-task-button");
+    {
+        let canvas_state = shell_state.canvas_state.clone();
+        fit_button.connect_clicked(move |_| canvas_state.borrow_mut().fit_to_view());
+    }
+    task_bar.append(&fit_button);
+
+    let zoom_out_button = Button::with_label("Zoom -");
+    zoom_out_button.add_css_class("contextual-task-button");
+    {
+        let canvas_state = shell_state.canvas_state.clone();
+        zoom_out_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_out());
+    }
+    task_bar.append(&zoom_out_button);
+
+    let zoom_in_button = Button::with_label("Zoom +");
+    zoom_in_button.add_css_class("contextual-task-button");
+    {
+        let canvas_state = shell_state.canvas_state.clone();
+        zoom_in_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_in());
+    }
+    task_bar.append(&zoom_in_button);
+
+    let separator = Separator::new(Orientation::Vertical);
+    separator.add_css_class("contextual-task-separator");
+    task_bar.append(&separator);
+
+    let clear_selection = Button::with_label("Clear Sel");
+    clear_selection.add_css_class("contextual-task-button");
+    {
+        let controller = shell_state.controller.clone();
+        clear_selection.connect_clicked(move |_| controller.borrow_mut().clear_selection());
+    }
+    task_bar.append(&clear_selection);
+
+    let invert_selection = Button::with_label("Invert Sel");
+    invert_selection.add_css_class("contextual-task-button");
+    {
+        let controller = shell_state.controller.clone();
+        invert_selection.connect_clicked(move |_| controller.borrow_mut().invert_selection());
+    }
+    task_bar.append(&invert_selection);
+
+    let edit_pixels = Button::with_label("Layer Pixels");
+    edit_pixels.add_css_class("contextual-task-button");
+    edit_pixels.add_css_class("contextual-task-button-primary");
+    {
+        let controller = shell_state.controller.clone();
+        edit_pixels.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_pixels());
+    }
+    task_bar.append(&edit_pixels);
+
+    let edit_mask = Button::with_label("Layer Mask");
+    edit_mask.add_css_class("contextual-task-button");
+    {
+        let controller = shell_state.controller.clone();
+        edit_mask.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_mask());
+    }
+    task_bar.append(&edit_mask);
+
+    canvas_overlay.add_overlay(&task_bar);
+    canvas_frame.append(&canvas_overlay);
 
     content.append(&canvas_frame);
     workspace.append(&content);
@@ -1770,7 +1984,7 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
 fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     let sidebar = GtkBox::new(Orientation::Horizontal, 0);
     sidebar.add_css_class("right-sidebar");
-    sidebar.set_size_request(280, -1);
+    sidebar.set_size_request(300, -1);
 
     let dock_icons = GtkBox::new(Orientation::Vertical, 3);
     dock_icons.add_css_class("panel-icon-strip");
@@ -1818,6 +2032,23 @@ fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
 }
 
 fn build_status_bar() -> (GtkBox, Label, Label, Label, Label, Label) {
+    match load_status_bar_template() {
+        Ok(template) => (
+            template.root,
+            template.doc_label,
+            template.zoom_label,
+            template.cursor_label,
+            template.notice_label,
+            template.mode_label,
+        ),
+        Err(error) => {
+            tracing::error!(%error, "failed to load status bar template");
+            build_status_bar_fallback()
+        }
+    }
+}
+
+fn build_status_bar_fallback() -> (GtkBox, Label, Label, Label, Label, Label) {
     let bar = GtkBox::new(Orientation::Horizontal, 0);
     bar.add_css_class("status-bar");
 
@@ -1912,15 +2143,56 @@ fn build_status_notice_label(text: &str) -> Label {
     label
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingDocumentAction {
+    OpenProject(PathBuf),
+    ImportImage(PathBuf),
+}
+
+impl PendingDocumentAction {
+    const fn prompt_title(&self) -> &'static str {
+        match self {
+            Self::OpenProject(_) => "Save changes before opening another project?",
+            Self::ImportImage(_) => "Save changes before importing?",
+        }
+    }
+
+    const fn prompt_action_phrase(&self) -> &'static str {
+        match self {
+            Self::OpenProject(_) => "open another project",
+            Self::ImportImage(_) => "import a file that replaces the current document",
+        }
+    }
+
+    fn prompt_detail(&self, document_title: &str) -> String {
+        format!(
+            "{} has unsaved changes. Save them before you {}, discard them, or cancel and keep editing.",
+            document_title,
+            self.prompt_action_phrase()
+        )
+    }
+
+    fn perform(&self, controller: &mut dyn ShellController) {
+        match self {
+            Self::OpenProject(path) => controller.open_document(path.clone()),
+            Self::ImportImage(path) => controller.import_image(path.clone()),
+        }
+    }
+}
+
 struct ShellUiState {
     controller: Rc<RefCell<dyn ShellController>>,
     window: RefCell<Option<ApplicationWindow>>,
     recovery_prompt_visible: Cell<bool>,
     close_prompt_visible: Cell<bool>,
+    replace_prompt_visible: Cell<bool>,
     import_report_visible: Cell<bool>,
+    alert_dialog_visible: Cell<bool>,
     pending_close_after_save: Cell<bool>,
+    pending_document_action_after_save: RefCell<Option<PendingDocumentAction>>,
     allow_close_once: Cell<bool>,
     prompted_recovery_path: RefCell<Option<PathBuf>>,
+    presented_alert_id: Cell<Option<u64>>,
     presented_import_report_id: Cell<Option<u64>>,
     presented_text_request_id: Cell<Option<u64>>,
     text_dialog_visible: Cell<bool>,
@@ -1943,11 +2215,13 @@ struct ShellUiState {
     history_group: GtkBox,
     history_body: GtkBox,
     status_bar: GtkBox,
+    menu_zoom_label: Label,
     status_doc: Label,
     status_zoom: Label,
     status_cursor: Label,
     status_notice: Label,
     status_mode: Label,
+    canvas_info_label: Label,
     last_snapshot: RefCell<Option<ShellSnapshot>>,
     last_zoom_percent: RefCell<u32>,
 }
@@ -1974,16 +2248,24 @@ impl ShellUiState {
 
         let (status_bar, status_doc, status_zoom, status_cursor, status_notice, status_mode) =
             build_status_bar();
+        let menu_zoom_label = Label::new(Some("100%"));
+        menu_zoom_label.add_css_class("menu-zoom-display");
+        let canvas_info_label = Label::new(Some("untitled.ptx @ 100% (RGB/8)"));
+        canvas_info_label.add_css_class("canvas-info");
 
         Rc::new(Self {
             controller,
             window: RefCell::new(None),
             recovery_prompt_visible: Cell::new(false),
             close_prompt_visible: Cell::new(false),
+            replace_prompt_visible: Cell::new(false),
             import_report_visible: Cell::new(false),
+            alert_dialog_visible: Cell::new(false),
             pending_close_after_save: Cell::new(false),
+            pending_document_action_after_save: RefCell::new(None),
             allow_close_once: Cell::new(false),
             prompted_recovery_path: RefCell::new(None),
+            presented_alert_id: Cell::new(None),
             presented_import_report_id: Cell::new(None),
             presented_text_request_id: Cell::new(None),
             text_dialog_visible: Cell::new(false),
@@ -2006,17 +2288,19 @@ impl ShellUiState {
             history_group,
             history_body,
             status_bar,
+            menu_zoom_label,
             status_doc,
             status_zoom,
             status_cursor,
             status_notice,
             status_mode,
+            canvas_info_label,
             last_snapshot: RefCell::new(None),
             last_zoom_percent: RefCell::new(0),
         })
     }
 
-    fn handle_shortcut(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    fn handle_shortcut(self: &Rc<Self>, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
         let is_control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
         let is_shift = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
         let key_char = key
@@ -2039,7 +2323,9 @@ impl ShellUiState {
             if matches!(key, gdk::Key::F4)
                 && let Some(layer_id) = self.selected_layer_id()
             {
-                self.controller.borrow_mut().toggle_layer_visibility(layer_id);
+                self.controller
+                    .borrow_mut()
+                    .toggle_layer_visibility(layer_id);
                 return true;
             }
             if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
@@ -2149,7 +2435,7 @@ impl ShellUiState {
                 }
                 Some('o') => {
                     if let Some(window) = self.window.borrow().as_ref() {
-                        choose_open_project(window, self.controller.clone());
+                        choose_open_project(window, self.clone());
                         return true;
                     }
                 }
@@ -2278,6 +2564,10 @@ impl ShellUiState {
         self.window.replace(Some(window));
     }
 
+    fn focus_canvas(&self) {
+        self.canvas_picture.grab_focus();
+    }
+
     fn present_recovery_prompt(self: &Rc<Self>, snapshot: &ShellSnapshot) {
         let Some(window) = self.window.borrow().as_ref().cloned() else {
             return;
@@ -2371,6 +2661,51 @@ impl ShellUiState {
         dialog.show();
     }
 
+    fn present_document_replacement_prompt(
+        self: &Rc<Self>,
+        snapshot: &ShellSnapshot,
+        action: PendingDocumentAction,
+    ) {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            self.perform_document_replacement(action);
+            return;
+        };
+        if self.replace_prompt_visible.replace(true) {
+            return;
+        }
+
+        let dialog = MessageDialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .message_type(MessageType::Question)
+            .buttons(ButtonsType::None)
+            .text(action.prompt_title())
+            .secondary_text(action.prompt_detail(&snapshot.document_title))
+            .build();
+        dialog.add_button("Cancel", ResponseType::Cancel);
+        dialog.add_button("Discard Changes", ResponseType::Reject);
+        dialog.add_button("Save", ResponseType::Accept);
+
+        let shell_state = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            shell_state.replace_prompt_visible.set(false);
+            match response {
+                ResponseType::Accept => shell_state.request_project_save_for_action(action.clone()),
+                ResponseType::Reject => {
+                    shell_state
+                        .controller
+                        .borrow_mut()
+                        .discard_recovery_document();
+                    shell_state.perform_document_replacement(action.clone());
+                }
+                _ => {}
+            }
+            dialog.destroy();
+        });
+
+        dialog.show();
+    }
+
     fn present_import_report(self: &Rc<Self>, report: &ShellImportReport) {
         let Some(window) = self.window.borrow().as_ref().cloned() else {
             return;
@@ -2391,6 +2726,43 @@ impl ShellUiState {
         let shell_state = self.clone();
         dialog.connect_response(move |dialog, _| {
             shell_state.import_report_visible.set(false);
+            dialog.destroy();
+        });
+
+        dialog.show();
+    }
+
+    fn present_shell_alert(self: &Rc<Self>, alert: &ShellAlert) {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            return;
+        };
+        if self.alert_dialog_visible.replace(true) {
+            return;
+        }
+
+        let dialog = MessageDialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .message_type(match alert.tone {
+                ShellAlertTone::Info => MessageType::Info,
+                ShellAlertTone::Warning => MessageType::Warning,
+                ShellAlertTone::Error => MessageType::Error,
+            })
+            .buttons(ButtonsType::Close)
+            .text(&alert.title)
+            .secondary_text({
+                let mut text = alert.body.clone();
+                if let Some(secondary) = format_shell_alert_secondary_text(alert) {
+                    text.push_str("\n\n");
+                    text.push_str(&secondary);
+                }
+                text
+            })
+            .build();
+
+        let shell_state = self.clone();
+        dialog.connect_response(move |dialog, _| {
+            shell_state.alert_dialog_visible.set(false);
             dialog.destroy();
         });
 
@@ -2444,7 +2816,12 @@ impl ShellUiState {
         let font_row = GtkBox::new(Orientation::Horizontal, 6);
         let font_family = ComboBoxText::new();
         for family in [text.font_family.as_str(), "Bitmap Sans"] {
-            if font_family.active_text().as_ref().map(|value| value.as_str()) != Some(family) {
+            if font_family
+                .active_text()
+                .as_ref()
+                .map(|value| value.as_str())
+                != Some(family)
+            {
                 font_family.append_text(family);
             }
         }
@@ -2508,27 +2885,29 @@ impl ShellUiState {
             let color_b = color_b.clone();
             let color_a = color_a.clone();
             move || {
-                controller.borrow_mut().update_text_session(
-                    content_entry.text().to_string(),
-                    font_family
-                        .active_text()
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| fallback_font_family.clone()),
-                    font_size.value().round() as u32,
-                    line_height.value().round() as u32,
-                    letter_spacing.value().round() as i32,
-                    [
-                        color_r.value().round() as u8,
-                        color_g.value().round() as u8,
-                        color_b.value().round() as u8,
-                        color_a.value().round() as u8,
-                    ],
-                    match alignment.active_id().as_ref().map(|id| id.as_str()) {
-                        Some("center") => ShellTextAlignment::Center,
-                        Some("right") => ShellTextAlignment::Right,
-                        _ => ShellTextAlignment::Left,
-                    },
-                );
+                controller
+                    .borrow_mut()
+                    .update_text_session(ShellTextUpdate {
+                        content: content_entry.text().to_string(),
+                        font_family: font_family
+                            .active_text()
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| fallback_font_family.clone()),
+                        font_size_px: font_size.value().round() as u32,
+                        line_height_percent: line_height.value().round() as u32,
+                        letter_spacing: letter_spacing.value().round() as i32,
+                        fill_rgba: [
+                            color_r.value().round() as u8,
+                            color_g.value().round() as u8,
+                            color_b.value().round() as u8,
+                            color_a.value().round() as u8,
+                        ],
+                        alignment: match alignment.active_id().as_ref().map(|id| id.as_str()) {
+                            Some("center") => ShellTextAlignment::Center,
+                            Some("right") => ShellTextAlignment::Right,
+                            _ => ShellTextAlignment::Left,
+                        },
+                    });
             }
         });
 
@@ -2536,7 +2915,15 @@ impl ShellUiState {
             let sync = sync.clone();
             content_entry.connect_changed(move |_| sync());
         }
-        for spin in [&font_size, &line_height, &letter_spacing, &color_r, &color_g, &color_b, &color_a] {
+        for spin in [
+            &font_size,
+            &line_height,
+            &letter_spacing,
+            &color_r,
+            &color_g,
+            &color_b,
+            &color_a,
+        ] {
             let sync = sync.clone();
             spin.connect_value_changed(move |_| sync());
         }
@@ -2601,6 +2988,50 @@ impl ShellUiState {
         );
     }
 
+    fn request_project_save_for_action(self: &Rc<Self>, action: PendingDocumentAction) {
+        let snapshot = self.controller.borrow().snapshot();
+        if snapshot.project_path.is_some() {
+            self.pending_document_action_after_save
+                .replace(Some(action));
+            self.controller.borrow_mut().save_document();
+            return;
+        }
+
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            self.pending_document_action_after_save
+                .replace(Some(action));
+            self.controller.borrow_mut().save_document();
+            return;
+        };
+
+        let shell_state = self.clone();
+        let action_to_store = action.clone();
+        let on_requested: Rc<dyn Fn()> = Rc::new(move || {
+            shell_state
+                .pending_document_action_after_save
+                .replace(Some(action_to_store.clone()));
+        });
+        choose_save_project_path_with_callback(
+            &window,
+            self.controller.clone(),
+            Some(on_requested),
+        );
+    }
+
+    fn request_document_replacement(self: &Rc<Self>, action: PendingDocumentAction) {
+        let snapshot = self.controller.borrow().snapshot();
+        if !snapshot.dirty {
+            self.perform_document_replacement(action);
+            return;
+        }
+
+        self.present_document_replacement_prompt(&snapshot, action);
+    }
+
+    fn perform_document_replacement(&self, action: PendingDocumentAction) {
+        action.perform(&mut *self.controller.borrow_mut());
+    }
+
     fn request_project_save(&self) {
         let snapshot = self.controller.borrow().snapshot();
         if snapshot.project_path.is_some() {
@@ -2656,18 +3087,28 @@ impl ShellUiState {
             "Doc: {} x {}",
             snapshot.canvas_size.width, snapshot.canvas_size.height
         ));
+        self.menu_zoom_label
+            .set_label(&format!("{}%", zoom_percent));
         self.status_zoom
             .set_label(&format!("Zoom: {}%", zoom_percent));
         self.status_cursor.set_label(&shell_status_hint(&snapshot));
         self.status_notice.set_label(&shell_notice_text(&snapshot));
-        apply_status_notice_style(&self.status_notice, &shell_notice_text(&snapshot));
+        apply_status_notice_style(&self.status_notice, &snapshot);
         self.status_mode.set_label("RGB/8");
+        self.canvas_info_label.set_label(&format!(
+            "{} @ {}% ({})",
+            snapshot.document_title, zoom_percent, "RGB/8"
+        ));
 
         if snapshot_changed {
             self.tool_options_label
                 .set_label(&snapshot.active_tool_name);
-            self.tool_options_icon
-                .set_from_file(Some(remix_icon_path(shell_tool_icon(snapshot.active_tool))));
+            set_image_resource_or_fallback(
+                &self.tool_options_icon,
+                &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
+                &snapshot.active_tool_name,
+                18,
+            );
             self.refresh_tool_buttons(&snapshot);
             self.refresh_color_panel(&snapshot);
             self.refresh_properties_panel(&snapshot);
@@ -2683,12 +3124,26 @@ impl ShellUiState {
             .cloned()
             .unwrap_or_else(|| self.controller.borrow().snapshot());
 
+        if let Some(alert) = current_snapshot.latest_alert.as_ref() {
+            let already_presented = self.presented_alert_id.get() == Some(alert.id);
+            if !already_presented && !self.alert_dialog_visible.get() {
+                self.presented_alert_id.set(Some(alert.id));
+                self.present_shell_alert(alert);
+            }
+        }
+
         if self.pending_close_after_save.get() && !current_snapshot.dirty {
             self.pending_close_after_save.set(false);
             self.allow_close_once.set(true);
             if let Some(window) = self.window.borrow().as_ref() {
                 window.close();
             }
+        }
+
+        if !current_snapshot.dirty
+            && let Some(action) = self.pending_document_action_after_save.borrow_mut().take()
+        {
+            self.perform_document_replacement(action);
         }
 
         let should_prompt_recovery = current_snapshot.recovery_offer_pending
@@ -2830,8 +3285,7 @@ impl ShellUiState {
                 ),
                 format!(
                     "Text Origin: {}, {}",
-                    snapshot.text.origin_x,
-                    snapshot.text.origin_y
+                    snapshot.text.origin_x, snapshot.text.origin_y
                 ),
             ] {
                 let label = Label::new(Some(&row));
@@ -3458,27 +3912,20 @@ impl ShellUiState {
             button.add_css_class("tool-chip");
             button.add_css_class("layer-action-chip");
             match action {
-                LayerAction::AddGroup => {
-                    button.set_sensitive(
-                        snapshot.can_create_group_from_active_layer && !snapshot.text.selected,
-                    )
-                }
+                LayerAction::AddGroup => button.set_sensitive(
+                    snapshot.can_create_group_from_active_layer && !snapshot.text.selected,
+                ),
                 LayerAction::Ungroup => button.set_sensitive(snapshot.can_ungroup_selected_group),
                 LayerAction::Duplicate => button.set_sensitive(!snapshot.text.selected),
                 LayerAction::EditText => {
                     button.set_sensitive(snapshot.text.selected && !snapshot.text.editing)
                 }
-                LayerAction::MoveIntoGroup => {
-                    button.set_sensitive(
-                        snapshot.can_move_active_layer_into_selected_group
-                            && !snapshot.text.selected,
-                    )
-                }
-                LayerAction::MoveOutOfGroup => {
-                    button.set_sensitive(
-                        snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected,
-                    )
-                }
+                LayerAction::MoveIntoGroup => button.set_sensitive(
+                    snapshot.can_move_active_layer_into_selected_group && !snapshot.text.selected,
+                ),
+                LayerAction::MoveOutOfGroup => button.set_sensitive(
+                    snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected,
+                ),
                 LayerAction::AddMask => {
                     button.set_sensitive(!snapshot.text.selected && !snapshot.active_layer_has_mask)
                 }
@@ -3597,25 +4044,17 @@ impl ShellUiState {
                 target_strip.add_css_class("layer-target-strip");
 
                 if layer.is_text {
-                    let text_target = build_target_chip(
-                        "T",
-                        "Select this text layer",
-                        layer.is_selected,
-                        true,
-                    );
+                    let text_target =
+                        build_target_chip("T", "Select this text layer", layer.is_selected, true);
                     if let Some(layer_id) = layer.layer_id {
                         let controller = self.controller.clone();
-                        text_target
-                            .connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+                        text_target.connect_clicked(move |_| {
+                            controller.borrow_mut().select_layer(layer_id)
+                        });
                     }
                     target_strip.append(&text_target);
 
-                    let edit_target = build_target_chip(
-                        "E",
-                        "Open text editing",
-                        false,
-                        true,
-                    );
+                    let edit_target = build_target_chip("E", "Open text editing", false, true);
                     if let Some(layer_id) = layer.layer_id {
                         let controller = self.controller.clone();
                         edit_target.connect_clicked(move |_| {
@@ -3637,7 +4076,9 @@ impl ShellUiState {
                     }
                     if let Some(layer_id) = layer.layer_id {
                         let controller = self.controller.clone();
-                        select.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+                        select.connect_clicked(move |_| {
+                            controller.borrow_mut().select_layer(layer_id)
+                        });
                     }
                     row.append(&select);
                 } else {
@@ -3699,7 +4140,9 @@ impl ShellUiState {
                     }
                     if let Some(layer_id) = layer.layer_id {
                         let controller = self.controller.clone();
-                        select.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+                        select.connect_clicked(move |_| {
+                            controller.borrow_mut().select_layer(layer_id)
+                        });
                     }
                     row.append(&select);
                 }
@@ -3757,18 +4200,31 @@ impl ShellUiState {
     }
 }
 
-fn remix_icon_path(icon_name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/icons/remixicon")
-        .join(icon_name)
+fn remix_icon_resource_path(icon_name: &str) -> String {
+    format!("{UI_RESOURCE_PREFIX}/assets/icons/remixicon/{icon_name}")
 }
 
-fn logo_icon_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/logo/Logo_01.png")
+fn logo_icon_resource_path() -> &'static str {
+    "/com/phototux/assets/logo/Logo_01.png"
 }
 
 fn build_logo_icon(alt_text: &str, size: i32) -> Image {
-    let image = Image::from_file(logo_icon_path());
+    build_optional_resource_image(logo_icon_resource_path(), alt_text, size)
+}
+
+fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {
+    let image = build_optional_resource_image(&remix_icon_resource_path(icon_name), alt_text, size);
+    image.add_css_class("remix-icon");
+    image
+}
+
+fn build_optional_resource_image(resource_path: &str, alt_text: &str, size: i32) -> Image {
+    let image = if bundled_ui_resource_exists(resource_path) {
+        Image::from_resource(resource_path)
+    } else {
+        warn_missing_optional_ui_resource(resource_path);
+        Image::from_icon_name(OPTIONAL_ICON_FALLBACK_NAME)
+    };
     image.set_pixel_size(size);
     image.set_halign(Align::Center);
     image.set_valign(Align::Center);
@@ -3776,14 +4232,33 @@ fn build_logo_icon(alt_text: &str, size: i32) -> Image {
     image
 }
 
-fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {
-    let image = Image::from_file(remix_icon_path(icon_name));
+fn set_image_resource_or_fallback(image: &Image, resource_path: &str, alt_text: &str, size: i32) {
+    if bundled_ui_resource_exists(resource_path) {
+        image.set_resource(Some(resource_path));
+    } else {
+        warn_missing_optional_ui_resource(resource_path);
+        image.set_icon_name(Some(OPTIONAL_ICON_FALLBACK_NAME));
+    }
     image.set_pixel_size(size);
-    image.set_halign(Align::Center);
-    image.set_valign(Align::Center);
     image.set_tooltip_text(Some(alt_text));
-    image.add_css_class("remix-icon");
-    image
+}
+
+fn bundled_ui_resource_exists(resource_path: &str) -> bool {
+    gio::resources_get_info(resource_path, gio::ResourceLookupFlags::NONE).is_ok()
+}
+
+fn warn_missing_optional_ui_resource(resource_path: &str) {
+    static MISSING_RESOURCES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen_resources = MISSING_RESOURCES.get_or_init(|| Mutex::new(HashSet::new()));
+    match seen_resources.lock() {
+        Ok(mut seen) => {
+            if !seen.insert(resource_path.to_string()) {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
+    tracing::warn!(path = resource_path, "missing optional bundled UI resource");
 }
 
 fn build_icon_only_button(icon_name: &str, tooltip: &str, css_class: &str, size: i32) -> Button {
@@ -3922,7 +4397,10 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
         );
     }
     if matches!(snapshot.active_tool, ShellToolKind::Text) {
-        return format!("{} | Click canvas to place text | Enter edit dialog", tool_hint);
+        return format!(
+            "{} | Click canvas to place text | Enter edit dialog",
+            tool_hint
+        );
     }
     if matches!(
         snapshot.active_tool,
@@ -4014,6 +4492,10 @@ fn shell_notice_text(snapshot: &ShellSnapshot) -> String {
     }
 }
 
+fn format_shell_alert_secondary_text(alert: &ShellAlert) -> Option<String> {
+    alert.secondary_text.clone()
+}
+
 fn format_import_report_details(report: &ShellImportReport) -> String {
     let mut details = report.summary.clone();
     if !report.diagnostics.is_empty() {
@@ -4028,7 +4510,27 @@ fn format_import_report_details(report: &ShellImportReport) -> String {
     details
 }
 
-fn apply_status_notice_style(label: &Label, message: &str) {
+fn status_notice_class(snapshot: &ShellSnapshot) -> &'static str {
+    if snapshot.file_job_active || snapshot.autosave_job_active || snapshot.filter_job_active {
+        return "status-notice-busy";
+    }
+
+    if let Some(alert) = snapshot.latest_alert.as_ref() {
+        return match alert.tone {
+            ShellAlertTone::Info => "status-notice-success",
+            ShellAlertTone::Warning => "status-notice-warning",
+            ShellAlertTone::Error => "status-notice-error",
+        };
+    }
+
+    if snapshot.recovery_offer_pending || snapshot.dirty {
+        "status-notice-warning"
+    } else {
+        "status-notice-success"
+    }
+}
+
+fn apply_status_notice_style(label: &Label, snapshot: &ShellSnapshot) {
     for class_name in [
         "status-notice-busy",
         "status-notice-success",
@@ -4038,24 +4540,7 @@ fn apply_status_notice_style(label: &Label, message: &str) {
         label.remove_css_class(class_name);
     }
 
-    let lowered = message.to_ascii_lowercase();
-    let class_name = if lowered.contains("failed") || lowered.contains("error") {
-        "status-notice-error"
-    } else if lowered.contains("saving")
-        || lowered.contains("opening")
-        || lowered.contains("importing")
-        || lowered.contains("exporting")
-        || lowered.contains("loading")
-        || lowered.contains("autosaving")
-    {
-        "status-notice-busy"
-    } else if lowered.contains("recovery available") || lowered.contains("modified") {
-        "status-notice-warning"
-    } else {
-        "status-notice-success"
-    };
-
-    label.add_css_class(class_name);
+    label.add_css_class(status_notice_class(snapshot));
 }
 
 #[derive(Clone, Copy)]
@@ -4148,6 +4633,8 @@ fn build_canvas_host(
     picture.set_hexpand(true);
     picture.set_vexpand(true);
     picture.set_can_shrink(true);
+    picture.set_focusable(true);
+    picture.set_focus_on_click(true);
     picture.add_css_class("frame");
 
     let state = Rc::new(RefCell::new(CanvasHostState::new(
@@ -4844,15 +5331,15 @@ const THEME_CSS: &str = r#"
 }
 
 .titlebar {
-    min-height: 30px;
-    background: #1a1a1a;
+    min-height: 26px;
+    background: #202020;
     color: #e0e0e0;
     border-bottom: 1px solid #3a3a3a;
 }
 
 .app-brand {
-    padding: 0 12px;
-    min-height: 30px;
+    padding: 0 10px;
+    min-height: 26px;
     border-right: 1px solid #3a3a3a;
 }
 
@@ -4924,9 +5411,9 @@ const THEME_CSS: &str = r#"
 }
 
 .workspace-chip {
-    min-height: 20px;
+    min-height: 18px;
     padding: 0 8px;
-    background: #232323;
+    background: #303030;
     border-color: #3a3a3a;
     color: #999999;
 }
@@ -4938,10 +5425,22 @@ const THEME_CSS: &str = r#"
 }
 
 .menu-bar {
-    min-height: 24px;
-    padding: 0 6px;
+    min-height: 30px;
+    padding: 0 8px;
     background: #232323;
     border-bottom: 1px solid #3a3a3a;
+}
+
+.menu-divider {
+    min-height: 18px;
+    margin: 0 6px;
+    color: #444444;
+}
+
+.menu-zoom-display {
+    color: #a0a0a0;
+    font-size: 12px;
+    padding: 2px 8px;
 }
 
 .menu-button {
@@ -5001,7 +5500,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-options-bar {
-    min-height: 34px;
+    min-height: 32px;
     padding: 0 12px;
     background: #232323;
     border-bottom: 1px solid #3a3a3a;
@@ -5014,16 +5513,17 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-option-chip {
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    color: #8f8f8f;
-    padding: 0 10px;
+    background: #3c3c3c;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    color: #d0d0d0;
+    padding: 2px 8px;
+    font-size: 11px;
 }
 
 .tool-option-chip:hover {
-    background: rgba(255,255,255,0.04);
-    border: none;
+    background: #464646;
+    border: 1px solid #555555;
     color: #e0e0e0;
 }
 
@@ -5066,12 +5566,12 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-button {
-    min-width: 24px;
-    min-height: 24px;
+    min-width: 34px;
+    min-height: 28px;
     padding: 0;
     background: transparent;
     border: none;
-    border-radius: 3px;
+    border-radius: 4px;
     color: #a8a8a8;
 }
 
@@ -5089,8 +5589,8 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-separator {
-    margin: 7px 7px;
-    min-width: 18px;
+    margin: 2px 8px;
+    min-width: 24px;
     opacity: 1;
 }
 
@@ -5099,7 +5599,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .swatch-stack {
-    margin-top: 8px;
+    margin-top: 10px;
     margin-bottom: 6px;
 }
 
@@ -5175,19 +5675,67 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .canvas-frame {
-    background: #535353;
-    border: 1px solid #3a3a3a;
-    margin-left: 0;
-    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.35);
+    background: #0a0a0a;
+    border: 1px solid #2e2e2e;
+    margin: 18px;
+    box-shadow: 0 2px 20px rgba(0,0,0,0.5);
+    padding: 0;
+}
+
+.canvas-info {
+    background: rgba(0,0,0,0.65);
+    color: #cccccc;
+    padding: 3px 12px;
+    border-radius: 4px;
+    font-size: 11px;
+}
+
+.contextual-task-bar {
+    background: rgba(40,40,40,0.95);
+    border: 1px solid #444444;
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+
+.contextual-task-button {
+    background: #3c3c3c;
+    color: #e0e0e0;
+    border: 1px solid #444444;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+}
+
+.contextual-task-button:hover {
+    background: #4a4a4a;
+    border-color: #555555;
+}
+
+.contextual-task-button-primary {
+    background: #2680eb;
+    border-color: #2680eb;
+    color: #ffffff;
+}
+
+.contextual-task-button-primary:hover {
+    background: #3a9eff;
+    border-color: #3a9eff;
+}
+
+.contextual-task-separator {
+    min-height: 20px;
+    margin: 0 4px;
+    color: #444444;
 }
 
 .right-sidebar {
     background: #232323;
     border-left: 1px solid #3a3a3a;
+    min-width: 300px;
 }
 
 .panel-icon-strip {
-    min-width: 36px;
+    min-width: 40px;
     padding: 6px 0;
     background: #2a2a2a;
     border-right: 1px solid #4a4a4a;
@@ -5240,7 +5788,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .panel-group-header {
-    padding: 8px 12px;
+    padding: 6px 8px;
     background: #232323;
     border-bottom: 1px solid #3a3a3a;
     border-radius: 0;
@@ -5271,7 +5819,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .panel-group-body {
-    padding: 8px 12px 12px;
+    padding: 8px;
 }
 
 popover.menu-dropdown contents {
@@ -5537,12 +6085,13 @@ paned > separator:hover {
 #[cfg(test)]
 mod tests {
     use super::{
-        LayerPanelItem, ShellGuide, ShellImportDiagnostic, ShellImportReport, ShellSnapshot,
-        ShellTextAlignment, ShellTextSnapshot, ShellToolKind, brush_preview_radius,
-        build_brush_preview_paths,
-        format_import_report_details, shell_status_hint,
+        LayerPanelItem, PendingDocumentAction, ShellGuide, ShellImportDiagnostic,
+        ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
+        brush_preview_radius, build_brush_preview_paths, format_import_report_details,
+        shell_status_hint, status_notice_class,
     };
     use common::CanvasSize;
+    use std::path::PathBuf;
 
     fn snapshot_for_tool(tool: ShellToolKind) -> ShellSnapshot {
         ShellSnapshot {
@@ -5552,7 +6101,10 @@ mod tests {
             recovery_offer_pending: false,
             recovery_path: None,
             status_message: String::new(),
+            latest_alert: None,
             latest_import_report: None,
+            file_job_active: false,
+            autosave_job_active: false,
             canvas_size: CanvasSize::new(640, 480),
             canvas_revision: 1,
             active_tool_name: tool.label().to_string(),
@@ -5666,5 +6218,43 @@ mod tests {
         assert!(details.contains("flattened composite"));
         assert!(details.contains("Details:"));
         assert!(details.contains("Warning: Source layer 1"));
+    }
+
+    #[test]
+    fn pending_document_action_prompt_copy_matches_action_kind() {
+        let open_action = PendingDocumentAction::OpenProject(PathBuf::from("test.ptx"));
+        let import_action = PendingDocumentAction::ImportImage(PathBuf::from("image.png"));
+
+        assert_eq!(
+            open_action.prompt_title(),
+            "Save changes before opening another project?"
+        );
+        assert!(
+            open_action
+                .prompt_detail("Scene")
+                .contains("open another project")
+        );
+
+        assert_eq!(
+            import_action.prompt_title(),
+            "Save changes before importing?"
+        );
+        assert!(
+            import_action
+                .prompt_detail("Scene")
+                .contains("import a file that replaces the current document")
+        );
+    }
+
+    #[test]
+    fn status_notice_class_prefers_explicit_activity_flags() {
+        let mut snapshot = snapshot_for_tool(ShellToolKind::Brush);
+        assert_eq!(status_notice_class(&snapshot), "status-notice-success");
+
+        snapshot.dirty = true;
+        assert_eq!(status_notice_class(&snapshot), "status-notice-warning");
+
+        snapshot.file_job_active = true;
+        assert_eq!(status_notice_class(&snapshot), "status-notice-busy");
     }
 }

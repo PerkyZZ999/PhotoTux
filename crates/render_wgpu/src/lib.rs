@@ -684,6 +684,16 @@ mod tests {
         draw_overlay_paths, draw_overlay_rects,
     };
     use common::{CanvasRaster, CanvasRect, CanvasSize};
+    use std::time::{Duration, Instant};
+
+    const VIEWPORT_INTERACTION_BUDGET: Duration = Duration::from_millis(40);
+
+    fn assert_performance_budget(label: &str, elapsed: Duration, budget: Duration) {
+        assert!(
+            elapsed <= budget,
+            "{label} exceeded performance budget: observed {elapsed:?}, budget {budget:?}"
+        );
+    }
 
     #[test]
     fn pan_by_offsets_the_viewport() {
@@ -734,6 +744,32 @@ mod tests {
         assert!((state.zoom - 1.2).abs() < 0.001);
         assert!((state.pan_x - 0.0).abs() < 0.001);
         assert!((state.pan_y - 300.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn repeated_pan_and_zoom_updates_stay_within_headless_budget() {
+        let mut state = ViewportState::fit_canvas(
+            CanvasSize::new(3840, 2160),
+            ViewportSize::new(1920.0, 1080.0),
+        );
+
+        let started_at = Instant::now();
+        for step in 0..2_000 {
+            let focal_x = 240.0 + ((step % 11) as f32 * 96.0);
+            let focal_y = 160.0 + ((step % 7) as f32 * 88.0);
+            state.zoom_towards(1.0008, focal_x, focal_y);
+            state.pan_by(1.5, -0.75);
+        }
+        let elapsed = started_at.elapsed();
+
+        assert_performance_budget(
+            "viewport pan/zoom state updates",
+            elapsed,
+            VIEWPORT_INTERACTION_BUDGET,
+        );
+        assert!(state.zoom.is_finite());
+        assert!(state.pan_x.is_finite());
+        assert!(state.pan_y.is_finite());
     }
 
     #[test]

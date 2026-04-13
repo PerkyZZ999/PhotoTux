@@ -10,16 +10,15 @@ use std::time::{Duration, Instant};
 use common::{CanvasRaster, CanvasRect, DestructiveFilterKind};
 use doc_model::{
     BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerHierarchyNode,
-    LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape,
-    TextAlignment, TextLayer, TextStyle, TextTransform,
+    LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape, TextAlignment,
+    TextLayer, TextStyle, TextTransform,
 };
 use file_io::{
     PROJECT_FILE_EXTENSION, PsdImportDiagnostic, PsdImportDiagnosticSeverity, PsdImportResult,
     PsdImportSidecar, export_jpeg_to_path, export_png_to_path, export_webp_to_path,
     flatten_document_rgba, import_jpeg_from_path, import_png_from_path,
     import_psd_from_path_with_sidecar, import_webp_from_path, load_document_from_path,
-    recovery_path_for_project_path, remove_file_if_exists, save_document_to_path,
-    text_layer_bounds,
+    recovery_path_for_document, remove_file_if_exists, save_document_to_path, text_layer_bounds,
 };
 use history_engine::HistoryStack;
 use image_ops::apply_destructive_filter_rgba;
@@ -29,8 +28,8 @@ use tool_system::{
     SimpleTransformTool,
 };
 use ui_shell::{
-    LayerPanelItem, ShellController, ShellGuide, ShellImportDiagnostic, ShellImportReport,
-    ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
+    LayerPanelItem, ShellAlert, ShellAlertTone, ShellController, ShellGuide, ShellImportDiagnostic,
+    ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
 };
 
 pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
@@ -56,7 +55,9 @@ struct PhotoTuxController {
     recovery_offer_pending: bool,
     working_directory: PathBuf,
     psd_import_sidecar: Option<PsdImportSidecar>,
+    latest_alert: Option<ShellAlert>,
     latest_import_report: Option<ShellImportReport>,
+    next_alert_id: u64,
     next_import_report_id: u64,
     next_layer_number: usize,
     next_text_layer_number: usize,
@@ -74,6 +75,10 @@ struct PhotoTuxController {
     pending_filter_job: Option<PendingFilterJob>,
     jobs: JobSystem,
     cached_canvas_raster: Option<Vec<u8>>,
+    layer_items_revision: u64,
+    layer_items_cache: RefCell<Option<(u64, Vec<LayerPanelItem>)>>,
+    guides_revision: u64,
+    guides_cache: RefCell<Option<(u64, Vec<ShellGuide>)>>,
     transform_session: Option<TransformSession>,
     text_session: Option<TextEditSession>,
     interaction: Option<CanvasInteraction>,
@@ -754,7 +759,7 @@ fn worker_main(queues: Arc<(Mutex<JobQueues>, Condvar)>, result_sender: mpsc::Se
                     job_id,
                     path,
                     kind,
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 },
             },
             JobRequest::LoadRecovery {
@@ -778,7 +783,7 @@ fn worker_main(queues: Arc<(Mutex<JobQueues>, Condvar)>, result_sender: mpsc::Se
                 Err(error) => JobResult::RecoveryLoadFailed {
                     job_id,
                     recovery_path,
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 },
             },
             JobRequest::LoadDocument {
@@ -835,7 +840,7 @@ fn worker_main(queues: Arc<(Mutex<JobQueues>, Condvar)>, result_sender: mpsc::Se
                         job_id,
                         path,
                         kind,
-                        error: error.to_string(),
+                        error: format!("{error:#}"),
                     },
                 }
             }
@@ -858,7 +863,7 @@ fn worker_main(queues: Arc<(Mutex<JobQueues>, Condvar)>, result_sender: mpsc::Se
                         job_id,
                         path,
                         format,
-                        error: error.to_string(),
+                        error: format!("{error:#}"),
                     },
                 }
             }
@@ -878,7 +883,7 @@ fn worker_main(queues: Arc<(Mutex<JobQueues>, Condvar)>, result_sender: mpsc::Se
                 Err(error) => JobResult::DestructiveFilterFailed {
                     job_id,
                     filter,
-                    error: error.to_string(),
+                    error: format!("{error:#}"),
                 },
             },
         };
@@ -947,7 +952,9 @@ impl PhotoTuxController {
             recovery_offer_pending: false,
             working_directory,
             psd_import_sidecar,
+            latest_alert: None,
             latest_import_report: None,
+            next_alert_id: 1,
             next_import_report_id: 1,
             next_layer_number: 4,
             next_text_layer_number: 1,
@@ -965,6 +972,10 @@ impl PhotoTuxController {
             pending_filter_job: None,
             jobs: JobSystem::new(),
             cached_canvas_raster: None,
+            layer_items_revision: 0,
+            layer_items_cache: RefCell::new(None),
+            guides_revision: 0,
+            guides_cache: RefCell::new(None),
             transform_session: None,
             text_session: None,
             interaction: None,
@@ -1069,8 +1080,12 @@ impl PhotoTuxController {
                 .map(|layer| layer.style.fill_rgba)
                 .unwrap_or_else(|| TextStyle::default().fill_rgba),
             alignment: self.selected_text_alignment(),
-            origin_x: text_layer.map(|layer| layer.transform.origin_x).unwrap_or_default(),
-            origin_y: text_layer.map(|layer| layer.transform.origin_y).unwrap_or_default(),
+            origin_x: text_layer
+                .map(|layer| layer.transform.origin_x)
+                .unwrap_or_default(),
+            origin_y: text_layer
+                .map(|layer| layer.transform.origin_y)
+                .unwrap_or_default(),
         }
     }
 
@@ -1120,8 +1135,8 @@ impl PhotoTuxController {
 
     fn begin_new_text_session(&mut self, canvas_x: i32, canvas_y: i32) {
         if self.transform_session.is_some() {
-            self.status_message = "Commit or cancel the active transform before adding text"
-                .to_string();
+            self.status_message =
+                "Commit or cancel the active transform before adding text".to_string();
             return;
         }
 
@@ -1184,30 +1199,22 @@ impl PhotoTuxController {
         }
     }
 
-    fn update_text_session_inner(
-        &mut self,
-        content: String,
-        font_family: String,
-        font_size_px: u32,
-        line_height_percent: u32,
-        letter_spacing: i32,
-        fill_rgba: [u8; 4],
-        alignment: ShellTextAlignment,
-    ) {
+    fn update_text_session_inner(&mut self, update: ui_shell::ShellTextUpdate) {
         let Some(session) = &mut self.text_session else {
             return;
         };
 
-        session.draft.content = content;
+        session.draft.content = update.content;
         session.draft.style = Self::text_style_from_session(
-            font_family,
-            font_size_px,
-            line_height_percent,
-            letter_spacing,
-            fill_rgba,
-            alignment,
+            update.font_family,
+            update.font_size_px,
+            update.line_height_percent,
+            update.letter_spacing,
+            update.fill_rgba,
+            update.alignment,
         );
-        session.draft.name = Self::suggested_text_layer_name(&session.draft.content, &session.draft.name);
+        session.draft.name =
+            Self::suggested_text_layer_name(&session.draft.content, &session.draft.name);
         self.bump_canvas_revision();
     }
 
@@ -1249,6 +1256,7 @@ impl PhotoTuxController {
         }
 
         self.selected_structure_target = LayerHierarchyNodeRef::Layer(after_layer.id);
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
         self.mark_document_dirty();
 
@@ -1322,6 +1330,18 @@ impl PhotoTuxController {
                 GuideOrientation::Vertical => ShellGuide::Vertical { x: guide.position },
             })
             .collect()
+    }
+
+    fn cached_shell_guides(&self) -> Vec<ShellGuide> {
+        if let Some((revision, guides)) = self.guides_cache.borrow().as_ref()
+            && *revision == self.guides_revision
+        {
+            return guides.clone();
+        }
+
+        let guides = self.shell_guides();
+        *self.guides_cache.borrow_mut() = Some((self.guides_revision, guides.clone()));
+        guides
     }
 
     fn snapping_temporarily_bypassed(&self) -> bool {
@@ -1434,7 +1454,8 @@ impl PhotoTuxController {
         before_guides: Vec<Guide>,
         before_visible: bool,
     ) {
-        self.mark_document_dirty();
+        self.invalidate_guides_cache();
+        self.mark_document_dirty_without_raster_invalidation();
         self.push_operation(
             label,
             EditorOperation::Guides(GuideStateRecord {
@@ -1464,6 +1485,7 @@ impl PhotoTuxController {
 
     fn reset_selected_structure_target_to_active_layer(&mut self) {
         self.selected_structure_target = LayerHierarchyNodeRef::Layer(self.active_layer_id());
+        self.invalidate_layer_items_cache();
     }
 
     fn selected_structure_name(&self) -> String {
@@ -1534,8 +1556,123 @@ impl PhotoTuxController {
         self.canvas_revision = self.canvas_revision.saturating_add(1);
     }
 
+    fn invalidate_layer_items_cache(&mut self) {
+        self.layer_items_revision = self.layer_items_revision.saturating_add(1);
+        self.layer_items_cache.get_mut().take();
+    }
+
+    fn invalidate_guides_cache(&mut self) {
+        self.guides_revision = self.guides_revision.saturating_add(1);
+        self.guides_cache.get_mut().take();
+    }
+
+    fn union_canvas_rects(
+        rects: impl IntoIterator<Item = common::CanvasRect>,
+    ) -> Option<common::CanvasRect> {
+        let mut rects = rects.into_iter();
+        let first = rects.next()?;
+        let mut min_x = first.x as i64;
+        let mut min_y = first.y as i64;
+        let mut max_x = first.x as i64 + first.width as i64;
+        let mut max_y = first.y as i64 + first.height as i64;
+
+        for rect in rects {
+            min_x = min_x.min(rect.x as i64);
+            min_y = min_y.min(rect.y as i64);
+            max_x = max_x.max(rect.x as i64 + rect.width as i64);
+            max_y = max_y.max(rect.y as i64 + rect.height as i64);
+        }
+
+        Some(common::CanvasRect::new(
+            min_x as i32,
+            min_y as i32,
+            max_x.saturating_sub(min_x) as u32,
+            max_y.saturating_sub(min_y) as u32,
+        ))
+    }
+
+    fn refresh_cached_canvas_region(&mut self, rect: common::CanvasRect) {
+        if self.cached_canvas_raster.is_none() {
+            self.cached_canvas_raster = Some(file_io::flatten_document_rgba(&self.document));
+            return;
+        }
+
+        if let Some(ref mut cached) = self.cached_canvas_raster {
+            file_io::update_flattened_region_rgba(&self.document, cached, rect);
+        }
+    }
+
+    fn refresh_cached_canvas_union(
+        &mut self,
+        rects: impl IntoIterator<Item = common::CanvasRect>,
+    ) {
+        if let Some(rect) = Self::union_canvas_rects(rects) {
+            self.refresh_cached_canvas_region(rect);
+        }
+    }
+
+    fn visual_bounds_for_layer_id(&self, layer_id: common::LayerId) -> Option<CanvasRect> {
+        if let Some(layer_index) = self.document.layer_index_by_id(layer_id) {
+            return self.document.layer_canvas_bounds(layer_index);
+        }
+
+        self.document
+            .text_layer_by_id(layer_id)
+            .and_then(text_layer_bounds)
+    }
+
+    fn visual_bounds_for_hierarchy_node(&self, node: &LayerHierarchyNode) -> Option<CanvasRect> {
+        match node {
+            LayerHierarchyNode::Layer(layer_id) => self.visual_bounds_for_layer_id(*layer_id),
+            LayerHierarchyNode::Group(group) => Self::union_canvas_rects(
+                group.children
+                    .iter()
+                    .filter_map(|child| self.visual_bounds_for_hierarchy_node(child)),
+            ),
+        }
+    }
+
+    fn visual_bounds_for_group_id(&self, group_id: common::GroupId) -> Option<CanvasRect> {
+        self.document.group(group_id).and_then(|group| {
+            Self::union_canvas_rects(
+                group.children
+                    .iter()
+                    .filter_map(|child| self.visual_bounds_for_hierarchy_node(child)),
+            )
+        })
+    }
+
+    fn mark_visual_region_dirty(&mut self, rect: Option<CanvasRect>) {
+        self.mark_document_dirty_without_raster_invalidation();
+        if let Some(rect) = rect {
+            self.refresh_cached_canvas_region(rect);
+        }
+    }
+
     fn clear_latest_import_report(&mut self) {
         self.latest_import_report = None;
+    }
+
+    fn clear_latest_alert(&mut self) {
+        self.latest_alert = None;
+    }
+
+    fn set_latest_alert(
+        &mut self,
+        tone: ShellAlertTone,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        secondary_text: Option<String>,
+    ) {
+        let alert_id = self.next_alert_id;
+        self.next_alert_id = self.next_alert_id.saturating_add(1);
+        self.latest_alert = Some(ShellAlert {
+            id: alert_id,
+            tone,
+            title: title.into(),
+            body: body.into(),
+            secondary_text,
+        });
     }
 
     fn shell_import_report_for_path(
@@ -1549,7 +1686,7 @@ impl PhotoTuxController {
         let title = if report.used_flattened_fallback {
             "PSD Imported As Flattened Composite".to_string()
         } else {
-            "PSD Imported With Warnings".to_string()
+            "PSD Imported Within Supported Layered Subset".to_string()
         };
         let summary = if report.used_flattened_fallback {
             format!(
@@ -1558,7 +1695,7 @@ impl PhotoTuxController {
             )
         } else {
             format!(
-                "PhotoTux imported {}, but some PSD features were not preserved as editable PhotoTux structure.",
+                "PhotoTux imported {} into editable layers within PhotoTux's currently supported PSD subset. Review the diagnostics for PSD features that were simplified, omitted, or flattened during import.",
                 path.display()
             )
         };
@@ -1650,18 +1787,20 @@ impl PhotoTuxController {
             target,
         )?;
 
-        if let Some(ref mut cached) = self.cached_canvas_raster {
+        let refreshed_region = {
             let layer = &self.document.layers[layer_index];
-            for change in &record.changes {
+            Self::union_canvas_rects(record.changes.iter().map(|change| {
                 let (tx, ty) = self.document.tile_origin(change.coord());
-                let rect = common::CanvasRect {
+                common::CanvasRect {
                     x: tx as i32 + layer.offset_x,
                     y: ty as i32 + layer.offset_y,
                     width: self.document.tile_size,
                     height: self.document.tile_size,
-                };
-                file_io::update_flattened_region_rgba(&self.document, cached, rect);
-            }
+                }
+            }))
+        };
+        if let Some(rect) = refreshed_region {
+            self.refresh_cached_canvas_region(rect);
         }
 
         self.bump_canvas_revision();
@@ -1816,8 +1955,15 @@ impl PhotoTuxController {
     }
 
     fn layer_items(&self) -> Vec<LayerPanelItem> {
+        if let Some((revision, items)) = self.layer_items_cache.borrow().as_ref()
+            && *revision == self.layer_items_revision
+        {
+            return items.clone();
+        }
+
         let mut items = Vec::new();
         self.collect_layer_items(self.document.layer_hierarchy(), 0, &mut items);
+        *self.layer_items_cache.borrow_mut() = Some((self.layer_items_revision, items.clone()));
         items
     }
 
@@ -1834,6 +1980,7 @@ impl PhotoTuxController {
             return;
         };
         self.selected_structure_target = LayerHierarchyNodeRef::Group(group_id);
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
         self.mark_document_dirty();
         self.push_layer_hierarchy_operation(
@@ -1905,6 +2052,7 @@ impl PhotoTuxController {
         {
             return;
         }
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
         self.mark_document_dirty();
         self.push_layer_hierarchy_operation(
@@ -1943,6 +2091,7 @@ impl PhotoTuxController {
             return;
         }
         self.selected_structure_target = LayerHierarchyNodeRef::Layer(active_layer_id);
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
         self.mark_document_dirty();
         self.push_layer_hierarchy_operation(
@@ -1971,6 +2120,7 @@ impl PhotoTuxController {
 
         let active_name = self.active_layer_name();
         if self.document.move_layer(current as usize, target as usize) {
+            self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
             self.mark_document_dirty();
             self.push_history(format!("Move Layer {}", active_name));
@@ -1981,15 +2131,10 @@ impl PhotoTuxController {
         self.selected_layer_bounds()
     }
 
-    fn primary_document_path(&self) -> PathBuf {
-        self.document_path
-            .clone()
-            .unwrap_or_else(|| self.working_directory.join(self.save_file_name()))
-    }
-
     fn refresh_recovery_path(&mut self) {
-        self.recovery_path = Some(recovery_path_for_project_path(
-            &self.primary_document_path(),
+        self.recovery_path = Some(recovery_path_for_document(
+            self.document_path.as_deref(),
+            &self.save_file_name(),
         ));
     }
 
@@ -2029,6 +2174,19 @@ impl PhotoTuxController {
 
     fn mark_document_dirty(&mut self) {
         self.mark_document_dirty_at(Instant::now());
+    }
+
+    fn mark_document_dirty_without_raster_invalidation_at(&mut self, now: Instant) {
+        self.dirty_since_primary_save = true;
+        self.dirty_since_autosave = true;
+        self.last_change_at = Some(now);
+        if self.pending_primary_save_job.is_none() {
+            self.status_message = "Modified".to_string();
+        }
+    }
+
+    fn mark_document_dirty_without_raster_invalidation(&mut self) {
+        self.mark_document_dirty_without_raster_invalidation_at(Instant::now());
     }
 
     fn has_pending_user_visible_file_job(&self) -> bool {
@@ -2113,6 +2271,7 @@ impl PhotoTuxController {
 
         let recovery_path = self.recovery_path.clone();
         let document = self.document.clone();
+        self.clear_latest_alert();
         self.status_message = format!("Saving {}", path.display());
         self.pending_primary_save_job =
             Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
@@ -2137,6 +2296,7 @@ impl PhotoTuxController {
         };
 
         let document = self.document.clone();
+        self.clear_latest_alert();
         self.status_message = format!("Autosaving {}", recovery_path.display());
         self.pending_autosave_job =
             Some(self.jobs.enqueue(JobPriority::Background, move |job_id| {
@@ -2165,6 +2325,7 @@ impl PhotoTuxController {
                         self.dirty_since_primary_save = false;
                         self.dirty_since_autosave = false;
                         self.last_change_at = None;
+                        self.clear_latest_alert();
                         self.status_message = format!("Saved {}", path.display());
                     }
                 }
@@ -2172,6 +2333,7 @@ impl PhotoTuxController {
                     if self.pending_autosave_job == Some(job_id) {
                         self.pending_autosave_job = None;
                         self.dirty_since_autosave = false;
+                        self.clear_latest_alert();
                         self.status_message =
                             format!("Recovered state written to {}", path.display());
                     }
@@ -2194,6 +2356,15 @@ impl PhotoTuxController {
                     _ => {}
                 }
                 self.status_message = format!("Save failed: {}", error);
+                self.set_latest_alert(
+                    ShellAlertTone::Error,
+                    "Save Failed",
+                    format!("PhotoTux could not save to {}.", path.display()),
+                    Some(format!(
+                        "Reason: {}\n\nCheck that the destination is writable and retry the save.",
+                        error
+                    )),
+                );
             }
             JobResult::RecoveryLoaded {
                 job_id,
@@ -2220,6 +2391,7 @@ impl PhotoTuxController {
                     self.recompute_next_text_layer_number();
                     self.bump_canvas_revision();
                     self.push_history("Recovered Autosave");
+                    self.clear_latest_alert();
                     self.status_message =
                         format!("Recovered document from {}", recovery_path.display());
                 }
@@ -2234,6 +2406,18 @@ impl PhotoTuxController {
                     self.recovery_offer_pending = false;
                     tracing::error!(%error, path = %recovery_path.display(), "recovery load failed");
                     self.status_message = format!("Recovery load failed: {}", error);
+                    self.set_latest_alert(
+                        ShellAlertTone::Error,
+                        "Recovery Load Failed",
+                        format!(
+                            "PhotoTux could not recover autosaved work from {}.",
+                            recovery_path.display()
+                        ),
+                        Some(format!(
+                            "Reason: {}\n\nYou can discard the broken recovery file or inspect it manually.",
+                            error
+                        )),
+                    );
                 }
             }
             JobResult::DocumentLoaded {
@@ -2253,6 +2437,7 @@ impl PhotoTuxController {
 
                     match kind {
                         DocumentLoadKind::Project => {
+                            self.clear_latest_alert();
                             self.clear_latest_import_report();
                             let document_title = path
                                 .file_name()
@@ -2272,6 +2457,7 @@ impl PhotoTuxController {
                             });
                         }
                         DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
+                            self.clear_latest_alert();
                             self.clear_latest_import_report();
                             let stem = path
                                 .file_stem()
@@ -2282,8 +2468,20 @@ impl PhotoTuxController {
                                 DocumentLoadKind::PsdImport => "Import PSD",
                                 DocumentLoadKind::Project => unreachable!("project handled above"),
                             };
+                            let psd_notice = psd_import_report.as_ref().map(|report| {
+                                if report.used_flattened_fallback {
+                                    "flattened PSD fallback used".to_string()
+                                } else {
+                                    "PSD imported within the supported layered subset".to_string()
+                                }
+                            });
                             let status_message = match import_notice {
                                 Some(notice) => format!("Imported {} ({})", path.display(), notice),
+                                None if psd_notice.is_some() => format!(
+                                    "Imported {} ({})",
+                                    path.display(),
+                                    psd_notice.expect("checked PSD notice presence")
+                                ),
                                 None => format!("Imported {}", path.display()),
                             };
                             self.replace_document_after_load(DocumentLoadState {
@@ -2321,11 +2519,31 @@ impl PhotoTuxController {
                             format!("Import failed: {}", error)
                         }
                     };
+                    let (title, body, secondary_text) = match kind {
+                        DocumentLoadKind::Project => (
+                            "Open Failed".to_string(),
+                            format!("PhotoTux could not open {}.", path.display()),
+                            Some(format!(
+                                "Reason: {}\n\nCheck that the project file is valid and retry opening it.",
+                                error
+                            )),
+                        ),
+                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => (
+                            "Import Failed".to_string(),
+                            format!("PhotoTux could not import {}.", path.display()),
+                            Some(format!(
+                                "Reason: {}\n\nCheck that the source file is supported and readable, then retry the import.",
+                                error
+                            )),
+                        ),
+                    };
+                    self.set_latest_alert(ShellAlertTone::Error, title, body, secondary_text);
                 }
             }
             JobResult::ExportCompleted { job_id, path } => {
                 if self.pending_export_job == Some(job_id) {
                     self.pending_export_job = None;
+                    self.clear_latest_alert();
                     self.status_message = format!("Exported {}", path.display());
                 }
             }
@@ -2339,6 +2557,15 @@ impl PhotoTuxController {
                     self.pending_export_job = None;
                     tracing::error!(%error, path = %path.display(), ?format, "document export failed");
                     self.status_message = format!("Export failed: {}", error);
+                    self.set_latest_alert(
+                        ShellAlertTone::Error,
+                        "Export Failed",
+                        format!("PhotoTux could not export to {}.", path.display()),
+                        Some(format!(
+                            "Reason: {}\n\nCheck that the destination is writable and the selected format is supported.",
+                            error
+                        )),
+                    );
                 }
             }
             JobResult::DestructiveFilterApplied {
@@ -2384,10 +2611,20 @@ impl PhotoTuxController {
                                 after,
                             }),
                         );
+                        self.clear_latest_alert();
                         self.status_message = format!("Applied {}", filter.label());
                     } else {
                         self.status_message =
                             format!("{} failed: layer is no longer available", filter.label());
+                        self.set_latest_alert(
+                            ShellAlertTone::Error,
+                            format!("{} Failed", filter.label()),
+                            format!(
+                                "PhotoTux could not apply {} because the target layer changed.",
+                                filter.label()
+                            ),
+                            Some("Select a valid raster layer and retry the filter.".to_string()),
+                        );
                     }
                 }
             }
@@ -2404,6 +2641,18 @@ impl PhotoTuxController {
                 {
                     self.pending_filter_job = None;
                     self.status_message = format!("{} failed: {}", filter.label(), error);
+                    self.set_latest_alert(
+                        ShellAlertTone::Error,
+                        format!("{} Failed", filter.label()),
+                        format!(
+                            "PhotoTux could not apply {} to the active layer.",
+                            filter.label()
+                        ),
+                        Some(format!(
+                            "Reason: {}\n\nCheck the active layer and retry the filter.",
+                            error
+                        )),
+                    );
                 }
             }
         }
@@ -2463,6 +2712,7 @@ impl PhotoTuxController {
         self.dirty_since_primary_save = false;
         self.dirty_since_autosave = false;
         self.last_change_at = None;
+        self.clear_latest_alert();
         self.status_message = format!("Saved {}", target_path.display());
         Ok(target_path)
     }
@@ -2490,18 +2740,20 @@ impl PhotoTuxController {
                 .position(|mode| *mode == current_mode)
                 .unwrap_or(0) as isize;
             let next_index = (current_index + step).rem_euclid(MODES.len() as isize) as usize;
+            let bounds = self.visual_bounds_for_layer_id(layer_id);
             if self
                 .document
                 .set_text_layer_blend_mode(layer_id, MODES[next_index])
             {
                 self.bump_canvas_revision();
-                self.mark_document_dirty();
+                self.mark_visual_region_dirty(bounds);
                 self.push_history(format!("Set Blend Mode {:?}", MODES[next_index]));
             }
             return;
         }
 
         let active_index = self.document.active_layer_index();
+        let bounds = self.document.layer_canvas_bounds(active_index);
         let current_mode = self.document.active_layer().blend_mode;
         let current_index = MODES
             .iter()
@@ -2511,7 +2763,7 @@ impl PhotoTuxController {
         self.document
             .set_layer_blend_mode(active_index, MODES[next_index]);
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_history(format!("Set Blend Mode {:?}", MODES[next_index]));
     }
 
@@ -2561,10 +2813,8 @@ impl PhotoTuxController {
         let mut preview_document = self.document.clone();
         if let Some(session) = &self.text_session {
             if session.is_new_layer() {
-                let _ = preview_document.insert_text_layer(
-                    session.draft.clone(),
-                    session.insert_after_layer_id,
-                );
+                let _ = preview_document
+                    .insert_text_layer(session.draft.clone(), session.insert_after_layer_id);
                 if let Some(group_id) = session.target_group_id {
                     let _ = preview_document.move_node_into_group(
                         LayerHierarchyNodeRef::Layer(session.draft.id),
@@ -2619,7 +2869,10 @@ impl ShellController for PhotoTuxController {
             recovery_offer_pending: self.recovery_offer_pending,
             recovery_path: self.recovery_path.clone(),
             status_message: self.status_message.clone(),
+            latest_alert: self.latest_alert.clone(),
             latest_import_report: self.latest_import_report.clone(),
+            file_job_active: self.has_pending_user_visible_file_job(),
+            autosave_job_active: self.pending_autosave_job.is_some(),
             canvas_size: self.document.canvas_size,
             canvas_revision: self.canvas_revision,
             active_tool_name: self.active_tool.label().to_string(),
@@ -2703,7 +2956,7 @@ impl ShellController for PhotoTuxController {
             snapping_temporarily_bypassed: self.snapping_temporarily_bypassed(),
             guides_visible: self.document.guides_visible(),
             guide_count: self.document.guides().len(),
-            guides: self.shell_guides(),
+            guides: self.cached_shell_guides(),
             selection_rect: self.document.selection(),
             selection_path: self.selection_path_points(),
             selection_preview_path: self.selection_preview_path_points(),
@@ -2745,6 +2998,7 @@ impl ShellController for PhotoTuxController {
         let layer_name = format!("Layer {}", self.next_layer_number);
         self.next_layer_number += 1;
         self.document.add_layer(layer_name.clone());
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
         self.mark_document_dirty();
         self.push_history(format!("Add Layer {}", layer_name));
@@ -2754,6 +3008,7 @@ impl ShellController for PhotoTuxController {
         let active_index = self.document.active_layer_index();
         let active_name = self.active_layer_name();
         if self.document.duplicate_layer(active_index).is_some() {
+            self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
             self.mark_document_dirty();
             self.push_history(format!("Duplicate Layer {}", active_name));
@@ -2792,6 +3047,7 @@ impl ShellController for PhotoTuxController {
         let active_index = self.document.active_layer_index();
         let active_name = self.active_layer_name();
         if self.document.delete_layer(active_index) {
+            self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
             self.mark_document_dirty();
             self.push_history(format!("Delete Layer {}", active_name));
@@ -2803,6 +3059,7 @@ impl ShellController for PhotoTuxController {
         let layer_id = self.document.active_layer().id;
         let before_target = self.document.active_edit_target();
         let before_mask = self.document.layer_mask(layer_index).cloned();
+        let bounds = self.document.layer_canvas_bounds(layer_index);
         if !self.document.add_layer_mask(layer_index) {
             return;
         }
@@ -2811,8 +3068,9 @@ impl ShellController for PhotoTuxController {
             .set_active_edit_target(LayerEditTarget::LayerMask);
         let after_target = self.document.active_edit_target();
         let after_mask = self.document.layer_mask(layer_index).cloned();
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_mask_state_operation(
             format!("Add Layer Mask {}", self.active_layer_name()),
             layer_id,
@@ -2828,12 +3086,14 @@ impl ShellController for PhotoTuxController {
         let layer_id = self.document.active_layer().id;
         let before_target = self.document.active_edit_target();
         let before_mask = self.document.layer_mask(layer_index).cloned();
+        let bounds = self.document.layer_canvas_bounds(layer_index);
         if !self.document.remove_layer_mask(layer_index) {
             return;
         }
         let after_target = self.document.active_edit_target();
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_mask_state_operation(
             format!("Delete Layer Mask {}", self.active_layer_name()),
             layer_id,
@@ -2853,12 +3113,14 @@ impl ShellController for PhotoTuxController {
         let before_mask = Some(mask.clone());
         let enabled = !mask.enabled;
         let before_target = self.document.active_edit_target();
+        let bounds = self.document.layer_canvas_bounds(layer_index);
         if !self.document.set_layer_mask_enabled(layer_index, enabled) {
             return;
         }
         let after_mask = self.document.layer_mask(layer_index).cloned();
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_mask_state_operation(
             format!(
                 "{} Layer Mask {}",
@@ -2881,7 +3143,8 @@ impl ShellController for PhotoTuxController {
             .document
             .set_active_edit_target(LayerEditTarget::LayerPixels)
         {
-            self.mark_document_dirty();
+            self.invalidate_layer_items_cache();
+            self.mark_document_dirty_without_raster_invalidation();
             self.status_message = format!("Editing layer pixels for {}", self.active_layer_name());
         }
     }
@@ -2894,7 +3157,8 @@ impl ShellController for PhotoTuxController {
             .document
             .set_active_edit_target(LayerEditTarget::LayerMask)
         {
-            self.mark_document_dirty();
+            self.invalidate_layer_items_cache();
+            self.mark_document_dirty_without_raster_invalidation();
             self.status_message = format!("Editing layer mask for {}", self.active_layer_name());
         }
     }
@@ -2904,6 +3168,7 @@ impl ShellController for PhotoTuxController {
         if let Some(index) = self.document.layer_index_by_id(layer_id) {
             if self.document.set_active_layer(index) {
                 self.selected_structure_target = LayerHierarchyNodeRef::Layer(layer_id);
+                self.invalidate_layer_items_cache();
                 self.status_message = format!("Selected {}", self.selected_structure_name());
             }
             return;
@@ -2911,6 +3176,7 @@ impl ShellController for PhotoTuxController {
 
         if self.document.text_layer_by_id(layer_id).is_some() {
             self.selected_structure_target = LayerHierarchyNodeRef::Layer(layer_id);
+            self.invalidate_layer_items_cache();
             self.status_message = format!("Selected {}", self.selected_structure_name());
         }
     }
@@ -2918,6 +3184,7 @@ impl ShellController for PhotoTuxController {
     fn select_group(&mut self, group_id: common::GroupId) {
         if self.document.group(group_id).is_some() {
             self.selected_structure_target = LayerHierarchyNodeRef::Group(group_id);
+            self.invalidate_layer_items_cache();
             self.status_message = format!("Selected group {}", self.selected_structure_name());
         }
     }
@@ -2928,9 +3195,11 @@ impl ShellController for PhotoTuxController {
         {
             let visible = !layer.visible;
             let layer_name = layer.name.clone();
+            let bounds = self.document.layer_canvas_bounds(index);
             self.document.set_layer_visibility(index, visible);
+            self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
-            self.mark_document_dirty();
+            self.mark_visual_region_dirty(bounds);
             self.push_history(format!("Toggle Visibility {}", layer_name));
             return;
         }
@@ -2938,9 +3207,11 @@ impl ShellController for PhotoTuxController {
         if let Some(layer) = self.document.text_layer_by_id(layer_id) {
             let visible = !layer.visible;
             let layer_name = layer.name.clone();
+            let bounds = text_layer_bounds(layer);
             if self.document.set_text_layer_visibility(layer_id, visible) {
+                self.invalidate_layer_items_cache();
                 self.bump_canvas_revision();
-                self.mark_document_dirty();
+                self.mark_visual_region_dirty(bounds);
                 self.push_history(format!("Toggle Visibility {}", layer_name));
             }
         }
@@ -2950,9 +3221,11 @@ impl ShellController for PhotoTuxController {
         if let Some(group) = self.document.group(group_id) {
             let visible = !group.visible;
             let group_name = group.name.clone();
+            let bounds = self.visual_bounds_for_group_id(group_id);
             if self.document.set_group_visibility(group_id, visible) {
+                self.invalidate_layer_items_cache();
                 self.bump_canvas_revision();
-                self.mark_document_dirty();
+                self.mark_visual_region_dirty(bounds);
                 self.push_history(format!("Toggle Group Visibility {}", group_name));
             }
         }
@@ -2981,9 +3254,11 @@ impl ShellController for PhotoTuxController {
                 .text_layer_by_id(layer_id)
                 .map(|layer| (layer.opacity_percent + 10).min(100))
                 .unwrap_or(100);
+            let bounds = self.visual_bounds_for_layer_id(layer_id);
             if self.document.set_text_layer_opacity(layer_id, next_opacity) {
+                self.invalidate_layer_items_cache();
                 self.bump_canvas_revision();
-                self.mark_document_dirty();
+                self.mark_visual_region_dirty(bounds);
                 self.push_history(format!("Increase Opacity {}", self.active_layer_name()));
             }
             return;
@@ -2991,9 +3266,11 @@ impl ShellController for PhotoTuxController {
 
         let active_index = self.document.active_layer_index();
         let next_opacity = (self.document.active_layer().opacity_percent + 10).min(100);
+        let bounds = self.document.layer_canvas_bounds(active_index);
         self.document.set_layer_opacity(active_index, next_opacity);
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_history(format!("Increase Opacity {}", self.active_layer_name()));
     }
 
@@ -3004,9 +3281,11 @@ impl ShellController for PhotoTuxController {
                 .text_layer_by_id(layer_id)
                 .map(|layer| layer.opacity_percent.saturating_sub(10))
                 .unwrap_or(0);
+            let bounds = self.visual_bounds_for_layer_id(layer_id);
             if self.document.set_text_layer_opacity(layer_id, next_opacity) {
+                self.invalidate_layer_items_cache();
                 self.bump_canvas_revision();
-                self.mark_document_dirty();
+                self.mark_visual_region_dirty(bounds);
                 self.push_history(format!("Decrease Opacity {}", self.active_layer_name()));
             }
             return;
@@ -3018,9 +3297,11 @@ impl ShellController for PhotoTuxController {
             .active_layer()
             .opacity_percent
             .saturating_sub(10);
+        let bounds = self.document.layer_canvas_bounds(active_index);
         self.document.set_layer_opacity(active_index, next_opacity);
+        self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_visual_region_dirty(bounds);
         self.push_history(format!("Decrease Opacity {}", self.active_layer_name()));
     }
 
@@ -3059,7 +3340,7 @@ impl ShellController for PhotoTuxController {
         }
 
         self.document.clear_selection();
-        self.mark_document_dirty();
+        self.mark_document_dirty_without_raster_invalidation();
         self.push_operation(
             "Clear Selection",
             EditorOperation::Selection(SelectionRecord {
@@ -3078,7 +3359,7 @@ impl ShellController for PhotoTuxController {
             return;
         }
 
-        self.mark_document_dirty();
+        self.mark_document_dirty_without_raster_invalidation();
         self.push_operation(
             "Invert Selection",
             EditorOperation::Selection(SelectionRecord {
@@ -3347,6 +3628,7 @@ impl ShellController for PhotoTuxController {
             return;
         };
 
+        self.invalidate_layer_items_cache();
         if let Some(operation) = entry.operation {
             match operation {
                 EditorOperation::BrushStroke(record) => {
@@ -3371,16 +3653,16 @@ impl ShellController for PhotoTuxController {
                 }
                 EditorOperation::Selection(record) => {
                     record.undo(&mut self.document);
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
                 EditorOperation::Guides(record) => {
                     record.undo(&mut self.document);
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
                 EditorOperation::MaskState(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_layer_id(record.layer_id));
                 }
                 EditorOperation::LayerHierarchy(record) => {
                     record.undo(self);
@@ -3401,6 +3683,7 @@ impl ShellController for PhotoTuxController {
             return;
         };
 
+        self.invalidate_layer_items_cache();
         if let Some(operation) = entry.operation {
             match operation {
                 EditorOperation::BrushStroke(record) => {
@@ -3425,16 +3708,16 @@ impl ShellController for PhotoTuxController {
                 }
                 EditorOperation::Selection(record) => {
                     record.redo(&mut self.document);
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
                 EditorOperation::Guides(record) => {
                     record.redo(&mut self.document);
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
                 EditorOperation::MaskState(record) => {
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_layer_id(record.layer_id));
                 }
                 EditorOperation::LayerHierarchy(record) => {
                     record.redo(self);
@@ -3453,6 +3736,15 @@ impl ShellController for PhotoTuxController {
     fn save_document(&mut self) {
         let Some(target_path) = self.document_path.clone() else {
             self.status_message = "Save As required before the first project save".to_string();
+            self.set_latest_alert(
+                ShellAlertTone::Warning,
+                "Save As Required",
+                "This document does not have a project path yet.",
+                Some(format!(
+                    "Use Save As to choose a .{} project file before saving this document.",
+                    PROJECT_FILE_EXTENSION
+                )),
+            );
             return;
         };
 
@@ -3470,6 +3762,18 @@ impl ShellController for PhotoTuxController {
                 "Save failed: expected .{} project path",
                 PROJECT_FILE_EXTENSION
             );
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Save Failed",
+                format!(
+                    "PhotoTux can only save projects to .{} files.",
+                    PROJECT_FILE_EXTENSION
+                ),
+                Some(format!(
+                    "Choose a destination ending with .{} and try saving again.",
+                    PROJECT_FILE_EXTENSION
+                )),
+            );
             return;
         }
 
@@ -3480,6 +3784,12 @@ impl ShellController for PhotoTuxController {
         let Some(recovery_path) = self.recovery_path.clone() else {
             self.recovery_offer_pending = false;
             self.status_message = "No recovery file available".to_string();
+            self.set_latest_alert(
+                ShellAlertTone::Warning,
+                "No Recovery Available",
+                "PhotoTux could not find an autosave file for this document.",
+                Some("There is no recovery state to load right now.".to_string()),
+            );
             return;
         };
 
@@ -3490,10 +3800,20 @@ impl ShellController for PhotoTuxController {
         if !recovery_path.exists() {
             self.recovery_offer_pending = false;
             self.status_message = "Recovery file no longer exists".to_string();
+            self.set_latest_alert(
+                ShellAlertTone::Warning,
+                "Recovery File Missing",
+                format!(
+                    "The recovery file at {} is no longer available.",
+                    recovery_path.display()
+                ),
+                Some("The autosave may already have been cleaned up or moved.".to_string()),
+            );
             return;
         }
 
         self.recovery_offer_pending = false;
+        self.clear_latest_alert();
         self.status_message = format!("Loading recovery from {}", recovery_path.display());
         let document_path = self.document_path.clone();
         let document_title = self.document_title.clone();
@@ -3517,12 +3837,25 @@ impl ShellController for PhotoTuxController {
 
         match remove_file_if_exists(&recovery_path) {
             Ok(()) => {
+                self.clear_latest_alert();
                 self.status_message =
                     format!("Discarded recovery file {}", recovery_path.display());
             }
             Err(error) => {
                 tracing::warn!(%error, path = %recovery_path.display(), "failed to discard recovery file");
                 self.status_message = format!("Failed to discard recovery file: {}", error);
+                self.set_latest_alert(
+                    ShellAlertTone::Error,
+                    "Discard Recovery Failed",
+                    format!(
+                        "PhotoTux could not remove the recovery file at {}.",
+                        recovery_path.display()
+                    ),
+                    Some(format!(
+                        "Reason: {}\n\nYou can retry discard later or remove the file manually.",
+                        error
+                    )),
+                );
             }
         }
     }
@@ -3538,9 +3871,19 @@ impl ShellController for PhotoTuxController {
                 "Open failed: expected .{} project file",
                 PROJECT_FILE_EXTENSION
             );
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Open Failed",
+                format!(
+                    "PhotoTux can only open .{} project files through Open Project.",
+                    PROJECT_FILE_EXTENSION
+                ),
+                Some("Use Import Image for PNG, JPEG, WebP, or PSD content.".to_string()),
+            );
             return;
         }
 
+        self.clear_latest_alert();
         self.status_message = format!("Opening {}", path.display());
         self.clear_latest_import_report();
         self.pending_document_load_job =
@@ -3565,17 +3908,33 @@ impl ShellController for PhotoTuxController {
         } else if psd_file_path(&path) {
             if self.psd_import_sidecar.is_none() {
                 self.status_message = format!(
-                    "Import failed: PSD import sidecar is not configured; set {}",
+                    "Import failed: PSD import requires the configured sidecar helper; set {}. PhotoTux currently supports only a bounded editable PSD subset.",
                     PSD_IMPORT_SIDECAR_PATH_ENV
+                );
+                self.set_latest_alert(
+                    ShellAlertTone::Error,
+                    "PSD Import Unavailable",
+                    "PSD import requires the configured sidecar helper.".to_string(),
+                    Some(format!(
+                        "Set {} to a PSD sidecar executable path, then retry the import.",
+                        PSD_IMPORT_SIDECAR_PATH_ENV
+                    )),
                 );
                 return;
             }
             DocumentLoadKind::PsdImport
         } else {
             self.status_message = "Import failed: unsupported import format".to_string();
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Import Failed",
+                "PhotoTux can import PNG, JPEG, WebP, and PSD sources only.".to_string(),
+                Some("Choose a supported source file and retry the import.".to_string()),
+            );
             return;
         };
 
+        self.clear_latest_alert();
         self.status_message = format!("Importing {}", path.display());
         self.clear_latest_import_report();
         let psd_import_sidecar = self.psd_import_sidecar.clone();
@@ -3598,10 +3957,17 @@ impl ShellController for PhotoTuxController {
 
         let Some(format) = raster_format_from_path(&path) else {
             self.status_message = "Export failed: unsupported image format".to_string();
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Export Failed",
+                "PhotoTux can export PNG, JPEG, and WebP images only.".to_string(),
+                Some("Choose a supported image extension and retry the export.".to_string()),
+            );
             return;
         };
 
         let document = self.document.clone();
+        self.clear_latest_alert();
         self.status_message = format!("Exporting {}", path.display());
         self.pending_export_job =
             Some(self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
@@ -3621,8 +3987,7 @@ impl ShellController for PhotoTuxController {
         }
         if self.text_session.is_some() || self.selected_text_layer().is_some() {
             self.status_message =
-                "Commit or cancel text editing before applying a destructive filter"
-                    .to_string();
+                "Commit or cancel text editing before applying a destructive filter".to_string();
             return;
         }
         if self.transform_session.is_some() {
@@ -3640,10 +4005,17 @@ impl ShellController for PhotoTuxController {
         let layer_id = self.document.active_layer().id;
         let Some(before) = self.document.layer_state_snapshot(layer_index) else {
             self.status_message = format!("{} failed: active layer is unavailable", filter.label());
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                format!("{} Failed", filter.label()),
+                "PhotoTux could not resolve the active layer for this filter.".to_string(),
+                Some("Select a valid raster layer and try again.".to_string()),
+            );
             return;
         };
 
         let requested_canvas_revision = self.canvas_revision;
+        self.clear_latest_alert();
         self.status_message = format!("Applying {}", filter.label());
         let pending_job_id = self.jobs.enqueue(JobPriority::UserVisible, move |job_id| {
             JobRequest::ApplyDestructiveFilter {
@@ -3674,25 +4046,8 @@ impl ShellController for PhotoTuxController {
         self.begin_selected_text_session();
     }
 
-    fn update_text_session(
-        &mut self,
-        content: String,
-        font_family: String,
-        font_size_px: u32,
-        line_height_percent: u32,
-        letter_spacing: i32,
-        fill_rgba: [u8; 4],
-        alignment: ShellTextAlignment,
-    ) {
-        self.update_text_session_inner(
-            content,
-            font_family,
-            font_size_px,
-            line_height_percent,
-            letter_spacing,
-            fill_rgba,
-            alignment,
-        );
+    fn update_text_session(&mut self, update: ui_shell::ShellTextUpdate) {
+        self.update_text_session_inner(update);
     }
 
     fn commit_text_session(&mut self) {
@@ -3841,6 +4196,7 @@ impl ShellController for PhotoTuxController {
                     }
                 } else if let Some(initial_state) = &initial_state {
                     let layer_index = self.document.active_layer_index();
+                    let old_bounds = self.document.layer_canvas_bounds(layer_index);
                     let _ = self
                         .document
                         .apply_layer_state_snapshot(layer_id, initial_state.clone());
@@ -3855,8 +4211,8 @@ impl ShellController for PhotoTuxController {
                         translate_x,
                         translate_y,
                     );
-                    self.cached_canvas_raster =
-                        Some(file_io::flatten_document_rgba(&self.document));
+                    let new_bounds = self.document.layer_canvas_bounds(layer_index);
+                    self.refresh_cached_canvas_union([old_bounds, new_bounds].into_iter().flatten());
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = true;
                     self.last_change_at = Some(std::time::Instant::now());
@@ -3875,17 +4231,7 @@ impl ShellController for PhotoTuxController {
 
                     let new_bounds = self.document.layer_canvas_bounds(layer_index);
 
-                    if self.cached_canvas_raster.is_none() {
-                        self.cached_canvas_raster =
-                            Some(file_io::flatten_document_rgba(&self.document));
-                    } else if let Some(ref mut cached) = self.cached_canvas_raster {
-                        if let Some(rect) = old_bounds {
-                            file_io::update_flattened_region_rgba(&self.document, cached, rect);
-                        }
-                        if let Some(rect) = new_bounds {
-                            file_io::update_flattened_region_rgba(&self.document, cached, rect);
-                        }
-                    }
+                    self.refresh_cached_canvas_union([old_bounds, new_bounds].into_iter().flatten());
 
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = true;
@@ -3913,17 +4259,11 @@ impl ShellController for PhotoTuxController {
             } => {
                 let raw_delta_x = canvas_x - start_canvas_x;
                 let raw_delta_y = canvas_y - start_canvas_y;
-                let (translate_x, translate_y) = self.snapped_translation(
-                    snapping_base_bounds,
-                    raw_delta_x,
-                    raw_delta_y,
-                );
+                let (translate_x, translate_y) =
+                    self.snapped_translation(snapping_base_bounds, raw_delta_x, raw_delta_y);
                 let _ = self.document.set_text_layer_transform(
                     layer_id,
-                    TextTransform::new(
-                        start_origin_x + translate_x,
-                        start_origin_y + translate_y,
-                    ),
+                    TextTransform::new(start_origin_x + translate_x, start_origin_y + translate_y),
                 );
                 self.cached_canvas_raster = None;
                 self.dirty_since_primary_save = true;
@@ -4079,9 +4419,7 @@ impl ShellController for PhotoTuxController {
                 }
             }
             Some(CanvasInteraction::TextMove {
-                layer_id,
-                before,
-                ..
+                layer_id, before, ..
             }) => {
                 let Some(after) = self.document.text_layer_by_id(layer_id).cloned() else {
                     return;
@@ -4127,7 +4465,7 @@ impl ShellController for PhotoTuxController {
                         start_canvas_x,
                         start_canvas_y,
                     );
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
             }
             Some(CanvasInteraction::Lasso {
@@ -4136,10 +4474,10 @@ impl ShellController for PhotoTuxController {
                 points,
             }) => {
                 if let Some(record) = LassoTool::apply_selection(&mut self.document, &points) {
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                     self.push_operation("Lasso Selection", EditorOperation::Selection(record));
                 } else if before.is_some() && !before_inverted {
-                    self.mark_document_dirty();
+                    self.mark_document_dirty_without_raster_invalidation();
                 }
             }
             Some(CanvasInteraction::Brush {
@@ -4169,7 +4507,7 @@ mod tests {
     use common::{CanvasRect, DestructiveFilterKind};
     use file_io::{
         PsdImportSidecar, export_png_to_path, flatten_document_rgba, import_png_from_path,
-        load_document_from_path, recovery_path_for_project_path, save_document_to_path,
+        load_document_from_path, save_document_to_path,
     };
     use std::fs;
     #[cfg(unix)]
@@ -4180,6 +4518,20 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use ui_shell::{ShellController, ShellGuide, ShellToolKind};
+
+    const STARTUP_CONTROLLER_INIT_BUDGET: Duration = Duration::from_millis(250);
+    const STARTUP_INITIAL_RASTER_BUDGET: Duration = Duration::from_millis(500);
+    const MEDIUM_CANVAS_STROKE_SEQUENCE_BUDGET: Duration = Duration::from_millis(2_000);
+    const MEDIUM_CANVAS_DIRTY_TILE_BUDGET: usize = 48;
+    const AUTOSAVE_BACKGROUND_JOB_BUDGET: Duration = Duration::from_millis(2_000);
+    const EXPORT_BACKGROUND_JOB_BUDGET: Duration = Duration::from_millis(3_000);
+
+    fn assert_performance_budget(label: &str, elapsed: Duration, budget: Duration) {
+        assert!(
+            elapsed <= budget,
+            "{label} exceeded performance budget: observed {elapsed:?}, budget {budget:?}"
+        );
+    }
 
     fn set_pixel(
         document: &mut doc_model::Document,
@@ -4370,11 +4722,8 @@ mod tests {
             }
         }
 
-        let text_id = document.add_text_layer(
-            "Title",
-            "PhotoTux",
-            doc_model::TextTransform::new(16, 18),
-        );
+        let text_id =
+            document.add_text_layer("Title", "PhotoTux", doc_model::TextTransform::new(16, 18));
         let style = doc_model::TextStyle {
             font_family: "Bitmap Sans".to_string(),
             font_size_px: 24,
@@ -4615,6 +4964,30 @@ mod tests {
     }
 
     #[test]
+    fn startup_headless_baseline_stays_within_budget() {
+        let started_at = Instant::now();
+        let controller = PhotoTuxController::new();
+        let init_elapsed = started_at.elapsed();
+        assert_performance_budget(
+            "controller startup initialization",
+            init_elapsed,
+            STARTUP_CONTROLLER_INIT_BUDGET,
+        );
+
+        let raster_started_at = Instant::now();
+        let raster = controller.canvas_raster();
+        let raster_elapsed = raster_started_at.elapsed();
+        assert_performance_budget(
+            "initial startup canvas raster",
+            raster_elapsed,
+            STARTUP_INITIAL_RASTER_BUDGET,
+        );
+
+        assert_eq!(raster.size.width, controller.document.canvas_size.width);
+        assert_eq!(raster.size.height, controller.document.canvas_size.height);
+    }
+
+    #[test]
     fn layer_actions_update_snapshot() {
         let mut controller = PhotoTuxController::new();
         let initial_count = controller.snapshot().layers.len();
@@ -4638,7 +5011,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn text_tool_preview_commit_and_history_roundtrip() {
         let mut controller = PhotoTuxController::new();
@@ -4648,15 +5020,15 @@ mod tests {
         controller.begin_canvas_interaction(18, 22);
         assert!(controller.snapshot().text.editing);
 
-        controller.update_text_session(
-            "PhotoTux".to_string(),
-            "Bitmap Sans".to_string(),
-            24,
-            130,
-            1,
-            [244, 232, 176, 255],
-            ui_shell::ShellTextAlignment::Center,
-        );
+        controller.update_text_session(ui_shell::ShellTextUpdate {
+            content: "PhotoTux".to_string(),
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 24,
+            line_height_percent: 130,
+            letter_spacing: 1,
+            fill_rgba: [244, 232, 176, 255],
+            alignment: ui_shell::ShellTextAlignment::Center,
+        });
 
         let preview = controller.canvas_raster();
         assert_ne!(before.pixels, preview.pixels);
@@ -4674,11 +5046,13 @@ mod tests {
 
         controller.redo();
         assert_eq!(controller.document.text_layer_count(), 1);
-        assert!(controller
-            .snapshot()
-            .history_entries
-            .iter()
-            .any(|entry| entry.contains("Add Text")));
+        assert!(
+            controller
+                .snapshot()
+                .history_entries
+                .iter()
+                .any(|entry| entry.contains("Add Text"))
+        );
     }
 
     #[test]
@@ -4688,71 +5062,68 @@ mod tests {
         controller.reset_selected_structure_target_to_active_layer();
 
         let text_layer_id = controller.document.text_layers()[0].id;
-        let original_text = controller.document.text_layer_by_id(text_layer_id).unwrap().content.clone();
-        let original_transform = controller
-            .document
-            .text_layer_by_id(text_layer_id)
-            .unwrap()
-            .transform
-            .clone();
+        let Some(text_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected fixture text layer to exist before editing");
+        };
+        let original_text = text_layer.content.clone();
+        let original_transform = text_layer.transform;
 
         controller.select_layer(text_layer_id);
         controller.begin_text_edit();
-        controller.update_text_session(
-            "PhotoTux Beta".to_string(),
-            "Bitmap Sans".to_string(),
-            20,
-            125,
-            0,
-            [255, 210, 128, 255],
-            ui_shell::ShellTextAlignment::Left,
-        );
+        controller.update_text_session(ui_shell::ShellTextUpdate {
+            content: "PhotoTux Beta".to_string(),
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 20,
+            line_height_percent: 125,
+            letter_spacing: 0,
+            fill_rgba: [255, 210, 128, 255],
+            alignment: ui_shell::ShellTextAlignment::Left,
+        });
         controller.commit_text_session();
 
-        assert_eq!(
-            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
-            "PhotoTux Beta"
-        );
+        let Some(updated_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected edited text layer to exist after commit");
+        };
+        assert_eq!(updated_layer.content, "PhotoTux Beta");
 
         controller.undo();
-        assert_eq!(
-            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
-            original_text
-        );
+        let Some(undone_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected text layer to exist after undo");
+        };
+        assert_eq!(undone_layer.content, original_text);
 
         controller.redo();
-        assert_eq!(
-            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
-            "PhotoTux Beta"
-        );
+        let Some(redone_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected text layer to exist after redo");
+        };
+        assert_eq!(redone_layer.content, "PhotoTux Beta");
 
         controller.select_tool(ShellToolKind::Move);
-        controller.begin_canvas_interaction(original_transform.origin_x, original_transform.origin_y);
+        controller
+            .begin_canvas_interaction(original_transform.origin_x, original_transform.origin_y);
         controller.update_canvas_interaction(
             original_transform.origin_x + 14,
             original_transform.origin_y + 10,
         );
         controller.end_canvas_interaction();
 
-        let moved_transform = controller
-            .document
-            .text_layer_by_id(text_layer_id)
-            .unwrap()
-            .transform
-            .clone();
+        let Some(moved_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected moved text layer to exist after interaction");
+        };
+        let moved_transform = moved_layer.transform;
         assert_ne!(moved_transform, original_transform);
 
         controller.undo();
-        assert_eq!(
-            controller.document.text_layer_by_id(text_layer_id).unwrap().transform,
-            original_transform
-        );
+        let Some(restored_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected text layer to exist after move undo");
+        };
+        assert_eq!(restored_layer.transform, original_transform);
 
         controller.redo();
-        assert_eq!(
-            controller.document.text_layer_by_id(text_layer_id).unwrap().transform,
-            moved_transform
-        );
+        let Some(reapplied_layer) = controller.document.text_layer_by_id(text_layer_id) else {
+            panic!("expected text layer to exist after move redo");
+        };
+        assert_eq!(reapplied_layer.transform, moved_transform);
     }
 
     #[test]
@@ -4851,6 +5222,12 @@ mod tests {
         assert!(controller.document_path.is_none());
         assert!(controller.status_message.contains("Save As required"));
         assert!(controller.pending_primary_save_job.is_none());
+        let alert = controller
+            .snapshot()
+            .latest_alert
+            .expect("save-without-path should surface an alert");
+        assert_eq!(alert.tone, ui_shell::ShellAlertTone::Warning);
+        assert!(alert.title.contains("Save As Required"));
     }
 
     #[test]
@@ -4932,20 +5309,39 @@ mod tests {
 
     #[test]
     fn autosave_writes_recovery_file_after_idle_period() {
-        let working_directory =
-            std::env::temp_dir().join(format!("phototux-autosave-{}", std::process::id()));
+        let working_directory = unique_temp_dir("autosave");
         fs::create_dir_all(&working_directory).expect("temporary autosave directory should exist");
 
         let mut controller =
             PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.document_title = format!(
+            "{}.ptx",
+            working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temporary autosave directory name should be valid UTF-8")
+        );
+        controller.refresh_recovery_path();
+        let recovery_path = controller
+            .recovery_path
+            .clone()
+            .expect("controller should compute an autosave path");
         controller.add_layer();
         controller.last_change_at =
             Some(Instant::now() - AUTOSAVE_IDLE_INTERVAL - Duration::from_millis(1));
 
+        let autosave_started_at = Instant::now();
         controller.poll_background_tasks_at(Instant::now());
+        assert!(controller.snapshot().autosave_job_active);
         wait_for_background_jobs(&mut controller);
+        let autosave_elapsed = autosave_started_at.elapsed();
+        assert_performance_budget(
+            "representative autosave background job",
+            autosave_elapsed,
+            AUTOSAVE_BACKGROUND_JOB_BUDGET,
+        );
 
-        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        assert!(!recovery_path.starts_with(&working_directory));
         let recovered =
             load_document_from_path(&recovery_path).expect("autosave recovery file should load");
         assert_eq!(recovered.layers.len(), controller.document.layers.len());
@@ -4957,18 +5353,36 @@ mod tests {
 
     #[test]
     fn startup_recovery_offer_requires_explicit_load() {
-        let working_directory =
-            std::env::temp_dir().join(format!("phototux-recovery-{}", std::process::id()));
+        let working_directory = unique_temp_dir("recovery");
         fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
 
         let mut recovered_document = doc_model::Document::new(320, 240);
         recovered_document.add_layer("Recovered Layer");
-        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        let mut seed_controller =
+            PhotoTuxController::new_with_working_directory(working_directory.clone());
+        seed_controller.document_title = format!(
+            "{}.ptx",
+            working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temporary recovery directory name should be valid UTF-8")
+        );
+        seed_controller.refresh_recovery_path();
+        let recovery_path = seed_controller
+            .recovery_path
+            .expect("controller should compute a recovery path");
         save_document_to_path(&recovery_path, &recovered_document)
             .expect("recovery document should save");
 
         let mut controller =
             PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.document_title = seed_controller.document_title.clone();
+        controller.refresh_recovery_path();
+        controller.recovery_offer_pending = controller
+            .recovery_path
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         wait_for_background_jobs(&mut controller);
 
         assert!(controller.recovery_offer_pending);
@@ -4996,18 +5410,36 @@ mod tests {
 
     #[test]
     fn discard_recovery_offer_removes_recovery_file() {
-        let working_directory =
-            std::env::temp_dir().join(format!("phototux-recovery-discard-{}", std::process::id()));
+        let working_directory = unique_temp_dir("recovery-discard");
         fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
 
         let mut recovered_document = doc_model::Document::new(320, 240);
         recovered_document.add_layer("Recovered Layer");
-        let recovery_path = recovery_path_for_project_path(&working_directory.join("untitled.ptx"));
+        let mut seed_controller =
+            PhotoTuxController::new_with_working_directory(working_directory.clone());
+        seed_controller.document_title = format!(
+            "{}.ptx",
+            working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temporary discard directory name should be valid UTF-8")
+        );
+        seed_controller.refresh_recovery_path();
+        let recovery_path = seed_controller
+            .recovery_path
+            .expect("controller should compute a recovery path");
         save_document_to_path(&recovery_path, &recovered_document)
             .expect("recovery document should save");
 
         let mut controller =
             PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.document_title = seed_controller.document_title.clone();
+        controller.refresh_recovery_path();
+        controller.recovery_offer_pending = controller
+            .recovery_path
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         wait_for_background_jobs(&mut controller);
 
         assert!(controller.recovery_offer_pending);
@@ -5019,6 +5451,90 @@ mod tests {
         assert!(!recovery_path.exists());
 
         fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
+    }
+
+    #[test]
+    fn corrupt_recovery_file_reports_failure_without_replacing_document() {
+        let working_directory = unique_temp_dir("recovery-corrupt");
+        fs::create_dir_all(&working_directory).expect("temporary recovery directory should exist");
+
+        let mut seed_controller =
+            PhotoTuxController::new_with_working_directory(working_directory.clone());
+        seed_controller.document_title = format!(
+            "{}.ptx",
+            working_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("temporary corrupt recovery directory name should be valid UTF-8")
+        );
+        seed_controller.refresh_recovery_path();
+        let recovery_path = seed_controller
+            .recovery_path
+            .expect("controller should compute a recovery path");
+        fs::write(&recovery_path, b"{not valid json")
+            .expect("corrupt recovery fixture should save");
+
+        let mut controller =
+            PhotoTuxController::new_with_working_directory(working_directory.clone());
+        controller.document_title = seed_controller.document_title.clone();
+        controller.refresh_recovery_path();
+        controller.recovery_offer_pending = true;
+
+        controller.load_recovery_document();
+        wait_for_background_jobs(&mut controller);
+
+        assert!(!controller.recovery_offer_pending);
+        assert_eq!(controller.document.canvas_size.width, 1920);
+        assert_eq!(controller.document.canvas_size.height, 1080);
+        assert!(controller.status_message.contains("Recovery load failed:"));
+        assert!(
+            controller
+                .status_message
+                .contains("failed to parse project file")
+        );
+        let recovery_alert = controller
+            .snapshot()
+            .latest_alert
+            .expect("corrupt recovery load should surface an alert");
+        assert_eq!(recovery_alert.tone, ui_shell::ShellAlertTone::Error);
+        assert!(recovery_alert.title.contains("Recovery Load Failed"));
+
+        fs::remove_file(&recovery_path).expect("corrupt recovery fixture should be removed");
+        fs::remove_dir(&working_directory).expect("temporary recovery directory should be removed");
+    }
+
+    #[test]
+    fn corrupt_project_open_reports_failure_without_replacing_document() {
+        let project_dir = unique_temp_dir("open-corrupt");
+        fs::create_dir_all(&project_dir).expect("temporary corrupt project directory should exist");
+        let project_path = project_dir.join("broken.ptx");
+        fs::write(&project_path, b"{not valid json").expect("corrupt project should be written");
+
+        let mut controller = PhotoTuxController::new();
+        let original_layer_count = controller.document.layers.len();
+        let original_canvas_size = controller.document.canvas_size;
+
+        controller.open_document(project_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        assert_eq!(controller.document.layers.len(), original_layer_count);
+        assert_eq!(controller.document.canvas_size, original_canvas_size);
+        assert!(controller.status_message.contains("Open failed:"));
+        assert!(
+            controller
+                .status_message
+                .contains("failed to parse project file")
+        );
+        let open_alert = controller
+            .snapshot()
+            .latest_alert
+            .expect("corrupt project open should surface an alert");
+        assert_eq!(open_alert.tone, ui_shell::ShellAlertTone::Error);
+        assert!(open_alert.title.contains("Open Failed"));
+
+        fs::remove_file(&project_path).expect("temporary corrupt project should be removed");
+        fs::remove_dir(&project_dir)
+            .expect("temporary corrupt project directory should be removed");
     }
 
     #[test]
@@ -5063,14 +5579,24 @@ mod tests {
         export_controller.document = build_representative_controller_document();
         let export_path = working_directory.join("scene.png");
 
+        let export_started_at = Instant::now();
         export_controller.export_document(export_path.clone());
+        assert!(export_controller.snapshot().file_job_active);
         wait_for_background_jobs(&mut export_controller);
+        let export_elapsed = export_started_at.elapsed();
+        assert_performance_budget(
+            "representative png export background job",
+            export_elapsed,
+            EXPORT_BACKGROUND_JOB_BUDGET,
+        );
 
         assert!(export_path.exists());
         assert!(export_controller.status_message.contains("Exported"));
+        assert!(export_controller.snapshot().latest_alert.is_none());
 
         let mut import_controller = PhotoTuxController::new();
         import_controller.import_image(export_path.clone());
+        assert!(import_controller.snapshot().file_job_active);
         wait_for_background_jobs(&mut import_controller);
 
         assert_eq!(
@@ -5082,6 +5608,7 @@ mod tests {
         assert!(import_controller.dirty_since_primary_save);
         assert!(import_controller.dirty_since_autosave);
         assert!(import_controller.status_message.contains("Imported"));
+        assert!(import_controller.snapshot().latest_alert.is_none());
         assert_eq!(
             import_controller.snapshot().history_entries,
             vec!["Import Image".to_string()]
@@ -5109,7 +5636,18 @@ mod tests {
         assert!(
             controller
                 .status_message
-                .contains("PSD import sidecar is not configured")
+                .contains("PSD import requires the configured sidecar helper")
+        );
+        let alert = controller
+            .snapshot()
+            .latest_alert
+            .expect("missing PSD sidecar should surface an alert");
+        assert_eq!(alert.tone, ui_shell::ShellAlertTone::Error);
+        assert!(alert.title.contains("PSD Import Unavailable"));
+        assert!(
+            controller
+                .status_message
+                .contains("bounded editable PSD subset")
         );
 
         fs::remove_file(&source_path).expect("PSD source should be removed");
@@ -5291,6 +5829,93 @@ mod tests {
 
         fs::remove_dir_all(&working_directory)
             .expect("temporary PSD fallback directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn psd_import_with_layered_subset_warnings_surfaces_truthful_report() {
+        let working_directory = unique_temp_dir("psd-layered-warning");
+        fs::create_dir_all(&working_directory)
+            .expect("temporary PSD layered warning directory should exist");
+        let fixture_dir = working_directory.join("fixture");
+        fs::create_dir_all(fixture_dir.join("layers")).expect("fixture layers should exist");
+
+        let manifest_path = fixture_dir.join("fixture-manifest.json");
+        fs::write(
+            &manifest_path,
+            supported_psd_manifest_json().replace(
+                r#""severity": "info","#,
+                r#""severity": "warning","#,
+            ).replace(
+                "PSD manifest decoded successfully.",
+                "Imported without clipping masks; editable structure was simplified to the supported subset.",
+            ),
+        )
+        .expect("PSD warning manifest should be written");
+        write_rgba_document_png(
+            &fixture_dir.join("layers/000-background.png"),
+            3,
+            3,
+            &[
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+                [20, 40, 80, 255],
+            ],
+        );
+        write_rgba_document_png(
+            &fixture_dir.join("layers/001-screen.png"),
+            2,
+            2,
+            &[
+                [240, 180, 100, 255],
+                [240, 180, 100, 255],
+                [240, 180, 100, 255],
+                [240, 180, 100, 255],
+            ],
+        );
+
+        let source_path = working_directory.join("scene.psd");
+        fs::write(&source_path, b"placeholder psd source").expect("PSD source should be written");
+        let script_path = working_directory.join("psd-sidecar-warning.sh");
+        write_shell_script(
+            &script_path,
+            &format!(
+                "#!/bin/sh\nset -eu\nSOURCE=\"$1\"\nWORKSPACE=\"$2\"\nMANIFEST=\"$3\"\n[ -f \"$SOURCE\" ]\ncp \"{}\" \"$MANIFEST\"\nmkdir -p \"$WORKSPACE/layers\"\ncp \"{}\" \"$WORKSPACE/layers/000-background.png\"\ncp \"{}\" \"$WORKSPACE/layers/001-screen.png\"\n",
+                manifest_path.display(),
+                fixture_dir.join("layers/000-background.png").display(),
+                fixture_dir.join("layers/001-screen.png").display(),
+            ),
+        );
+
+        let mut controller = PhotoTuxController::new_with_working_directory_and_psd_sidecar(
+            working_directory.clone(),
+            Some(PsdImportSidecar::new(script_path.clone())),
+        );
+        controller.import_image(source_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        let snapshot = controller.snapshot();
+        let report = snapshot
+            .latest_import_report
+            .expect("layered warning import should surface a report");
+        assert!(snapshot.status_message.contains("supported layered subset"));
+        assert!(report.title.contains("Supported Layered Subset"));
+        assert!(report.summary.contains("currently supported PSD subset"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("supported subset"))
+        );
+
+        fs::remove_dir_all(&working_directory)
+            .expect("temporary PSD layered warning directory should be removed");
     }
 
     #[cfg(unix)]
@@ -5639,6 +6264,8 @@ mod tests {
         controller.toggle_pressure_opacity_enabled();
         controller.increase_brush_radius();
         controller.increase_brush_spacing();
+        let active_layer_index = controller.document.active_layer_index();
+        controller.document.layers[active_layer_index].dirty_tiles.clear();
 
         let baseline = controller.canvas_raster();
         let stroke_segments = [
@@ -5656,6 +6283,7 @@ mod tests {
             ((664, 512), (796, 564), (0.38, 1.0)),
         ];
 
+        let stroke_started_at = Instant::now();
         for ((start_x, start_y), (end_x, end_y), (start_pressure, end_pressure)) in stroke_segments
         {
             ui_shell::ShellController::begin_canvas_interaction_with_pressure(
@@ -5672,12 +6300,22 @@ mod tests {
             );
             controller.end_canvas_interaction();
         }
+        let stroke_elapsed = stroke_started_at.elapsed();
+        assert_performance_budget(
+            "medium-canvas representative stroke sequence",
+            stroke_elapsed,
+            MEDIUM_CANVAS_STROKE_SEQUENCE_BUDGET,
+        );
 
         let painted = controller.canvas_raster();
         assert_ne!(painted.pixels, baseline.pixels);
         assert_eq!(painted.pixels, flatten_document_rgba(&controller.document));
         assert!(!controller.document.active_layer().tiles.is_empty());
         assert!(controller.document.active_layer().tiles.len() < 64);
+        assert!(
+            controller.document.layers[active_layer_index].dirty_tiles.len()
+                <= MEDIUM_CANVAS_DIRTY_TILE_BUDGET
+        );
 
         let snapshot = controller.snapshot();
         assert_eq!(
@@ -5997,6 +6635,60 @@ mod tests {
     }
 
     #[test]
+    fn group_visibility_and_mask_toggles_preserve_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.create_group_from_active_layer();
+        let group_id = first_group_id(&controller.document);
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.toggle_group_visibility(group_id);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.document = build_masked_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        controller.cached_canvas_raster = None;
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.toggle_active_layer_mask_enabled();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
     fn mask_brush_interaction_updates_canvas_and_undo_redo() {
         let mut controller = PhotoTuxController::new();
         controller.document = build_masked_controller_document();
@@ -6074,7 +6766,9 @@ mod tests {
         controller.create_group_from_active_layer();
         let group_id = first_group_id(&controller.document);
 
-        let second_layer_id = controller.document.layer(1).map(|layer| layer.id).unwrap();
+        let Some(second_layer_id) = controller.document.layer(1).map(|layer| layer.id) else {
+            panic!("expected representative document to include a second layer");
+        };
         controller.select_layer(second_layer_id);
         let moved_layer_id = controller.document.active_layer().id;
         controller.select_group(group_id);

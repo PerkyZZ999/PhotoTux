@@ -1,3 +1,7 @@
 /target
 /assets
+/docs
+/.code-review-graph
+/.github
+/.vscode
 untitled.ptx.autosave
