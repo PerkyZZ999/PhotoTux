@@ -34,6 +34,10 @@ fn drain_sorted_dirty_tiles(dirty_tiles: &mut HashSet<TileCoord>) -> Vec<TileCoo
     drained_tiles
 }
 
+fn tile_pixel_count(tile_size: u32) -> usize {
+    tile_size as usize * tile_size as usize
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RasterTile {
     pub pixels: Vec<u8>,
@@ -41,7 +45,7 @@ pub struct RasterTile {
 
 impl RasterTile {
     pub fn new(tile_size: u32) -> Self {
-        let pixel_count = tile_size as usize * tile_size as usize * 4;
+        let pixel_count = tile_pixel_count(tile_size) * 4;
         Self {
             pixels: vec![0; pixel_count],
         }
@@ -55,7 +59,7 @@ pub struct MaskTile {
 
 impl MaskTile {
     pub fn new(tile_size: u32) -> Self {
-        let pixel_count = tile_size as usize * tile_size as usize;
+        let pixel_count = tile_pixel_count(tile_size);
         Self {
             alpha: vec![255; pixel_count],
         }
