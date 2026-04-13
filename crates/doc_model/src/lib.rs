@@ -24,6 +24,16 @@ impl TileCoord {
     }
 }
 
+fn mark_dirty_tile(dirty_tiles: &mut HashSet<TileCoord>, coord: TileCoord) {
+    dirty_tiles.insert(coord);
+}
+
+fn drain_sorted_dirty_tiles(dirty_tiles: &mut HashSet<TileCoord>) -> Vec<TileCoord> {
+    let mut drained_tiles = dirty_tiles.drain().collect::<Vec<_>>();
+    drained_tiles.sort_by_key(|coord| (coord.y, coord.x));
+    drained_tiles
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RasterTile {
     pub pixels: Vec<u8>,
@@ -69,20 +79,18 @@ impl RasterMask {
     }
 
     pub fn ensure_tile(&mut self, coord: TileCoord, tile_size: u32) -> &mut MaskTile {
-        self.dirty_tiles.insert(coord);
+        mark_dirty_tile(&mut self.dirty_tiles, coord);
         self.tiles
             .entry(coord)
             .or_insert_with(|| MaskTile::new(tile_size))
     }
 
     pub fn mark_tile_dirty(&mut self, coord: TileCoord) {
-        self.dirty_tiles.insert(coord);
+        mark_dirty_tile(&mut self.dirty_tiles, coord);
     }
 
     pub fn take_dirty_tiles(&mut self) -> Vec<TileCoord> {
-        let mut dirty_tiles = self.dirty_tiles.drain().collect::<Vec<_>>();
-        dirty_tiles.sort_by_key(|coord| (coord.y, coord.x));
-        dirty_tiles
+        drain_sorted_dirty_tiles(&mut self.dirty_tiles)
     }
 }
 
@@ -123,20 +131,18 @@ impl RasterLayer {
     }
 
     pub fn ensure_tile(&mut self, coord: TileCoord, tile_size: u32) -> &mut RasterTile {
-        self.dirty_tiles.insert(coord);
+        mark_dirty_tile(&mut self.dirty_tiles, coord);
         self.tiles
             .entry(coord)
             .or_insert_with(|| RasterTile::new(tile_size))
     }
 
     pub fn mark_tile_dirty(&mut self, coord: TileCoord) {
-        self.dirty_tiles.insert(coord);
+        mark_dirty_tile(&mut self.dirty_tiles, coord);
     }
 
     pub fn take_dirty_tiles(&mut self) -> Vec<TileCoord> {
-        let mut dirty_tiles = self.dirty_tiles.drain().collect::<Vec<_>>();
-        dirty_tiles.sort_by_key(|coord| (coord.y, coord.x));
-        dirty_tiles
+        drain_sorted_dirty_tiles(&mut self.dirty_tiles)
     }
 }
 
