@@ -598,33 +598,24 @@ impl ShellUiState {
     fn build_props_pressure_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let pressure_controls = GtkBox::new(Orientation::Horizontal, 6);
 
-        let pressure_size = Button::with_label(if snapshot.pressure_size_enabled {
-            "Pressure Size On"
-        } else {
-            "Pressure Size Off"
-        });
-        pressure_size.add_css_class("tool-chip");
-        pressure_size.set_tooltip_text(Some("Toggle pressure-to-size mapping"));
-        {
-            let controller = self.controller.clone();
-            pressure_size
-                .connect_clicked(move |_| controller.borrow_mut().toggle_pressure_size_enabled());
-        }
+        let pressure_size = wired_toggle_label_chip(
+            "Pressure Size On",
+            "Pressure Size Off",
+            snapshot.pressure_size_enabled,
+            Some("Toggle pressure-to-size mapping"),
+            &self.controller,
+            |controller| controller.toggle_pressure_size_enabled(),
+        );
         pressure_controls.append(&pressure_size);
 
-        let pressure_opacity = Button::with_label(if snapshot.pressure_opacity_enabled {
-            "Pressure Opacity On"
-        } else {
-            "Pressure Opacity Off"
-        });
-        pressure_opacity.add_css_class("tool-chip");
-        pressure_opacity.set_tooltip_text(Some("Toggle pressure-to-opacity mapping"));
-        {
-            let controller = self.controller.clone();
-            pressure_opacity.connect_clicked(move |_| {
-                controller.borrow_mut().toggle_pressure_opacity_enabled()
-            });
-        }
+        let pressure_opacity = wired_toggle_label_chip(
+            "Pressure Opacity On",
+            "Pressure Opacity Off",
+            snapshot.pressure_opacity_enabled,
+            Some("Toggle pressure-to-opacity mapping"),
+            &self.controller,
+            |controller| controller.toggle_pressure_opacity_enabled(),
+        );
         pressure_controls.append(&pressure_opacity);
 
         pressure_controls
@@ -633,54 +624,43 @@ impl ShellUiState {
     fn build_props_guide_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let guide_controls = GtkBox::new(Orientation::Horizontal, 6);
 
-        let add_h_guide = Button::with_label("Guide H");
-        add_h_guide.add_css_class("tool-chip");
-        {
-            let controller = self.controller.clone();
-            add_h_guide.connect_clicked(move |_| controller.borrow_mut().add_horizontal_guide());
-        }
+        let add_h_guide = wired_label_chip("Guide H", true, None, &self.controller, |controller| {
+            controller.add_horizontal_guide()
+        });
         guide_controls.append(&add_h_guide);
 
-        let add_v_guide = Button::with_label("Guide V");
-        add_v_guide.add_css_class("tool-chip");
-        {
-            let controller = self.controller.clone();
-            add_v_guide.connect_clicked(move |_| controller.borrow_mut().add_vertical_guide());
-        }
+        let add_v_guide = wired_label_chip("Guide V", true, None, &self.controller, |controller| {
+            controller.add_vertical_guide()
+        });
         guide_controls.append(&add_v_guide);
 
-        let toggle_guides = Button::with_label(if snapshot.guides_visible {
-            "Hide Guides"
-        } else {
-            "Show Guides"
-        });
-        toggle_guides.add_css_class("tool-chip");
-        {
-            let controller = self.controller.clone();
-            toggle_guides.connect_clicked(move |_| controller.borrow_mut().toggle_guides_visible());
-        }
+        let toggle_guides = wired_toggle_label_chip(
+            "Hide Guides",
+            "Show Guides",
+            snapshot.guides_visible,
+            None,
+            &self.controller,
+            |controller| controller.toggle_guides_visible(),
+        );
         guide_controls.append(&toggle_guides);
 
-        let remove_guide = Button::with_label("Remove Guide");
-        remove_guide.add_css_class("tool-chip");
-        remove_guide.set_sensitive(snapshot.guide_count > 0);
-        {
-            let controller = self.controller.clone();
-            remove_guide.connect_clicked(move |_| controller.borrow_mut().remove_last_guide());
-        }
+        let remove_guide = wired_label_chip(
+            "Remove Guide",
+            snapshot.guide_count > 0,
+            None,
+            &self.controller,
+            |controller| controller.remove_last_guide(),
+        );
         guide_controls.append(&remove_guide);
 
-        let toggle_snapping = Button::with_label(if snapshot.snapping_enabled {
-            "Snap On"
-        } else {
-            "Snap Off"
-        });
-        toggle_snapping.add_css_class("tool-chip");
-        {
-            let controller = self.controller.clone();
-            toggle_snapping
-                .connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
-        }
+        let toggle_snapping = wired_toggle_label_chip(
+            "Snap On",
+            "Snap Off",
+            snapshot.snapping_enabled,
+            None,
+            &self.controller,
+            |controller| controller.toggle_snapping_enabled(),
+        );
         guide_controls.append(&toggle_snapping);
 
         guide_controls
@@ -731,6 +711,7 @@ impl ShellUiState {
             transform_axis_controls.append(&wired_label_chip(
                 label,
                 snapshot.transform_active,
+                None,
                 &self.controller,
                 action,
             ));
@@ -1762,13 +1743,37 @@ fn wired_icon_chip(
 fn wired_label_chip(
     label: &str,
     sensitive: bool,
+    tooltip: Option<&str>,
     controller: &Rc<RefCell<dyn ShellController>>,
     action: fn(&mut dyn ShellController),
 ) -> Button {
     let button = Button::with_label(label);
     button.add_css_class("tool-chip");
     button.set_sensitive(sensitive);
+    button.set_tooltip_text(tooltip);
     let ctrl = controller.clone();
     button.connect_clicked(move |_| action(&mut *ctrl.borrow_mut()));
     button
+}
+
+/// Build a label-only tool-chip button whose label reflects a boolean state.
+fn wired_toggle_label_chip(
+    enabled_label: &str,
+    disabled_label: &str,
+    enabled: bool,
+    tooltip: Option<&str>,
+    controller: &Rc<RefCell<dyn ShellController>>,
+    action: fn(&mut dyn ShellController),
+) -> Button {
+    wired_label_chip(
+        if enabled {
+            enabled_label
+        } else {
+            disabled_label
+        },
+        true,
+        tooltip,
+        controller,
+        action,
+    )
 }
