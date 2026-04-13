@@ -2424,59 +2424,16 @@ impl PhotoTuxController {
 
     fn apply_job_result(&mut self, result: JobResult) {
         match result {
-            JobResult::SaveCompleted { job_id, path, kind } => match kind {
-                SaveKind::Primary => {
-                    if self.pending_primary_save_job == Some(job_id) {
-                        self.pending_primary_save_job = None;
-                        self.document_path = Some(path.clone());
-                        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-                            self.document_title = file_name.to_string();
-                        }
-                        self.refresh_recovery_path();
-                        self.recovery_offer_pending = false;
-                        self.dirty_since_primary_save = false;
-                        self.dirty_since_autosave = false;
-                        self.last_change_at = None;
-                        self.clear_latest_alert();
-                        self.status_message = format!("Saved {}", path.display());
-                    }
-                }
-                SaveKind::Recovery => {
-                    if self.pending_autosave_job == Some(job_id) {
-                        self.pending_autosave_job = None;
-                        self.dirty_since_autosave = false;
-                        self.clear_latest_alert();
-                        self.status_message =
-                            format!("Recovered state written to {}", path.display());
-                    }
-                }
-            },
+            JobResult::SaveCompleted { job_id, path, kind } => {
+                self.apply_save_completed(job_id, path, kind);
+            }
             JobResult::SaveFailed {
                 job_id,
                 path,
                 kind,
                 error,
             } => {
-                tracing::error!(%error, path = %path.display(), ?kind, "background save failed");
-                match kind {
-                    SaveKind::Primary if self.pending_primary_save_job == Some(job_id) => {
-                        self.pending_primary_save_job = None;
-                    }
-                    SaveKind::Recovery if self.pending_autosave_job == Some(job_id) => {
-                        self.pending_autosave_job = None;
-                    }
-                    _ => {}
-                }
-                self.status_message = format!("Save failed: {}", error);
-                self.set_latest_alert(
-                    ShellAlertTone::Error,
-                    "Save Failed",
-                    format!("PhotoTux could not save to {}.", path.display()),
-                    Some(format!(
-                        "Reason: {}\n\nCheck that the destination is writable and retry the save.",
-                        error
-                    )),
-                );
+                self.apply_save_failed(job_id, path, kind, error);
             }
             JobResult::RecoveryLoaded {
                 job_id,
@@ -2485,52 +2442,20 @@ impl PhotoTuxController {
                 document_title,
                 document,
             } => {
-                if self.pending_recovery_load_job == Some(job_id) {
-                    self.pending_recovery_load_job = None;
-                    self.recovery_offer_pending = false;
-                    self.document = document;
-                    self.reset_selected_structure_target_to_active_layer();
-                    self.document_path = document_path;
-                    self.document_title = document_title;
-                    self.recovery_path = Some(recovery_path.clone());
-                    self.transform_session = None;
-                    self.text_session = None;
-                    self.interaction = None;
-                    self.dirty_since_primary_save = true;
-                    self.dirty_since_autosave = false;
-                    self.last_change_at = None;
-                    self.recompute_next_layer_number();
-                    self.recompute_next_text_layer_number();
-                    self.bump_canvas_revision();
-                    self.push_history("Recovered Autosave");
-                    self.clear_latest_alert();
-                    self.status_message =
-                        format!("Recovered document from {}", recovery_path.display());
-                }
+                self.apply_recovery_loaded(
+                    job_id,
+                    recovery_path,
+                    document_path,
+                    document_title,
+                    document,
+                );
             }
             JobResult::RecoveryLoadFailed {
                 job_id,
                 recovery_path,
                 error,
             } => {
-                if self.pending_recovery_load_job == Some(job_id) {
-                    self.pending_recovery_load_job = None;
-                    self.recovery_offer_pending = false;
-                    tracing::error!(%error, path = %recovery_path.display(), "recovery load failed");
-                    self.status_message = format!("Recovery load failed: {}", error);
-                    self.set_latest_alert(
-                        ShellAlertTone::Error,
-                        "Recovery Load Failed",
-                        format!(
-                            "PhotoTux could not recover autosaved work from {}.",
-                            recovery_path.display()
-                        ),
-                        Some(format!(
-                            "Reason: {}\n\nYou can discard the broken recovery file or inspect it manually.",
-                            error
-                        )),
-                    );
-                }
+                self.apply_recovery_load_failed(job_id, recovery_path, error);
             }
             JobResult::DocumentLoaded {
                 job_id,
@@ -2540,81 +2465,14 @@ impl PhotoTuxController {
                 import_notice,
                 psd_import_report,
             } => {
-                if self.pending_document_load_job == Some(job_id) {
-                    self.pending_document_load_job = None;
-                    let working_directory = path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| self.working_directory.clone());
-
-                    match kind {
-                        DocumentLoadKind::Project => {
-                            self.clear_latest_alert();
-                            self.clear_latest_import_report();
-                            let document_title = path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("untitled.ptx")
-                                .to_string();
-                            self.replace_document_after_load(DocumentLoadState {
-                                document,
-                                document_title,
-                                document_path: Some(path.clone()),
-                                working_directory,
-                                dirty_since_primary_save: false,
-                                dirty_since_autosave: false,
-                                last_change_at: None,
-                                history_label: "Open Document".to_string(),
-                                status_message: format!("Opened {}", path.display()),
-                            });
-                        }
-                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
-                            self.clear_latest_alert();
-                            self.clear_latest_import_report();
-                            let stem = path
-                                .file_stem()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("imported");
-                            let history_label = match kind {
-                                DocumentLoadKind::RasterImport => "Import Image",
-                                DocumentLoadKind::PsdImport => "Import PSD",
-                                DocumentLoadKind::Project => unreachable!("project handled above"),
-                            };
-                            let psd_notice = psd_import_report.as_ref().map(|report| {
-                                if report.used_flattened_fallback {
-                                    "flattened PSD fallback used".to_string()
-                                } else {
-                                    "PSD imported within the supported layered subset".to_string()
-                                }
-                            });
-                            let status_message = match import_notice {
-                                Some(notice) => format!("Imported {} ({})", path.display(), notice),
-                                None if psd_notice.is_some() => format!(
-                                    "Imported {} ({})",
-                                    path.display(),
-                                    psd_notice.expect("checked PSD notice presence")
-                                ),
-                                None => format!("Imported {}", path.display()),
-                            };
-                            self.replace_document_after_load(DocumentLoadState {
-                                document,
-                                document_title: format!("{}.{}", stem, PROJECT_FILE_EXTENSION),
-                                document_path: None,
-                                working_directory,
-                                dirty_since_primary_save: true,
-                                dirty_since_autosave: true,
-                                last_change_at: Some(Instant::now()),
-                                history_label: history_label.to_string(),
-                                status_message,
-                            });
-                            if let Some(psd_import_report) = psd_import_report {
-                                self.latest_import_report = Some(
-                                    self.shell_import_report_for_path(&path, psd_import_report),
-                                );
-                            }
-                        }
-                    }
-                }
+                self.apply_document_loaded(
+                    job_id,
+                    path,
+                    kind,
+                    document,
+                    import_notice,
+                    psd_import_report,
+                );
             }
             JobResult::DocumentLoadFailed {
                 job_id,
@@ -2622,42 +2480,10 @@ impl PhotoTuxController {
                 kind,
                 error,
             } => {
-                if self.pending_document_load_job == Some(job_id) {
-                    self.pending_document_load_job = None;
-                    tracing::error!(%error, path = %path.display(), ?kind, "document load failed");
-                    self.status_message = match kind {
-                        DocumentLoadKind::Project => format!("Open failed: {}", error),
-                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
-                            format!("Import failed: {}", error)
-                        }
-                    };
-                    let (title, body, secondary_text) = match kind {
-                        DocumentLoadKind::Project => (
-                            "Open Failed".to_string(),
-                            format!("PhotoTux could not open {}.", path.display()),
-                            Some(format!(
-                                "Reason: {}\n\nCheck that the project file is valid and retry opening it.",
-                                error
-                            )),
-                        ),
-                        DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => (
-                            "Import Failed".to_string(),
-                            format!("PhotoTux could not import {}.", path.display()),
-                            Some(format!(
-                                "Reason: {}\n\nCheck that the source file is supported and readable, then retry the import.",
-                                error
-                            )),
-                        ),
-                    };
-                    self.set_latest_alert(ShellAlertTone::Error, title, body, secondary_text);
-                }
+                self.apply_document_load_failed(job_id, path, kind, error);
             }
             JobResult::ExportCompleted { job_id, path } => {
-                if self.pending_export_job == Some(job_id) {
-                    self.pending_export_job = None;
-                    self.clear_latest_alert();
-                    self.status_message = format!("Exported {}", path.display());
-                }
+                self.apply_export_completed(job_id, path);
             }
             JobResult::ExportFailed {
                 job_id,
@@ -2665,20 +2491,7 @@ impl PhotoTuxController {
                 format,
                 error,
             } => {
-                if self.pending_export_job == Some(job_id) {
-                    self.pending_export_job = None;
-                    tracing::error!(%error, path = %path.display(), ?format, "document export failed");
-                    self.status_message = format!("Export failed: {}", error);
-                    self.set_latest_alert(
-                        ShellAlertTone::Error,
-                        "Export Failed",
-                        format!("PhotoTux could not export to {}.", path.display()),
-                        Some(format!(
-                            "Reason: {}\n\nCheck that the destination is writable and the selected format is supported.",
-                            error
-                        )),
-                    );
-                }
+                self.apply_export_failed(job_id, path, format, error);
             }
             JobResult::DestructiveFilterApplied {
                 job_id,
@@ -2687,90 +2500,371 @@ impl PhotoTuxController {
                 before,
                 after,
             } => {
-                if self
-                    .pending_filter_job
-                    .as_ref()
-                    .map(|pending| pending.job_id)
-                    == Some(job_id)
-                {
-                    let requested_canvas_revision = self
-                        .pending_filter_job
-                        .as_ref()
-                        .map(|pending| pending.requested_canvas_revision)
-                        .unwrap_or(self.canvas_revision);
-                    self.pending_filter_job = None;
-
-                    if self.canvas_revision != requested_canvas_revision {
-                        self.status_message = format!(
-                            "{} discarded because the document changed before it finished",
-                            filter.label()
-                        );
-                        return;
-                    }
-
-                    if self
-                        .document
-                        .apply_layer_state_snapshot(layer_id, after.clone())
-                    {
-                        self.bump_canvas_revision();
-                        self.mark_visual_region_dirty(Self::visual_bounds_for_layer_state_change(
-                            &before,
-                            &after,
-                            self.document.tile_size,
-                        ));
-                        self.push_operation(
-                            format!("Filter {}", filter.label()),
-                            EditorOperation::DestructiveFilter(DestructiveFilterRecord {
-                                layer_id,
-                                filter,
-                                before,
-                                after,
-                            }),
-                        );
-                        self.clear_latest_alert();
-                        self.status_message = format!("Applied {}", filter.label());
-                    } else {
-                        self.status_message =
-                            format!("{} failed: layer is no longer available", filter.label());
-                        self.set_latest_alert(
-                            ShellAlertTone::Error,
-                            format!("{} Failed", filter.label()),
-                            format!(
-                                "PhotoTux could not apply {} because the target layer changed.",
-                                filter.label()
-                            ),
-                            Some("Select a valid raster layer and retry the filter.".to_string()),
-                        );
-                    }
-                }
+                self.apply_destructive_filter_applied(job_id, layer_id, filter, before, after);
             }
             JobResult::DestructiveFilterFailed {
                 job_id,
                 filter,
                 error,
             } => {
-                if self
-                    .pending_filter_job
-                    .as_ref()
-                    .map(|pending| pending.job_id)
-                    == Some(job_id)
-                {
-                    self.pending_filter_job = None;
-                    self.status_message = format!("{} failed: {}", filter.label(), error);
-                    self.set_latest_alert(
-                        ShellAlertTone::Error,
-                        format!("{} Failed", filter.label()),
-                        format!(
-                            "PhotoTux could not apply {} to the active layer.",
-                            filter.label()
-                        ),
-                        Some(format!(
-                            "Reason: {}\n\nCheck the active layer and retry the filter.",
-                            error
-                        )),
-                    );
+                self.apply_destructive_filter_failed(job_id, filter, error);
+            }
+        }
+    }
+
+    fn apply_save_completed(&mut self, job_id: u64, path: PathBuf, kind: SaveKind) {
+        match kind {
+            SaveKind::Primary => {
+                if self.pending_primary_save_job == Some(job_id) {
+                    self.pending_primary_save_job = None;
+                    self.document_path = Some(path.clone());
+                    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                        self.document_title = file_name.to_string();
+                    }
+                    self.refresh_recovery_path();
+                    self.recovery_offer_pending = false;
+                    self.dirty_since_primary_save = false;
+                    self.dirty_since_autosave = false;
+                    self.last_change_at = None;
+                    self.clear_latest_alert();
+                    self.status_message = format!("Saved {}", path.display());
                 }
             }
+            SaveKind::Recovery => {
+                if self.pending_autosave_job == Some(job_id) {
+                    self.pending_autosave_job = None;
+                    self.dirty_since_autosave = false;
+                    self.clear_latest_alert();
+                    self.status_message = format!("Recovered state written to {}", path.display());
+                }
+            }
+        }
+    }
+
+    fn apply_save_failed(&mut self, job_id: u64, path: PathBuf, kind: SaveKind, error: String) {
+        tracing::error!(%error, path = %path.display(), ?kind, "background save failed");
+        match kind {
+            SaveKind::Primary if self.pending_primary_save_job == Some(job_id) => {
+                self.pending_primary_save_job = None;
+            }
+            SaveKind::Recovery if self.pending_autosave_job == Some(job_id) => {
+                self.pending_autosave_job = None;
+            }
+            _ => {}
+        }
+        self.status_message = format!("Save failed: {}", error);
+        self.set_latest_alert(
+            ShellAlertTone::Error,
+            "Save Failed",
+            format!("PhotoTux could not save to {}.", path.display()),
+            Some(format!(
+                "Reason: {}\n\nCheck that the destination is writable and retry the save.",
+                error
+            )),
+        );
+    }
+
+    fn apply_recovery_loaded(
+        &mut self,
+        job_id: u64,
+        recovery_path: PathBuf,
+        document_path: Option<PathBuf>,
+        document_title: String,
+        document: Document,
+    ) {
+        if self.pending_recovery_load_job == Some(job_id) {
+            self.pending_recovery_load_job = None;
+            self.recovery_offer_pending = false;
+            self.document = document;
+            self.reset_selected_structure_target_to_active_layer();
+            self.document_path = document_path;
+            self.document_title = document_title;
+            self.recovery_path = Some(recovery_path.clone());
+            self.transform_session = None;
+            self.text_session = None;
+            self.interaction = None;
+            self.dirty_since_primary_save = true;
+            self.dirty_since_autosave = false;
+            self.last_change_at = None;
+            self.recompute_next_layer_number();
+            self.recompute_next_text_layer_number();
+            self.bump_canvas_revision();
+            self.push_history("Recovered Autosave");
+            self.clear_latest_alert();
+            self.status_message = format!("Recovered document from {}", recovery_path.display());
+        }
+    }
+
+    fn apply_recovery_load_failed(&mut self, job_id: u64, recovery_path: PathBuf, error: String) {
+        if self.pending_recovery_load_job == Some(job_id) {
+            self.pending_recovery_load_job = None;
+            self.recovery_offer_pending = false;
+            tracing::error!(%error, path = %recovery_path.display(), "recovery load failed");
+            self.status_message = format!("Recovery load failed: {}", error);
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Recovery Load Failed",
+                format!(
+                    "PhotoTux could not recover autosaved work from {}.",
+                    recovery_path.display()
+                ),
+                Some(format!(
+                    "Reason: {}\n\nYou can discard the broken recovery file or inspect it manually.",
+                    error
+                )),
+            );
+        }
+    }
+
+    fn apply_document_loaded(
+        &mut self,
+        job_id: u64,
+        path: PathBuf,
+        kind: DocumentLoadKind,
+        document: Document,
+        import_notice: Option<String>,
+        psd_import_report: Option<PsdImportJobReport>,
+    ) {
+        if self.pending_document_load_job != Some(job_id) {
+            return;
+        }
+        self.pending_document_load_job = None;
+        let working_directory = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.working_directory.clone());
+
+        match kind {
+            DocumentLoadKind::Project => {
+                self.clear_latest_alert();
+                self.clear_latest_import_report();
+                let document_title = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("untitled.ptx")
+                    .to_string();
+                self.replace_document_after_load(DocumentLoadState {
+                    document,
+                    document_title,
+                    document_path: Some(path.clone()),
+                    working_directory,
+                    dirty_since_primary_save: false,
+                    dirty_since_autosave: false,
+                    last_change_at: None,
+                    history_label: "Open Document".to_string(),
+                    status_message: format!("Opened {}", path.display()),
+                });
+            }
+            DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
+                self.clear_latest_alert();
+                self.clear_latest_import_report();
+                let stem = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("imported");
+                let history_label = match kind {
+                    DocumentLoadKind::RasterImport => "Import Image",
+                    DocumentLoadKind::PsdImport => "Import PSD",
+                    DocumentLoadKind::Project => unreachable!("project handled above"),
+                };
+                let psd_notice = psd_import_report.as_ref().map(|report| {
+                    if report.used_flattened_fallback {
+                        "flattened PSD fallback used".to_string()
+                    } else {
+                        "PSD imported within the supported layered subset".to_string()
+                    }
+                });
+                let status_message = match import_notice {
+                    Some(notice) => format!("Imported {} ({})", path.display(), notice),
+                    None if psd_notice.is_some() => format!(
+                        "Imported {} ({})",
+                        path.display(),
+                        psd_notice.expect("checked PSD notice presence")
+                    ),
+                    None => format!("Imported {}", path.display()),
+                };
+                self.replace_document_after_load(DocumentLoadState {
+                    document,
+                    document_title: format!("{}.{}", stem, PROJECT_FILE_EXTENSION),
+                    document_path: None,
+                    working_directory,
+                    dirty_since_primary_save: true,
+                    dirty_since_autosave: true,
+                    last_change_at: Some(Instant::now()),
+                    history_label: history_label.to_string(),
+                    status_message,
+                });
+                if let Some(psd_import_report) = psd_import_report {
+                    self.latest_import_report =
+                        Some(self.shell_import_report_for_path(&path, psd_import_report));
+                }
+            }
+        }
+    }
+
+    fn apply_document_load_failed(
+        &mut self,
+        job_id: u64,
+        path: PathBuf,
+        kind: DocumentLoadKind,
+        error: String,
+    ) {
+        if self.pending_document_load_job != Some(job_id) {
+            return;
+        }
+        self.pending_document_load_job = None;
+        tracing::error!(%error, path = %path.display(), ?kind, "document load failed");
+        self.status_message = match kind {
+            DocumentLoadKind::Project => format!("Open failed: {}", error),
+            DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => {
+                format!("Import failed: {}", error)
+            }
+        };
+        let (title, body, secondary_text) = match kind {
+            DocumentLoadKind::Project => (
+                "Open Failed".to_string(),
+                format!("PhotoTux could not open {}.", path.display()),
+                Some(format!(
+                    "Reason: {}\n\nCheck that the project file is valid and retry opening it.",
+                    error
+                )),
+            ),
+            DocumentLoadKind::RasterImport | DocumentLoadKind::PsdImport => (
+                "Import Failed".to_string(),
+                format!("PhotoTux could not import {}.", path.display()),
+                Some(format!(
+                    "Reason: {}\n\nCheck that the source file is supported and readable, then retry the import.",
+                    error
+                )),
+            ),
+        };
+        self.set_latest_alert(ShellAlertTone::Error, title, body, secondary_text);
+    }
+
+    fn apply_export_completed(&mut self, job_id: u64, path: PathBuf) {
+        if self.pending_export_job == Some(job_id) {
+            self.pending_export_job = None;
+            self.clear_latest_alert();
+            self.status_message = format!("Exported {}", path.display());
+        }
+    }
+
+    fn apply_export_failed(
+        &mut self,
+        job_id: u64,
+        path: PathBuf,
+        format: RasterFileFormat,
+        error: String,
+    ) {
+        if self.pending_export_job == Some(job_id) {
+            self.pending_export_job = None;
+            tracing::error!(%error, path = %path.display(), ?format, "document export failed");
+            self.status_message = format!("Export failed: {}", error);
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                "Export Failed",
+                format!("PhotoTux could not export to {}.", path.display()),
+                Some(format!(
+                    "Reason: {}\n\nCheck that the destination is writable and the selected format is supported.",
+                    error
+                )),
+            );
+        }
+    }
+
+    fn apply_destructive_filter_applied(
+        &mut self,
+        job_id: u64,
+        layer_id: common::LayerId,
+        filter: DestructiveFilterKind,
+        before: LayerStateSnapshot,
+        after: LayerStateSnapshot,
+    ) {
+        if self
+            .pending_filter_job
+            .as_ref()
+            .map(|pending| pending.job_id)
+            != Some(job_id)
+        {
+            return;
+        }
+        let requested_canvas_revision = self
+            .pending_filter_job
+            .as_ref()
+            .map(|pending| pending.requested_canvas_revision)
+            .unwrap_or(self.canvas_revision);
+        self.pending_filter_job = None;
+
+        if self.canvas_revision != requested_canvas_revision {
+            self.status_message = format!(
+                "{} discarded because the document changed before it finished",
+                filter.label()
+            );
+            return;
+        }
+
+        if self
+            .document
+            .apply_layer_state_snapshot(layer_id, after.clone())
+        {
+            self.bump_canvas_revision();
+            self.mark_visual_region_dirty(Self::visual_bounds_for_layer_state_change(
+                &before,
+                &after,
+                self.document.tile_size,
+            ));
+            self.push_operation(
+                format!("Filter {}", filter.label()),
+                EditorOperation::DestructiveFilter(DestructiveFilterRecord {
+                    layer_id,
+                    filter,
+                    before,
+                    after,
+                }),
+            );
+            self.clear_latest_alert();
+            self.status_message = format!("Applied {}", filter.label());
+        } else {
+            self.status_message =
+                format!("{} failed: layer is no longer available", filter.label());
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                format!("{} Failed", filter.label()),
+                format!(
+                    "PhotoTux could not apply {} because the target layer changed.",
+                    filter.label()
+                ),
+                Some("Select a valid raster layer and retry the filter.".to_string()),
+            );
+        }
+    }
+
+    fn apply_destructive_filter_failed(
+        &mut self,
+        job_id: u64,
+        filter: DestructiveFilterKind,
+        error: String,
+    ) {
+        if self
+            .pending_filter_job
+            .as_ref()
+            .map(|pending| pending.job_id)
+            == Some(job_id)
+        {
+            self.pending_filter_job = None;
+            self.status_message = format!("{} failed: {}", filter.label(), error);
+            self.set_latest_alert(
+                ShellAlertTone::Error,
+                format!("{} Failed", filter.label()),
+                format!(
+                    "PhotoTux could not apply {} to the active layer.",
+                    filter.label()
+                ),
+                Some(format!(
+                    "Reason: {}\n\nCheck the active layer and retry the filter.",
+                    error
+                )),
+            );
         }
     }
 
