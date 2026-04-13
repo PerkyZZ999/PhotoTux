@@ -80,13 +80,9 @@ impl StartupSplash {
         content.set_margin_start(28);
         content.set_margin_end(28);
 
-        let logo = build_logo_icon(APP_NAME, 72);
+        let logo = build_logo_icon(APP_NAME, 112);
         logo.add_css_class("startup-splash-logo");
         content.append(&logo);
-
-        let title = Label::new(Some(APP_NAME));
-        title.add_css_class("startup-splash-title");
-        content.append(&title);
 
         let phase_label = Label::new(None);
         phase_label.add_css_class("startup-splash-phase");

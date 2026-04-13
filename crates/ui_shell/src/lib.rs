@@ -2162,14 +2162,7 @@ popover.menu-dropdown contents {
 }
 
 .startup-splash-logo {
-    margin-bottom: 4px;
-}
-
-.startup-splash-title {
-    color: #f0f0f0;
-    font-size: 24px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
+    margin-bottom: 10px;
 }
 
 .startup-splash-phase {
