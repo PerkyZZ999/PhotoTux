@@ -1618,13 +1618,28 @@ impl PhotoTuxController {
         }
     }
 
-    fn refresh_cached_canvas_union(
-        &mut self,
-        rects: impl IntoIterator<Item = common::CanvasRect>,
-    ) {
+    fn refresh_cached_canvas_union(&mut self, rects: impl IntoIterator<Item = common::CanvasRect>) {
         if let Some(rect) = Self::union_canvas_rects(rects) {
             self.refresh_cached_canvas_region(rect);
         }
+    }
+
+    fn union_optional_canvas_rects(
+        first: Option<CanvasRect>,
+        second: Option<CanvasRect>,
+    ) -> Option<CanvasRect> {
+        Self::union_canvas_rects(first.into_iter().chain(second))
+    }
+
+    fn visual_bounds_for_hierarchy_children(
+        &self,
+        children: &[LayerHierarchyNode],
+    ) -> Option<CanvasRect> {
+        Self::union_canvas_rects(
+            children
+                .iter()
+                .filter_map(|child| self.visual_bounds_for_hierarchy_node(child)),
+        )
     }
 
     fn visual_bounds_for_layer_id(&self, layer_id: common::LayerId) -> Option<CanvasRect> {
@@ -1640,22 +1655,16 @@ impl PhotoTuxController {
     fn visual_bounds_for_hierarchy_node(&self, node: &LayerHierarchyNode) -> Option<CanvasRect> {
         match node {
             LayerHierarchyNode::Layer(layer_id) => self.visual_bounds_for_layer_id(*layer_id),
-            LayerHierarchyNode::Group(group) => Self::union_canvas_rects(
-                group.children
-                    .iter()
-                    .filter_map(|child| self.visual_bounds_for_hierarchy_node(child)),
-            ),
+            LayerHierarchyNode::Group(group) => {
+                self.visual_bounds_for_hierarchy_children(&group.children)
+            }
         }
     }
 
     fn visual_bounds_for_group_id(&self, group_id: common::GroupId) -> Option<CanvasRect> {
-        self.document.group(group_id).and_then(|group| {
-            Self::union_canvas_rects(
-                group.children
-                    .iter()
-                    .filter_map(|child| self.visual_bounds_for_hierarchy_node(child)),
-            )
-        })
+        self.document
+            .group(group_id)
+            .and_then(|group| self.visual_bounds_for_hierarchy_children(&group.children))
     }
 
     fn visual_bounds_for_layer_state_snapshot(
@@ -1688,6 +1697,17 @@ impl PhotoTuxController {
             max_x.saturating_sub(min_x) as u32,
             max_y.saturating_sub(min_y) as u32,
         ))
+    }
+
+    fn visual_bounds_for_layer_state_change(
+        before: &LayerStateSnapshot,
+        after: &LayerStateSnapshot,
+        tile_size: u32,
+    ) -> Option<CanvasRect> {
+        Self::union_optional_canvas_rects(
+            Self::visual_bounds_for_layer_state_snapshot(before, tile_size),
+            Self::visual_bounds_for_layer_state_snapshot(after, tile_size),
+        )
     }
 
     fn visual_bounds_for_brush_record(&self, record: &BrushStrokeRecord) -> Option<CanvasRect> {
@@ -2693,12 +2713,11 @@ impl PhotoTuxController {
                         .apply_layer_state_snapshot(layer_id, after.clone())
                     {
                         self.bump_canvas_revision();
-                        self.mark_visual_region_dirty(Self::union_canvas_rects([
-                            Self::visual_bounds_for_layer_state_snapshot(&before, self.document.tile_size),
-                            Self::visual_bounds_for_layer_state_snapshot(&after, self.document.tile_size),
-                        ]
-                        .into_iter()
-                        .flatten()));
+                        self.mark_visual_region_dirty(Self::visual_bounds_for_layer_state_change(
+                            &before,
+                            &after,
+                            self.document.tile_size,
+                        ));
                         self.push_operation(
                             format!("Filter {}", filter.label()),
                             EditorOperation::DestructiveFilter(DestructiveFilterRecord {
@@ -2923,10 +2942,10 @@ impl PhotoTuxController {
                 .document
                 .layer_index_by_id(session.layer_id)
                 .and_then(|layer_index| self.document.layer_canvas_bounds(layer_index));
-            Self::union_canvas_rects(current_bounds.into_iter().chain(self.transform_preview_rect()))
+            Self::union_optional_canvas_rects(current_bounds, self.transform_preview_rect())
         });
 
-        Self::union_canvas_rects(text_region.into_iter().chain(transform_region))
+        Self::union_optional_canvas_rects(text_region, transform_region)
     }
 
     fn preview_canvas_raster(&self) -> CanvasRaster {
@@ -3169,7 +3188,10 @@ impl ShellController for PhotoTuxController {
                 after_selected_target: self.selected_structure_target,
             };
             self.mark_visual_region_dirty(record.visual_bounds());
-            self.push_operation(format!("Delete Text {}", layer.name), EditorOperation::TextLayer(record));
+            self.push_operation(
+                format!("Delete Text {}", layer.name),
+                EditorOperation::TextLayer(record),
+            );
             self.status_message = format!("Deleted {}", layer.name);
             return;
         }
@@ -3763,12 +3785,11 @@ impl ShellController for PhotoTuxController {
             session.translate_y,
         ) {
             self.bump_canvas_revision();
-            self.mark_visual_region_dirty(Self::union_canvas_rects([
-                Self::visual_bounds_for_layer_state_snapshot(&record.before, self.document.tile_size),
-                Self::visual_bounds_for_layer_state_snapshot(&record.after, self.document.tile_size),
-            ]
-            .into_iter()
-            .flatten()));
+            self.mark_visual_region_dirty(Self::visual_bounds_for_layer_state_change(
+                &record.before,
+                &record.after,
+                self.document.tile_size,
+            ));
             self.push_operation("Transform Layer", EditorOperation::TransformLayer(record));
         } else {
             self.bump_canvas_revision();
@@ -3798,20 +3819,18 @@ impl ShellController for PhotoTuxController {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_visual_region_dirty(Self::union_canvas_rects(
-                        before_bounds
-                            .into_iter()
-                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    self.mark_visual_region_dirty(Self::union_optional_canvas_rects(
+                        before_bounds,
+                        self.visual_bounds_for_layer_id(record.layer_id),
                     ));
                 }
                 EditorOperation::MoveLayer(record) => {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_visual_region_dirty(Self::union_canvas_rects(
-                        before_bounds
-                            .into_iter()
-                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    self.mark_visual_region_dirty(Self::union_optional_canvas_rects(
+                        before_bounds,
+                        self.visual_bounds_for_layer_id(record.layer_id),
                     ));
                 }
                 EditorOperation::TextLayer(record) => {
@@ -3867,20 +3886,18 @@ impl ShellController for PhotoTuxController {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_visual_region_dirty(Self::union_canvas_rects(
-                        before_bounds
-                            .into_iter()
-                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    self.mark_visual_region_dirty(Self::union_optional_canvas_rects(
+                        before_bounds,
+                        self.visual_bounds_for_layer_id(record.layer_id),
                     ));
                 }
                 EditorOperation::MoveLayer(record) => {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_visual_region_dirty(Self::union_canvas_rects(
-                        before_bounds
-                            .into_iter()
-                            .chain(self.visual_bounds_for_layer_id(record.layer_id)),
+                    self.mark_visual_region_dirty(Self::union_optional_canvas_rects(
+                        before_bounds,
+                        self.visual_bounds_for_layer_id(record.layer_id),
                     ));
                 }
                 EditorOperation::TextLayer(record) => {
@@ -4398,7 +4415,9 @@ impl ShellController for PhotoTuxController {
                         translate_y,
                     );
                     let new_bounds = self.document.layer_canvas_bounds(layer_index);
-                    self.refresh_cached_canvas_union([old_bounds, new_bounds].into_iter().flatten());
+                    self.refresh_cached_canvas_union(
+                        [old_bounds, new_bounds].into_iter().flatten(),
+                    );
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = true;
                     self.last_change_at = Some(std::time::Instant::now());
@@ -4417,7 +4436,9 @@ impl ShellController for PhotoTuxController {
 
                     let new_bounds = self.document.layer_canvas_bounds(layer_index);
 
-                    self.refresh_cached_canvas_union([old_bounds, new_bounds].into_iter().flatten());
+                    self.refresh_cached_canvas_union(
+                        [old_bounds, new_bounds].into_iter().flatten(),
+                    );
 
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = true;
@@ -6465,7 +6486,9 @@ mod tests {
         controller.increase_brush_radius();
         controller.increase_brush_spacing();
         let active_layer_index = controller.document.active_layer_index();
-        controller.document.layers[active_layer_index].dirty_tiles.clear();
+        controller.document.layers[active_layer_index]
+            .dirty_tiles
+            .clear();
 
         let baseline = controller.canvas_raster();
         let stroke_segments = [
@@ -6513,7 +6536,9 @@ mod tests {
         assert!(!controller.document.active_layer().tiles.is_empty());
         assert!(controller.document.active_layer().tiles.len() < 64);
         assert!(
-            controller.document.layers[active_layer_index].dirty_tiles.len()
+            controller.document.layers[active_layer_index]
+                .dirty_tiles
+                .len()
                 <= MEDIUM_CANVAS_DIRTY_TILE_BUDGET
         );
 

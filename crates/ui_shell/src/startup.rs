@@ -59,6 +59,10 @@ impl StartupTimingSummary {
     }
 }
 
+fn schedule_idle(callback: impl FnOnce() + 'static) {
+    glib::idle_add_local_once(callback);
+}
+
 impl StartupSplash {
     fn new(application: &Application) -> Self {
         let window = ApplicationWindow::builder()
@@ -116,7 +120,10 @@ impl StartupSplash {
     }
 }
 
-pub(super) fn begin_startup(application: &Application, controller: Rc<RefCell<dyn ShellController>>) {
+pub(super) fn begin_startup(
+    application: &Application,
+    controller: Rc<RefCell<dyn ShellController>>,
+) {
     install_theme();
     let splash = StartupSplash::new(application);
     splash.update_phase(StartupPhase::LoadingShell);
@@ -125,7 +132,7 @@ pub(super) fn begin_startup(application: &Application, controller: Rc<RefCell<dy
     let application = application.clone();
     let shell_state = Rc::new(RefCell::new(None::<Rc<ShellUiState>>));
     let startup_started_at = Instant::now();
-    glib::idle_add_local_once(move || {
+    schedule_idle(move || {
         let shell_started_at = Instant::now();
         let built_shell_state = ShellUiState::new(controller.clone());
         let shell_init_ms = shell_started_at.elapsed().as_millis();
@@ -137,7 +144,7 @@ pub(super) fn begin_startup(application: &Application, controller: Rc<RefCell<dy
         let shell_state = shell_state.clone();
         let splash = splash.clone();
         let startup_started_at = startup_started_at;
-        glib::idle_add_local_once(move || {
+        schedule_idle(move || {
             let warmup_started_at = Instant::now();
             let mut renderer_warmed = false;
             if let Some(shell_state) = shell_state.borrow().as_ref() {
@@ -147,13 +154,17 @@ pub(super) fn begin_startup(application: &Application, controller: Rc<RefCell<dy
                     .warm_up_startup(STARTUP_WARMUP_WIDTH, STARTUP_WARMUP_HEIGHT);
             }
             let warmup_ms = warmup_started_at.elapsed().as_millis();
-            tracing::info!(warmup_ms, renderer_warmed, "startup canvas warm-up complete");
+            tracing::info!(
+                warmup_ms,
+                renderer_warmed,
+                "startup canvas warm-up complete"
+            );
             splash.update_phase(StartupPhase::OpeningWorkspace);
 
             let application = application.clone();
             let shell_state = shell_state.clone();
             let splash = splash.clone();
-            glib::idle_add_local_once(move || {
+            schedule_idle(move || {
                 let handoff_started_at = Instant::now();
                 if let Some(shell_state) = shell_state.borrow_mut().take() {
                     let splash_window = splash.window.clone();
@@ -203,7 +214,10 @@ mod tests {
             assert!(!phase.detail().is_empty());
         }
 
-        assert_ne!(StartupPhase::Launching.title(), StartupPhase::LoadingShell.title());
+        assert_ne!(
+            StartupPhase::Launching.title(),
+            StartupPhase::LoadingShell.title()
+        );
         assert_ne!(
             StartupPhase::WarmingCanvas.detail(),
             StartupPhase::OpeningWorkspace.detail()

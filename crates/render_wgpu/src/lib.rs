@@ -93,8 +93,7 @@ struct CanvasUniforms {
 
 impl OffscreenCanvasRenderer {
     pub async fn new() -> Result<Self> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -185,6 +184,7 @@ impl OffscreenCanvasRenderer {
         overlays: &[CanvasOverlayRect],
         overlay_paths: &[CanvasOverlayPath],
     ) -> Result<CanvasFrame> {
+        let scale_factor = config.scale_factor as f32;
         let physical_width = ((config.width as f64 * config.scale_factor).round() as u32).max(1);
         let physical_height = ((config.height as f64 * config.scale_factor).round() as u32).max(1);
         let bytes_per_row = physical_width * 4;
@@ -197,8 +197,8 @@ impl OffscreenCanvasRenderer {
             zoom: viewport_state.zoom,
             _pad0: 0.0,
             pan: [
-                viewport_state.pan_x * config.scale_factor as f32,
-                viewport_state.pan_y * config.scale_factor as f32,
+                viewport_state.pan_x * scale_factor,
+                viewport_state.pan_y * scale_factor,
             ],
             _pad1: [0.0, 0.0],
         };
@@ -308,13 +308,12 @@ impl OffscreenCanvasRenderer {
             .context("wgpu readback mapping failed")?;
 
         let mapped = buffer_slice.get_mapped_range();
-        let mut pixels = vec![0_u8; (bytes_per_row * physical_height) as usize];
-        for row in 0..physical_height as usize {
-            let src_offset = row * padded_bytes_per_row as usize;
-            let dst_offset = row * bytes_per_row as usize;
-            pixels[dst_offset..dst_offset + bytes_per_row as usize]
-                .copy_from_slice(&mapped[src_offset..src_offset + bytes_per_row as usize]);
-        }
+        let mut pixels = copy_mapped_pixels(
+            &mapped,
+            bytes_per_row as usize,
+            padded_bytes_per_row as usize,
+            physical_height as usize,
+        );
         drop(mapped);
         output_buffer.unmap();
 
@@ -324,7 +323,7 @@ impl OffscreenCanvasRenderer {
                 physical_width,
                 physical_height,
                 viewport_state,
-                config.scale_factor as f32,
+                scale_factor,
                 canvas_raster,
             );
         }
@@ -334,7 +333,7 @@ impl OffscreenCanvasRenderer {
             physical_width,
             physical_height,
             viewport_state,
-            config.scale_factor as f32,
+            scale_factor,
             overlays,
         );
         draw_overlay_paths(
@@ -342,7 +341,7 @@ impl OffscreenCanvasRenderer {
             physical_width,
             physical_height,
             viewport_state,
-            config.scale_factor as f32,
+            scale_factor,
             overlay_paths,
         );
 
@@ -353,6 +352,23 @@ impl OffscreenCanvasRenderer {
             pixels,
         })
     }
+}
+
+fn copy_mapped_pixels(
+    mapped: &[u8],
+    bytes_per_row: usize,
+    padded_bytes_per_row: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut pixels = vec![0_u8; bytes_per_row * height];
+    for row in 0..height {
+        let src_offset = row * padded_bytes_per_row;
+        let dst_offset = row * bytes_per_row;
+        pixels[dst_offset..dst_offset + bytes_per_row]
+            .copy_from_slice(&mapped[src_offset..src_offset + bytes_per_row]);
+    }
+
+    pixels
 }
 
 fn draw_canvas_raster(
