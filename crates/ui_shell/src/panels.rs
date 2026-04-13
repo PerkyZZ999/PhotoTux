@@ -728,7 +728,28 @@ impl ShellUiState {
 
     pub(super) fn refresh_layers_panel(self: &Rc<Self>, snapshot: &ShellSnapshot) {
         clear_box_children(&self.layers_body);
+        self.layers_body.append(&self.build_layers_filter_row());
+        self.layers_body
+            .append(&self.build_layers_controls_row(snapshot));
+        self.layers_body.append(&build_layers_info_row(snapshot));
 
+        let filter_text = self.layers_filter_text.borrow().trim().to_ascii_lowercase();
+        let list = self.build_layers_list(snapshot, &filter_text);
+        let actions = self.build_layers_actions_row(snapshot);
+
+        if list.first_child().is_none() {
+            let empty = Label::new(Some("No layers match the current filter."));
+            empty.set_xalign(0.0);
+            empty.add_css_class("panel-row");
+            empty.add_css_class("panel-hint-row");
+            list.append(&empty);
+        }
+
+        self.layers_body.append(&list);
+        self.layers_body.append(&actions);
+    }
+
+    fn build_layers_filter_row(self: &Rc<Self>) -> GtkBox {
         let filter_row = GtkBox::new(Orientation::Horizontal, 6);
         filter_row.add_css_class("layers-toolbar");
 
@@ -768,13 +789,21 @@ impl ShellUiState {
         }
         filter_box.append(&clear_filter);
         filter_row.append(&filter_box);
-        self.layers_body.append(&filter_row);
+        filter_row
+    }
 
+    fn build_layers_controls_row(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
         let controls_row = GtkBox::new(Orientation::Horizontal, 8);
         controls_row.add_css_class("layers-blend-row");
+        controls_row.append(&self.build_layer_blend_group(snapshot));
+        controls_row.append(&self.build_layer_opacity_group(snapshot));
+        controls_row
+    }
 
+    fn build_layer_blend_group(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
         let blend_group = GtkBox::new(Orientation::Horizontal, 4);
         blend_group.add_css_class("layer-control-group");
+
         let blend_prev = build_icon_only_button(
             "arrow-go-back-line.svg",
             "Previous blend mode",
@@ -808,13 +837,17 @@ impl ShellUiState {
                 .connect_clicked(move |_| controller.borrow_mut().next_active_layer_blend_mode());
         }
         blend_group.append(&blend_next);
-        controls_row.append(&blend_group);
+        blend_group
+    }
 
+    fn build_layer_opacity_group(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
         let opacity_group = GtkBox::new(Orientation::Horizontal, 4);
         opacity_group.add_css_class("layer-control-group");
+
         let opacity_label = Label::new(Some("Opacity:"));
         opacity_label.add_css_class("layer-control-label");
         opacity_group.append(&opacity_label);
+
         let opacity_down = build_icon_only_button(
             "subtract-line.svg",
             "Decrease layer opacity",
@@ -827,6 +860,7 @@ impl ShellUiState {
                 .connect_clicked(move |_| controller.borrow_mut().decrease_active_layer_opacity());
         }
         opacity_group.append(&opacity_down);
+
         let opacity_box = GtkBox::new(Orientation::Horizontal, 0);
         opacity_box.add_css_class("layer-value-box");
         let opacity_value =
@@ -834,6 +868,7 @@ impl ShellUiState {
         opacity_value.add_css_class("layer-value-label");
         opacity_box.append(&opacity_value);
         opacity_group.append(&opacity_box);
+
         let opacity_up = build_icon_only_button(
             "add-line.svg",
             "Increase layer opacity",
@@ -846,344 +881,217 @@ impl ShellUiState {
                 .connect_clicked(move |_| controller.borrow_mut().increase_active_layer_opacity());
         }
         opacity_group.append(&opacity_up);
-        controls_row.append(&opacity_group);
+        opacity_group
+    }
 
-        self.layers_body.append(&controls_row);
-
-        let info_row = GtkBox::new(Orientation::Horizontal, 6);
-        info_row.add_css_class("layers-info-row");
-        for text in [
-            format!(
-                "Visible: {}",
-                if snapshot.active_layer_visible {
-                    "On"
-                } else {
-                    "Off"
-                }
-            ),
-            format!(
-                "Mask: {}",
-                if !snapshot.active_layer_has_mask {
-                    "None"
-                } else if snapshot.active_layer_mask_enabled {
-                    "On"
-                } else {
-                    "Off"
-                }
-            ),
-            format!("Target: {}", snapshot.active_edit_target_name),
-        ] {
-            let chip = Label::new(Some(&text));
-            chip.add_css_class("layers-info-chip");
-            info_row.append(&chip);
-        }
-        self.layers_body.append(&info_row);
-
-        let filter_text = self.layers_filter_text.borrow().trim().to_ascii_lowercase();
+    fn build_layers_list(self: &Rc<Self>, snapshot: &ShellSnapshot, filter_text: &str) -> GtkBox {
         let list = GtkBox::new(Orientation::Vertical, 0);
         list.add_css_class("layers-list");
 
-        let actions = GtkBox::new(Orientation::Horizontal, 4);
-        actions.add_css_class("layers-bottom");
-        for (icon_name, label, action) in [
-            ("add-line.svg", "+ Layer", LayerAction::Add),
-            ("group-line.svg", "+ Group", LayerAction::AddGroup),
-            ("node-tree.svg", "Ungroup", LayerAction::Ungroup),
-            ("file-copy-line.svg", "Duplicate", LayerAction::Duplicate),
-            ("delete-bin-line.svg", "Delete", LayerAction::Delete),
-            ("text.svg", "Edit Text", LayerAction::EditText),
-            (
-                "folder-add-line.svg",
-                "Into Group",
-                LayerAction::MoveIntoGroup,
-            ),
-            (
-                "folder-reduce-line.svg",
-                "Out Group",
-                LayerAction::MoveOutOfGroup,
-            ),
-            ("add-line.svg", "+ Mask", LayerAction::AddMask),
-            (
-                if snapshot.active_layer_mask_enabled {
-                    "eye-off-line.svg"
-                } else {
-                    "eye-line.svg"
-                },
-                if snapshot.active_layer_mask_enabled {
-                    "Mask Off"
-                } else {
-                    "Mask On"
-                },
-                LayerAction::ToggleMask,
-            ),
-            (
-                "edit-line.svg",
-                if snapshot.active_edit_target_name == "Layer Mask" {
-                    "Edit Layer"
-                } else {
-                    "Edit Mask"
-                },
-                LayerAction::ToggleMaskTarget,
-            ),
-            ("arrow-up-line.svg", "Up", LayerAction::MoveUp),
-            ("arrow-down-line.svg", "Down", LayerAction::MoveDown),
-        ] {
-            let button = build_tool_chip_icon_button(icon_name, label);
-            button.add_css_class("layer-action-chip");
-            match action {
-                LayerAction::AddGroup => button.set_sensitive(
-                    snapshot.can_create_group_from_active_layer && !snapshot.text.selected,
-                ),
-                LayerAction::Ungroup => button.set_sensitive(snapshot.can_ungroup_selected_group),
-                LayerAction::Duplicate => button.set_sensitive(!snapshot.text.selected),
-                LayerAction::EditText => {
-                    button.set_sensitive(snapshot.text.selected && !snapshot.text.editing)
-                }
-                LayerAction::MoveIntoGroup => button.set_sensitive(
-                    snapshot.can_move_active_layer_into_selected_group && !snapshot.text.selected,
-                ),
-                LayerAction::MoveOutOfGroup => button.set_sensitive(
-                    snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected,
-                ),
-                LayerAction::AddMask => {
-                    button.set_sensitive(!snapshot.text.selected && !snapshot.active_layer_has_mask)
-                }
-                LayerAction::ToggleMask => {
-                    button.set_sensitive(!snapshot.text.selected && snapshot.active_layer_has_mask)
-                }
-                LayerAction::ToggleMaskTarget => {
-                    button.set_sensitive(!snapshot.text.selected && snapshot.active_layer_has_mask)
-                }
-                LayerAction::MoveUp | LayerAction::MoveDown => {
-                    button.set_sensitive(!snapshot.text.selected)
-                }
-                _ => {}
+        for layer in &snapshot.layers {
+            if layer_matches_filter(layer, filter_text) {
+                list.append(&self.build_layer_row(layer));
             }
+        }
+
+        list
+    }
+
+    fn build_layer_row(self: &Rc<Self>, layer: &LayerPanelItem) -> GtkBox {
+        let row = GtkBox::new(Orientation::Horizontal, 4);
+        row.add_css_class("layer-item-shell");
+        row.add_css_class(if layer.is_selected {
+            "layer-row-active"
+        } else {
+            "layer-row"
+        });
+        row.set_margin_start((layer.depth as i32) * 14);
+        if layer.mask_target_active {
+            row.add_css_class("layer-row-mask-target");
+        }
+        if layer.has_mask && !layer.mask_enabled {
+            row.add_css_class("layer-row-mask-disabled");
+        }
+        if layer.is_group {
+            row.add_css_class("layer-row-group");
+        }
+
+        row.append(&self.build_layer_visibility_button(layer));
+        row.append(&build_layer_preview(layer));
+
+        if layer.is_group {
+            self.append_group_layer_content(&row, layer);
+        } else if layer.is_text {
+            self.append_text_layer_content(&row, layer);
+        } else {
+            self.append_raster_layer_content(&row, layer);
+        }
+
+        row
+    }
+
+    fn build_layer_visibility_button(self: &Rc<Self>, layer: &LayerPanelItem) -> Button {
+        let visibility_icon = if layer.visible {
+            "eye-line.svg"
+        } else {
+            "eye-off-line.svg"
+        };
+        let visibility =
+            build_icon_only_button(visibility_icon, "Toggle Visibility", "menu-button", 12);
+        visibility.add_css_class("layer-visibility-button");
+
+        if let Some(layer_id) = layer.layer_id {
             let controller = self.controller.clone();
-            button.connect_clicked(move |_| match action {
-                LayerAction::Add => controller.borrow_mut().add_layer(),
-                LayerAction::AddGroup => controller.borrow_mut().create_group_from_active_layer(),
-                LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
-                LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
-                LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
-                LayerAction::EditText => controller.borrow_mut().begin_text_edit(),
-                LayerAction::MoveIntoGroup => controller
-                    .borrow_mut()
-                    .move_active_layer_into_selected_group(),
-                LayerAction::MoveOutOfGroup => {
-                    controller.borrow_mut().move_active_layer_out_of_group()
-                }
-                LayerAction::AddMask => controller.borrow_mut().add_active_layer_mask(),
-                LayerAction::ToggleMask => {
-                    controller.borrow_mut().toggle_active_layer_mask_enabled()
-                }
-                LayerAction::ToggleMaskTarget => {
-                    let mut controller = controller.borrow_mut();
-                    let snapshot = controller.snapshot();
-                    if snapshot.active_edit_target_name == "Layer Mask" {
-                        controller.edit_active_layer_pixels();
-                    } else {
-                        controller.edit_active_layer_mask();
+            visibility.connect_clicked(move |_| {
+                controller.borrow_mut().toggle_layer_visibility(layer_id)
+            });
+        } else if let Some(group_id) = layer.group_id {
+            let controller = self.controller.clone();
+            visibility.connect_clicked(move |_| {
+                controller.borrow_mut().toggle_group_visibility(group_id)
+            });
+        }
+
+        visibility
+    }
+
+    fn append_group_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
+        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
+        target_strip.add_css_class("layer-target-strip");
+
+        let group_chip = build_target_chip("G", "Select this group", layer.is_selected, true);
+        if let Some(group_id) = layer.group_id {
+            let controller = self.controller.clone();
+            group_chip.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
+        }
+        target_strip.append(&group_chip);
+        row.append(&target_strip);
+
+        let group_id = layer.group_id;
+        row.append(&build_layer_content_button(
+            layer,
+            &format!("Group • {}%", layer.opacity_percent),
+            None,
+            {
+                let controller = self.controller.clone();
+                move || {
+                    if let Some(group_id) = group_id {
+                        controller.borrow_mut().select_group(group_id);
                     }
                 }
-                LayerAction::MoveUp => controller.borrow_mut().move_active_layer_up(),
-                LayerAction::MoveDown => controller.borrow_mut().move_active_layer_down(),
+            },
+        ));
+    }
+
+    fn append_text_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
+        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
+        target_strip.add_css_class("layer-target-strip");
+
+        let text_target = build_target_chip("T", "Select this text layer", layer.is_selected, true);
+        if let Some(layer_id) = layer.layer_id {
+            let controller = self.controller.clone();
+            text_target.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+        }
+        target_strip.append(&text_target);
+
+        let edit_target = build_target_chip("E", "Open text editing", false, true);
+        if let Some(layer_id) = layer.layer_id {
+            let controller = self.controller.clone();
+            edit_target.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                controller.select_layer(layer_id);
+                controller.begin_text_edit();
             });
+        }
+        target_strip.append(&edit_target);
+        row.append(&target_strip);
+
+        let layer_id = layer.layer_id;
+        row.append(&build_layer_content_button(
+            layer,
+            &format!("Text • {}%", layer.opacity_percent),
+            None,
+            {
+                let controller = self.controller.clone();
+                move || {
+                    if let Some(layer_id) = layer_id {
+                        controller.borrow_mut().select_layer(layer_id);
+                    }
+                }
+            },
+        ));
+    }
+
+    fn append_raster_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
+        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
+        target_strip.add_css_class("layer-target-strip");
+
+        let layer_target = build_target_chip(
+            "L",
+            "Select the layer and edit its pixels",
+            layer.is_active && !layer.mask_target_active,
+            true,
+        );
+        if let Some(layer_id) = layer.layer_id {
+            let controller = self.controller.clone();
+            layer_target.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                controller.select_layer(layer_id);
+                controller.edit_active_layer_pixels();
+            });
+        }
+        target_strip.append(&layer_target);
+
+        let mask_target = build_target_chip(
+            if layer.mask_enabled { "M" } else { "M!" },
+            "Select the layer and edit its mask",
+            layer.mask_target_active,
+            layer.has_mask,
+        );
+        if layer.has_mask
+            && let Some(layer_id) = layer.layer_id
+        {
+            let controller = self.controller.clone();
+            mask_target.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                controller.select_layer(layer_id);
+                controller.edit_active_layer_mask();
+            });
+        }
+        target_strip.append(&mask_target);
+        row.append(&target_strip);
+
+        let layer_id = layer.layer_id;
+        row.append(&build_layer_content_button(
+            layer,
+            &format!("{}%{}", layer.opacity_percent, layer_mask_suffix(layer)),
+            Some(if layer.is_active { "Active" } else { "" }),
+            {
+                let controller = self.controller.clone();
+                move || {
+                    if let Some(layer_id) = layer_id {
+                        controller.borrow_mut().select_layer(layer_id);
+                    }
+                }
+            },
+        ));
+    }
+
+    fn build_layers_actions_row(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
+        let actions = GtkBox::new(Orientation::Horizontal, 4);
+        actions.add_css_class("layers-bottom");
+
+        for (icon_name, label, action) in build_layer_action_specs(snapshot) {
+            let button = build_tool_chip_icon_button(icon_name, &label);
+            button.add_css_class("layer-action-chip");
+            button.set_sensitive(layer_action_sensitive(action, snapshot));
+
+            let controller = self.controller.clone();
+            button.connect_clicked(move |_| run_layer_action(&controller, action));
             actions.append(&button);
         }
 
-        for layer in &snapshot.layers {
-            if !layer_matches_filter(layer, &filter_text) {
-                continue;
-            }
-
-            let row = GtkBox::new(Orientation::Horizontal, 4);
-            row.add_css_class("layer-item-shell");
-            row.add_css_class(if layer.is_selected {
-                "layer-row-active"
-            } else {
-                "layer-row"
-            });
-            row.set_margin_start((layer.depth as i32) * 14);
-            if layer.mask_target_active {
-                row.add_css_class("layer-row-mask-target");
-            }
-            if layer.has_mask && !layer.mask_enabled {
-                row.add_css_class("layer-row-mask-disabled");
-            }
-            if layer.is_group {
-                row.add_css_class("layer-row-group");
-            }
-
-            let visibility_icon = if layer.visible {
-                "eye-line.svg"
-            } else {
-                "eye-off-line.svg"
-            };
-            let visibility =
-                build_icon_only_button(visibility_icon, "Toggle Visibility", "menu-button", 12);
-            visibility.add_css_class("layer-visibility-button");
-            if let Some(layer_id) = layer.layer_id {
-                let controller = self.controller.clone();
-                visibility.connect_clicked(move |_| {
-                    controller.borrow_mut().toggle_layer_visibility(layer_id)
-                });
-            } else if let Some(group_id) = layer.group_id {
-                let controller = self.controller.clone();
-                visibility.connect_clicked(move |_| {
-                    controller.borrow_mut().toggle_group_visibility(group_id)
-                });
-            }
-            row.append(&visibility);
-
-            row.append(&build_layer_preview(layer));
-
-            if layer.is_group {
-                let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-                target_strip.add_css_class("layer-target-strip");
-                let group_chip =
-                    build_target_chip("G", "Select this group", layer.is_selected, true);
-                if let Some(group_id) = layer.group_id {
-                    let controller = self.controller.clone();
-                    group_chip
-                        .connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
-                }
-                target_strip.append(&group_chip);
-                row.append(&target_strip);
-                let group_id = layer.group_id;
-
-                row.append(&build_layer_content_button(
-                    layer,
-                    &format!("Group • {}%", layer.opacity_percent),
-                    None,
-                    {
-                        let controller = self.controller.clone();
-                        move || {
-                            if let Some(group_id) = group_id {
-                                controller.borrow_mut().select_group(group_id);
-                            }
-                        }
-                    },
-                ));
-            } else {
-                let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-                target_strip.add_css_class("layer-target-strip");
-
-                if layer.is_text {
-                    let text_target =
-                        build_target_chip("T", "Select this text layer", layer.is_selected, true);
-                    if let Some(layer_id) = layer.layer_id {
-                        let controller = self.controller.clone();
-                        text_target.connect_clicked(move |_| {
-                            controller.borrow_mut().select_layer(layer_id)
-                        });
-                    }
-                    target_strip.append(&text_target);
-
-                    let edit_target = build_target_chip("E", "Open text editing", false, true);
-                    if let Some(layer_id) = layer.layer_id {
-                        let controller = self.controller.clone();
-                        edit_target.connect_clicked(move |_| {
-                            let mut controller = controller.borrow_mut();
-                            controller.select_layer(layer_id);
-                            controller.begin_text_edit();
-                        });
-                    }
-                    target_strip.append(&edit_target);
-                    row.append(&target_strip);
-                    let layer_id = layer.layer_id;
-                    row.append(&build_layer_content_button(
-                        layer,
-                        &format!("Text • {}%", layer.opacity_percent),
-                        None,
-                        {
-                            let controller = self.controller.clone();
-                            move || {
-                                if let Some(layer_id) = layer_id {
-                                    controller.borrow_mut().select_layer(layer_id);
-                                }
-                            }
-                        },
-                    ));
-                } else {
-                    let layer_target = build_target_chip(
-                        "L",
-                        "Select the layer and edit its pixels",
-                        layer.is_active && !layer.mask_target_active,
-                        true,
-                    );
-                    if let Some(layer_id) = layer.layer_id {
-                        let controller = self.controller.clone();
-                        layer_target.connect_clicked(move |_| {
-                            let mut controller = controller.borrow_mut();
-                            controller.select_layer(layer_id);
-                            controller.edit_active_layer_pixels();
-                        });
-                    }
-                    target_strip.append(&layer_target);
-
-                    let mask_target = build_target_chip(
-                        if layer.mask_enabled { "M" } else { "M!" },
-                        "Select the layer and edit its mask",
-                        layer.mask_target_active,
-                        layer.has_mask,
-                    );
-                    if layer.has_mask
-                        && let Some(layer_id) = layer.layer_id
-                    {
-                        let controller = self.controller.clone();
-                        mask_target.connect_clicked(move |_| {
-                            let mut controller = controller.borrow_mut();
-                            controller.select_layer(layer_id);
-                            controller.edit_active_layer_mask();
-                        });
-                    }
-                    target_strip.append(&mask_target);
-                    row.append(&target_strip);
-
-                    let mask_suffix = if !layer.has_mask {
-                        String::new()
-                    } else if layer.mask_target_active {
-                        if layer.mask_enabled {
-                            "  [Mask Editing]".to_string()
-                        } else {
-                            "  [Mask Editing Off]".to_string()
-                        }
-                    } else if layer.mask_enabled {
-                        "  [Mask]".to_string()
-                    } else {
-                        "  [Mask Off]".to_string()
-                    };
-                    let layer_id = layer.layer_id;
-                    row.append(&build_layer_content_button(
-                        layer,
-                        &format!("{}%{}", layer.opacity_percent, mask_suffix),
-                        Some(if layer.is_active { "Active" } else { "" }),
-                        {
-                            let controller = self.controller.clone();
-                            move || {
-                                if let Some(layer_id) = layer_id {
-                                    controller.borrow_mut().select_layer(layer_id);
-                                }
-                            }
-                        },
-                    ));
-                }
-            }
-
-            list.append(&row);
-        }
-
-        if list.first_child().is_none() {
-            let empty = Label::new(Some("No layers match the current filter."));
-            empty.set_xalign(0.0);
-            empty.add_css_class("panel-row");
-            empty.add_css_class("panel-hint-row");
-            list.append(&empty);
-        }
-
-        self.layers_body.append(&list);
-        self.layers_body.append(&actions);
+        actions
     }
 
     pub(super) fn refresh_history_panel(&self, snapshot: &ShellSnapshot) {
@@ -1247,6 +1155,156 @@ enum LayerAction {
     ToggleMaskTarget,
     MoveUp,
     MoveDown,
+}
+
+fn build_layers_info_row(snapshot: &ShellSnapshot) -> GtkBox {
+    let info_row = GtkBox::new(Orientation::Horizontal, 6);
+    info_row.add_css_class("layers-info-row");
+
+    for text in [
+        format!(
+            "Visible: {}",
+            if snapshot.active_layer_visible {
+                "On"
+            } else {
+                "Off"
+            }
+        ),
+        format!(
+            "Mask: {}",
+            if !snapshot.active_layer_has_mask {
+                "None"
+            } else if snapshot.active_layer_mask_enabled {
+                "On"
+            } else {
+                "Off"
+            }
+        ),
+        format!("Target: {}", snapshot.active_edit_target_name),
+    ] {
+        let chip = Label::new(Some(&text));
+        chip.add_css_class("layers-info-chip");
+        info_row.append(&chip);
+    }
+
+    info_row
+}
+
+fn build_layer_action_specs(snapshot: &ShellSnapshot) -> Vec<(&'static str, String, LayerAction)> {
+    let toggle_mask_icon = if snapshot.active_layer_mask_enabled {
+        "eye-off-line.svg"
+    } else {
+        "eye-line.svg"
+    };
+    let toggle_mask_label = if snapshot.active_layer_mask_enabled {
+        "Mask Off"
+    } else {
+        "Mask On"
+    };
+    let toggle_target_label = if snapshot.active_edit_target_name == "Layer Mask" {
+        "Edit Layer"
+    } else {
+        "Edit Mask"
+    };
+
+    vec![
+        ("add-line.svg", "+ Layer".to_string(), LayerAction::Add),
+        (
+            "group-line.svg",
+            "+ Group".to_string(),
+            LayerAction::AddGroup,
+        ),
+        ("node-tree.svg", "Ungroup".to_string(), LayerAction::Ungroup),
+        (
+            "file-copy-line.svg",
+            "Duplicate".to_string(),
+            LayerAction::Duplicate,
+        ),
+        (
+            "delete-bin-line.svg",
+            "Delete".to_string(),
+            LayerAction::Delete,
+        ),
+        ("text.svg", "Edit Text".to_string(), LayerAction::EditText),
+        (
+            "folder-add-line.svg",
+            "Into Group".to_string(),
+            LayerAction::MoveIntoGroup,
+        ),
+        (
+            "folder-reduce-line.svg",
+            "Out Group".to_string(),
+            LayerAction::MoveOutOfGroup,
+        ),
+        ("add-line.svg", "+ Mask".to_string(), LayerAction::AddMask),
+        (
+            toggle_mask_icon,
+            toggle_mask_label.to_string(),
+            LayerAction::ToggleMask,
+        ),
+        (
+            "edit-line.svg",
+            toggle_target_label.to_string(),
+            LayerAction::ToggleMaskTarget,
+        ),
+        ("arrow-up-line.svg", "Up".to_string(), LayerAction::MoveUp),
+        (
+            "arrow-down-line.svg",
+            "Down".to_string(),
+            LayerAction::MoveDown,
+        ),
+    ]
+}
+
+fn layer_action_sensitive(action: LayerAction, snapshot: &ShellSnapshot) -> bool {
+    match action {
+        LayerAction::Add | LayerAction::Delete => true,
+        LayerAction::AddGroup => {
+            snapshot.can_create_group_from_active_layer && !snapshot.text.selected
+        }
+        LayerAction::Ungroup => snapshot.can_ungroup_selected_group,
+        LayerAction::Duplicate => !snapshot.text.selected,
+        LayerAction::EditText => snapshot.text.selected && !snapshot.text.editing,
+        LayerAction::MoveIntoGroup => {
+            snapshot.can_move_active_layer_into_selected_group && !snapshot.text.selected
+        }
+        LayerAction::MoveOutOfGroup => {
+            snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected
+        }
+        LayerAction::AddMask => !snapshot.text.selected && !snapshot.active_layer_has_mask,
+        LayerAction::ToggleMask | LayerAction::ToggleMaskTarget => {
+            !snapshot.text.selected && snapshot.active_layer_has_mask
+        }
+        LayerAction::MoveUp | LayerAction::MoveDown => !snapshot.text.selected,
+    }
+}
+
+fn run_layer_action(controller: &Rc<RefCell<dyn ShellController>>, action: LayerAction) {
+    match action {
+        LayerAction::Add => controller.borrow_mut().add_layer(),
+        LayerAction::AddGroup => controller.borrow_mut().create_group_from_active_layer(),
+        LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
+        LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
+        LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
+        LayerAction::EditText => controller.borrow_mut().begin_text_edit(),
+        LayerAction::MoveIntoGroup => controller
+            .borrow_mut()
+            .move_active_layer_into_selected_group(),
+        LayerAction::MoveOutOfGroup => controller.borrow_mut().move_active_layer_out_of_group(),
+        LayerAction::AddMask => controller.borrow_mut().add_active_layer_mask(),
+        LayerAction::ToggleMask => controller.borrow_mut().toggle_active_layer_mask_enabled(),
+        LayerAction::ToggleMaskTarget => {
+            let mut controller = controller.borrow_mut();
+            let snapshot = controller.snapshot();
+            if snapshot.active_edit_target_name == "Layer Mask" {
+                controller.edit_active_layer_pixels();
+            } else {
+                controller.edit_active_layer_mask();
+            }
+        }
+        LayerAction::MoveUp => controller.borrow_mut().move_active_layer_up(),
+        LayerAction::MoveDown => controller.borrow_mut().move_active_layer_down(),
+    }
 }
 
 fn clear_box_children(container: &GtkBox) {
@@ -1513,6 +1571,24 @@ fn layer_matches_filter(layer: &LayerPanelItem, filter_text: &str) -> bool {
     )
     .to_ascii_lowercase();
     haystack.contains(filter_text)
+}
+
+fn layer_mask_suffix(layer: &LayerPanelItem) -> String {
+    if !layer.has_mask {
+        return String::new();
+    }
+    if layer.mask_target_active {
+        return if layer.mask_enabled {
+            "  [Mask Editing]".to_string()
+        } else {
+            "  [Mask Editing Off]".to_string()
+        };
+    }
+    if layer.mask_enabled {
+        "  [Mask]".to_string()
+    } else {
+        "  [Mask Off]".to_string()
+    }
 }
 
 fn build_layer_preview(layer: &LayerPanelItem) -> GtkBox {
