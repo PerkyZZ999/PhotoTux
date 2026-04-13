@@ -663,6 +663,30 @@ impl LassoTool {
     }
 }
 
+fn for_each_tile_pixel_outside_selection(
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    selection_shape: &SelectionShape,
+    clip_inverted: bool,
+    mut visit: impl FnMut(usize, usize),
+) {
+    let tile_size = tile_size as usize;
+
+    for local_y in 0..tile_size {
+        for local_x in 0..tile_size {
+            let canvas_x = tile_origin_x + local_x as i32;
+            let canvas_y = tile_origin_y + local_y as i32;
+            let inside = selection_shape.contains_pixel(canvas_x, canvas_y) != clip_inverted;
+            if inside {
+                continue;
+            }
+
+            visit(local_x, local_y);
+        }
+    }
+}
+
 fn restore_pixels_outside_selection(
     tile_pixels: &mut [u8],
     before: Option<&RasterTile>,
@@ -672,23 +696,23 @@ fn restore_pixels_outside_selection(
     selection_shape: &SelectionShape,
     clip_inverted: bool,
 ) {
-    for local_y in 0..tile_size as usize {
-        for local_x in 0..tile_size as usize {
-            let canvas_x = tile_origin_x + local_x as i32;
-            let canvas_y = tile_origin_y + local_y as i32;
-            let inside = selection_shape.contains_pixel(canvas_x, canvas_y) != clip_inverted;
-            if inside {
-                continue;
-            }
+    let tile_size_usize = tile_size as usize;
 
-            let index = (local_y * tile_size as usize + local_x) * 4;
+    for_each_tile_pixel_outside_selection(
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        selection_shape,
+        clip_inverted,
+        |local_x, local_y| {
+            let index = (local_y * tile_size_usize + local_x) * 4;
             if let Some(before) = before {
                 tile_pixels[index..index + 4].copy_from_slice(&before.pixels[index..index + 4]);
             } else {
                 tile_pixels[index..index + 4].fill(0);
             }
-        }
-    }
+        },
+    );
 }
 
 fn restore_mask_outside_selection(
@@ -700,19 +724,19 @@ fn restore_mask_outside_selection(
     selection_shape: &SelectionShape,
     clip_inverted: bool,
 ) {
-    for local_y in 0..tile_size as usize {
-        for local_x in 0..tile_size as usize {
-            let canvas_x = tile_origin_x + local_x as i32;
-            let canvas_y = tile_origin_y + local_y as i32;
-            let inside = selection_shape.contains_pixel(canvas_x, canvas_y) != clip_inverted;
-            if inside {
-                continue;
-            }
+    let tile_size_usize = tile_size as usize;
 
-            let index = local_y * tile_size as usize + local_x;
+    for_each_tile_pixel_outside_selection(
+        tile_size,
+        tile_origin_x,
+        tile_origin_y,
+        selection_shape,
+        clip_inverted,
+        |local_x, local_y| {
+            let index = local_y * tile_size_usize + local_x;
             tile_alpha[index] = before.map(|tile| tile.alpha[index]).unwrap_or(255);
-        }
-    }
+        },
+    );
 }
 
 impl SimpleTransformTool {
