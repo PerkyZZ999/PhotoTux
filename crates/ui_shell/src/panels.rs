@@ -128,7 +128,41 @@ impl ShellUiState {
 
     pub(super) fn refresh_properties_panel(&self, snapshot: &ShellSnapshot) {
         clear_box_children(&self.properties_body);
-        let editing_mask = snapshot.active_edit_target_name == "Layer Mask";
+        self.append_props_overview_rows(snapshot);
+
+        if snapshot.text.selected || snapshot.text.editing {
+            self.append_props_text_section(snapshot);
+        }
+
+        self.properties_body
+            .append(&self.build_props_mask_banner(snapshot));
+
+        if snapshot.selection_rect.is_some() {
+            self.append_props_selection_rows(snapshot);
+        }
+
+        self.properties_body
+            .append(&self.build_props_opacity_controls());
+        self.properties_body
+            .append(&self.build_props_blend_controls());
+        self.properties_body
+            .append(&self.build_props_mask_controls(snapshot));
+        self.properties_body
+            .append(&self.build_props_target_controls(snapshot));
+        self.properties_body
+            .append(&self.build_props_selection_controls(snapshot));
+        self.properties_body
+            .append(&self.build_props_brush_preset_controls(snapshot));
+        self.append_props_brush_parameter_controls();
+        self.properties_body
+            .append(&self.build_props_pressure_controls(snapshot));
+        self.properties_body
+            .append(&self.build_props_guide_controls(snapshot));
+        self.append_props_transform_controls(snapshot);
+        self.append_props_hint_rows(snapshot);
+    }
+
+    fn append_props_overview_rows(&self, snapshot: &ShellSnapshot) {
         for row in [
             format!("Tool: {}", snapshot.active_tool_name),
             format!(
@@ -169,60 +203,64 @@ impl ShellUiState {
             label.add_css_class("panel-row");
             self.properties_body.append(&label);
         }
+    }
 
-        if snapshot.text.selected || snapshot.text.editing {
-            for row in [
-                format!(
-                    "Text Content: {}",
-                    if snapshot.text.content.is_empty() {
-                        "<empty>"
-                    } else {
-                        snapshot.text.content.as_str()
-                    }
-                ),
-                format!(
-                    "Text Style: {} {}px | Line {}% | Track {}",
-                    snapshot.text.font_family,
-                    snapshot.text.font_size_px,
-                    snapshot.text.line_height_percent,
-                    snapshot.text.letter_spacing
-                ),
-                format!(
-                    "Text Fill: #{:02X}{:02X}{:02X}{:02X} | Align {:?}",
-                    snapshot.text.fill_rgba[0],
-                    snapshot.text.fill_rgba[1],
-                    snapshot.text.fill_rgba[2],
-                    snapshot.text.fill_rgba[3],
-                    snapshot.text.alignment
-                ),
-                format!(
-                    "Text Origin: {}, {}",
-                    snapshot.text.origin_x, snapshot.text.origin_y
-                ),
-            ] {
-                let label = Label::new(Some(&row));
-                label.set_xalign(0.0);
-                label.add_css_class("panel-row");
-                self.properties_body.append(&label);
-            }
-
-            let text_controls = GtkBox::new(Orientation::Horizontal, 6);
-            let edit_text = build_tool_chip_icon_label_button(
-                "text.svg",
-                if snapshot.text.editing {
-                    "Editing Text"
+    fn append_props_text_section(&self, snapshot: &ShellSnapshot) {
+        for row in [
+            format!(
+                "Text Content: {}",
+                if snapshot.text.content.is_empty() {
+                    "<empty>"
                 } else {
-                    "Edit Text"
-                },
-            );
-            edit_text.set_sensitive(snapshot.text.selected && !snapshot.text.editing);
-            {
-                let controller = self.controller.clone();
-                edit_text.connect_clicked(move |_| controller.borrow_mut().begin_text_edit());
-            }
-            text_controls.append(&edit_text);
-            self.properties_body.append(&text_controls);
+                    snapshot.text.content.as_str()
+                }
+            ),
+            format!(
+                "Text Style: {} {}px | Line {}% | Track {}",
+                snapshot.text.font_family,
+                snapshot.text.font_size_px,
+                snapshot.text.line_height_percent,
+                snapshot.text.letter_spacing
+            ),
+            format!(
+                "Text Fill: #{:02X}{:02X}{:02X}{:02X} | Align {:?}",
+                snapshot.text.fill_rgba[0],
+                snapshot.text.fill_rgba[1],
+                snapshot.text.fill_rgba[2],
+                snapshot.text.fill_rgba[3],
+                snapshot.text.alignment
+            ),
+            format!(
+                "Text Origin: {}, {}",
+                snapshot.text.origin_x, snapshot.text.origin_y
+            ),
+        ] {
+            let label = Label::new(Some(&row));
+            label.set_xalign(0.0);
+            label.add_css_class("panel-row");
+            self.properties_body.append(&label);
         }
+
+        let text_controls = GtkBox::new(Orientation::Horizontal, 6);
+        let edit_text = build_tool_chip_icon_label_button(
+            "text.svg",
+            if snapshot.text.editing {
+                "Editing Text"
+            } else {
+                "Edit Text"
+            },
+        );
+        edit_text.set_sensitive(snapshot.text.selected && !snapshot.text.editing);
+        {
+            let controller = self.controller.clone();
+            edit_text.connect_clicked(move |_| controller.borrow_mut().begin_text_edit());
+        }
+        text_controls.append(&edit_text);
+        self.properties_body.append(&text_controls);
+    }
+
+    fn build_props_mask_banner(&self, snapshot: &ShellSnapshot) -> GtkBox {
+        let editing_mask = snapshot.active_edit_target_name == "Layer Mask";
 
         let mask_banner = GtkBox::new(Orientation::Vertical, 6);
         mask_banner.add_css_class("mask-state-banner");
@@ -289,61 +327,67 @@ impl ShellUiState {
         banner_hint.set_wrap(true);
         banner_hint.add_css_class("mask-state-hint");
         mask_banner.append(&banner_hint);
-        self.properties_body.append(&mask_banner);
 
-        if let Some(selection) = snapshot.selection_rect {
-            for row in [
-                format!(
-                    "Selection: {},{}  {}x{}",
-                    selection.x, selection.y, selection.width, selection.height
-                ),
-                format!(
-                    "Selection Mode: {}",
-                    if snapshot.selection_inverted {
-                        "Inverted"
-                    } else {
-                        "Normal"
-                    }
-                ),
-            ] {
-                let label = Label::new(Some(&row));
-                label.set_xalign(0.0);
-                label.add_css_class("panel-row");
-                self.properties_body.append(&label);
-            }
+        mask_banner
+    }
 
-            if snapshot.transform_active {
-                let label = Label::new(Some(&format!(
-                    "Transform: {}% | X {}% | Y {}% | {}deg",
-                    snapshot.transform_scale_percent,
-                    snapshot.transform_scale_x_percent,
-                    snapshot.transform_scale_y_percent,
-                    snapshot.transform_rotation_degrees
-                )));
-                label.set_xalign(0.0);
-                label.add_css_class("panel-row");
-                self.properties_body.append(&label);
-            }
-
-            let guides_label = Label::new(Some(&format!(
-                "Guides: {} ({}) | Snapping {}",
-                snapshot.guide_count,
-                if snapshot.guides_visible {
-                    "Visible"
+    fn append_props_selection_rows(&self, snapshot: &ShellSnapshot) {
+        let Some(selection) = snapshot.selection_rect else {
+            return;
+        };
+        for row in [
+            format!(
+                "Selection: {},{}  {}x{}",
+                selection.x, selection.y, selection.width, selection.height
+            ),
+            format!(
+                "Selection Mode: {}",
+                if snapshot.selection_inverted {
+                    "Inverted"
                 } else {
-                    "Hidden"
-                },
-                if snapshot.snapping_enabled {
-                    "On"
-                } else {
-                    "Off"
+                    "Normal"
                 }
-            )));
-            guides_label.set_xalign(0.0);
-            guides_label.add_css_class("panel-row");
-            self.properties_body.append(&guides_label);
+            ),
+        ] {
+            let label = Label::new(Some(&row));
+            label.set_xalign(0.0);
+            label.add_css_class("panel-row");
+            self.properties_body.append(&label);
         }
 
+        if snapshot.transform_active {
+            let label = Label::new(Some(&format!(
+                "Transform: {}% | X {}% | Y {}% | {}deg",
+                snapshot.transform_scale_percent,
+                snapshot.transform_scale_x_percent,
+                snapshot.transform_scale_y_percent,
+                snapshot.transform_rotation_degrees
+            )));
+            label.set_xalign(0.0);
+            label.add_css_class("panel-row");
+            self.properties_body.append(&label);
+        }
+
+        let guides_label = Label::new(Some(&format!(
+            "Guides: {} ({}) | Snapping {}",
+            snapshot.guide_count,
+            if snapshot.guides_visible {
+                "Visible"
+            } else {
+                "Hidden"
+            },
+            if snapshot.snapping_enabled {
+                "On"
+            } else {
+                "Off"
+            }
+        )));
+        guides_label.set_xalign(0.0);
+        guides_label.add_css_class("panel-row");
+        self.properties_body.append(&guides_label);
+    }
+
+    fn build_props_opacity_controls(&self) -> GtkBox {
         let controls = GtkBox::new(Orientation::Horizontal, 6);
         for button in [
             wired_icon_chip(
@@ -361,8 +405,10 @@ impl ShellUiState {
         ] {
             controls.append(&button);
         }
-        self.properties_body.append(&controls);
+        controls
+    }
 
+    fn build_props_blend_controls(&self) -> GtkBox {
         let blend_controls = GtkBox::new(Orientation::Horizontal, 6);
         for button in [
             wired_icon_chip(
@@ -380,8 +426,10 @@ impl ShellUiState {
         ] {
             blend_controls.append(&button);
         }
-        self.properties_body.append(&blend_controls);
+        blend_controls
+    }
 
+    fn build_props_mask_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let mask_controls = GtkBox::new(Orientation::Horizontal, 6);
 
         let add_mask = build_tool_chip_icon_label_button("add-line.svg", "Add Mask");
@@ -421,9 +469,13 @@ impl ShellUiState {
                 .connect_clicked(move |_| controller.borrow_mut().remove_active_layer_mask());
         }
         mask_controls.append(&remove_mask);
-        self.properties_body.append(&mask_controls);
 
+        mask_controls
+    }
+
+    fn build_props_target_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let target_controls = GtkBox::new(Orientation::Horizontal, 6);
+
         let edit_pixels = build_tool_chip_icon_label_button("edit-line.svg", "Edit Layer");
         edit_pixels.set_sensitive(
             !snapshot.text.selected && snapshot.active_edit_target_name != "Layer Pixels",
@@ -446,9 +498,13 @@ impl ShellUiState {
             edit_mask.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_mask());
         }
         target_controls.append(&edit_mask);
-        self.properties_body.append(&target_controls);
 
+        target_controls
+    }
+
+    fn build_props_selection_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let selection_controls = GtkBox::new(Orientation::Horizontal, 6);
+
         let clear_selection =
             build_tool_chip_icon_label_button("close-line.svg", "Clear Selection");
         clear_selection.set_tooltip_text(Some("Clear selection (Ctrl+D)"));
@@ -468,33 +524,37 @@ impl ShellUiState {
             invert_selection.connect_clicked(move |_| controller.borrow_mut().invert_selection());
         }
         selection_controls.append(&invert_selection);
-        self.properties_body.append(&selection_controls);
 
+        selection_controls
+    }
+
+    fn build_props_brush_preset_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let brush_preset_controls = GtkBox::new(Orientation::Horizontal, 6);
-        let preset_prev = wired_icon_chip(
+
+        brush_preset_controls.append(&wired_icon_chip(
             &self.controller,
             "arrow-go-back-line.svg",
             "Previous brush preset",
             |controller| controller.previous_brush_preset(),
-        );
-        brush_preset_controls.append(&preset_prev);
+        ));
 
         let preset_current = Label::new(Some(&format!("Preset: {}", snapshot.brush_preset_name)));
         preset_current.set_xalign(0.0);
         preset_current.add_css_class("panel-row");
         brush_preset_controls.append(&preset_current);
 
-        let preset_next = wired_icon_chip(
+        brush_preset_controls.append(&wired_icon_chip(
             &self.controller,
             "arrow-go-forward-line.svg",
             "Next brush preset",
             |controller| controller.next_brush_preset(),
-        );
-        brush_preset_controls.append(&preset_next);
+        ));
 
-        self.properties_body.append(&brush_preset_controls);
+        brush_preset_controls
+    }
 
-        let brush_controls_row_one = GtkBox::new(Orientation::Horizontal, 6);
+    fn append_props_brush_parameter_controls(&self) {
+        let row_one = GtkBox::new(Orientation::Horizontal, 6);
         let row_one_btns: [IconChipAction; 4] = [
             ("subtract-line.svg", "Decrease brush radius", |c| {
                 c.decrease_brush_radius()
@@ -510,11 +570,11 @@ impl ShellUiState {
             }),
         ];
         for (icon, tip, action) in row_one_btns {
-            brush_controls_row_one.append(&wired_icon_chip(&self.controller, icon, tip, action));
+            row_one.append(&wired_icon_chip(&self.controller, icon, tip, action));
         }
-        self.properties_body.append(&brush_controls_row_one);
+        self.properties_body.append(&row_one);
 
-        let brush_controls_row_two = GtkBox::new(Orientation::Horizontal, 6);
+        let row_two = GtkBox::new(Orientation::Horizontal, 6);
         let row_two_btns: [IconChipAction; 4] = [
             ("subtract-line.svg", "Decrease brush spacing", |c| {
                 c.decrease_brush_spacing()
@@ -530,10 +590,12 @@ impl ShellUiState {
             }),
         ];
         for (icon, tip, action) in row_two_btns {
-            brush_controls_row_two.append(&wired_icon_chip(&self.controller, icon, tip, action));
+            row_two.append(&wired_icon_chip(&self.controller, icon, tip, action));
         }
-        self.properties_body.append(&brush_controls_row_two);
+        self.properties_body.append(&row_two);
+    }
 
+    fn build_props_pressure_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let pressure_controls = GtkBox::new(Orientation::Horizontal, 6);
 
         let pressure_size = Button::with_label(if snapshot.pressure_size_enabled {
@@ -565,8 +627,10 @@ impl ShellUiState {
         }
         pressure_controls.append(&pressure_opacity);
 
-        self.properties_body.append(&pressure_controls);
+        pressure_controls
+    }
 
+    fn build_props_guide_controls(&self, snapshot: &ShellSnapshot) -> GtkBox {
         let guide_controls = GtkBox::new(Orientation::Horizontal, 6);
 
         let add_h_guide = Button::with_label("Guide H");
@@ -618,8 +682,11 @@ impl ShellUiState {
                 .connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
         }
         guide_controls.append(&toggle_snapping);
-        self.properties_body.append(&guide_controls);
 
+        guide_controls
+    }
+
+    fn append_props_transform_controls(&self, snapshot: &ShellSnapshot) {
         let transform_controls = GtkBox::new(Orientation::Horizontal, 6);
 
         let begin_transform = Button::with_label("Start Xform");
@@ -711,7 +778,9 @@ impl ShellUiState {
         }
         transform_commit_row.append(&cancel_transform);
         self.properties_body.append(&transform_commit_row);
+    }
 
+    fn append_props_hint_rows(&self, snapshot: &ShellSnapshot) {
         let hints = [
             shell_status_hint(snapshot),
             "Save: Ctrl+S | Save As: Ctrl+Shift+S | Open: Ctrl+O".to_string(),
