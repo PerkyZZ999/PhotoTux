@@ -4,50 +4,28 @@ use uuid::Uuid;
 pub const APP_NAME: &str = "PhotoTux";
 pub const DEFAULT_TILE_SIZE: u32 = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DocumentId(pub Uuid);
+macro_rules! define_uuid_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct $name(pub Uuid);
 
-impl DocumentId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
+        impl $name {
+            pub fn new() -> Self {
+                Self(Uuid::new_v4())
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
 }
 
-impl Default for DocumentId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LayerId(pub Uuid);
-
-impl LayerId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for LayerId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GroupId(pub Uuid);
-
-impl GroupId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for GroupId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+define_uuid_id!(DocumentId);
+define_uuid_id!(LayerId);
+define_uuid_id!(GroupId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanvasSize {
