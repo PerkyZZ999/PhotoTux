@@ -545,6 +545,28 @@ pub struct MaskTilePayload {
     pub alpha: Vec<u8>,
 }
 
+fn validate_manifest_layer(
+    known_layer_ids: &mut std::collections::HashSet<LayerId>,
+    layer_id: LayerId,
+    opacity_percent: u8,
+    layer_kind: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        known_layer_ids.insert(layer_id),
+        "project manifest references {} layer {} more than once",
+        layer_kind,
+        layer_id.0
+    );
+    anyhow::ensure!(
+        opacity_percent <= 100,
+        "{} layer {} has invalid opacity {}",
+        layer_kind,
+        layer_id.0,
+        opacity_percent
+    );
+    Ok(())
+}
+
 fn validate_project_file(project_file: &ProjectFile) -> anyhow::Result<()> {
     let manifest = &project_file.manifest;
     anyhow::ensure!(
@@ -558,30 +580,20 @@ fn validate_project_file(project_file: &ProjectFile) -> anyhow::Result<()> {
 
     let mut known_layer_ids = std::collections::HashSet::new();
     for layer in &manifest.layers {
-        anyhow::ensure!(
-            known_layer_ids.insert(layer.id),
-            "project manifest references raster layer {} more than once",
-            layer.id.0
-        );
-        anyhow::ensure!(
-            layer.opacity_percent <= 100,
-            "raster layer {} has invalid opacity {}",
-            layer.id.0,
-            layer.opacity_percent
-        );
+        validate_manifest_layer(
+            &mut known_layer_ids,
+            layer.id,
+            layer.opacity_percent,
+            "raster",
+        )?;
     }
     for layer in &manifest.text_layers {
-        anyhow::ensure!(
-            known_layer_ids.insert(layer.id),
-            "project manifest references text layer {} more than once",
-            layer.id.0
-        );
-        anyhow::ensure!(
-            layer.opacity_percent <= 100,
-            "text layer {} has invalid opacity {}",
-            layer.id.0,
-            layer.opacity_percent
-        );
+        validate_manifest_layer(
+            &mut known_layer_ids,
+            layer.id,
+            layer.opacity_percent,
+            "text",
+        )?;
     }
 
     validate_manifest_group_nodes(&manifest.layer_hierarchy)?;
