@@ -156,62 +156,15 @@ fn apply_round_dab(
     dab: BrushDab,
     blend_mode: BrushBlendMode,
 ) -> bool {
-    let BrushTileContext {
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        clip_rect,
-        clip_inverted,
-    } = context;
-    if tile_pixels.len() != tile_size as usize * tile_size as usize * 4 || dab.radius <= 0.0 {
+    let Some(setup) = RoundDabSetup::new(context, dab, tile_pixels.len(), 4) else {
         return false;
-    }
-
-    let tile_min_x = tile_origin_x as f32;
-    let tile_min_y = tile_origin_y as f32;
-    let tile_max_x = tile_min_x + tile_size as f32;
-    let tile_max_y = tile_min_y + tile_size as f32;
-
-    if center_x + dab.radius < tile_min_x
-        || center_y + dab.radius < tile_min_y
-        || center_x - dab.radius >= tile_max_x
-        || center_y - dab.radius >= tile_max_y
-    {
-        return false;
-    }
-
-    let start_x = ((center_x - dab.radius).floor().max(tile_min_x)) as i32;
-    let end_x = ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as i32;
-    let start_y = ((center_y - dab.radius).floor().max(tile_min_y)) as i32;
-    let end_y = ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as i32;
-
-    let hard_radius = dab.radius * dab.hardness;
-    let soft_width = (dab.radius - hard_radius).max(0.000_1);
+    };
     let mut changed = false;
 
-    for canvas_y in start_y..=end_y {
-        for canvas_x in start_x..=end_x {
-            if !pixel_is_within_clip(canvas_x, canvas_y, clip_rect, clip_inverted) {
+    for canvas_y in setup.start_y..=setup.end_y {
+        for canvas_x in setup.start_x..=setup.end_x {
+            let Some(coverage) = setup.coverage_at(canvas_x, canvas_y) else {
                 continue;
-            }
-
-            let pixel_center_x = canvas_x as f32 + 0.5;
-            let pixel_center_y = canvas_y as f32 + 0.5;
-            let delta_x = pixel_center_x - center_x;
-            let delta_y = pixel_center_y - center_y;
-            let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
-
-            if distance > dab.radius {
-                continue;
-            }
-
-            let coverage = if distance <= hard_radius {
-                1.0
-            } else {
-                let t = ((distance - hard_radius) / soft_width).clamp(0.0, 1.0);
-                1.0 - (t * t * (3.0 - 2.0 * t))
             };
             let alpha =
                 (dab.color[3] as f32 / 255.0) * dab.opacity * dab.flow * coverage.clamp(0.0, 1.0);
@@ -220,9 +173,7 @@ fn apply_round_dab(
                 continue;
             }
 
-            let local_x = (canvas_x - tile_origin_x) as usize;
-            let local_y = (canvas_y - tile_origin_y) as usize;
-            let index = (local_y * tile_size as usize + local_x) * 4;
+            let index = setup.pixel_index(canvas_x, canvas_y, 4);
 
             blend_pixel(
                 &mut tile_pixels[index..index + 4],
@@ -243,71 +194,22 @@ fn apply_round_mask_dab(
     dab: BrushDab,
     reveal: bool,
 ) -> bool {
-    let BrushTileContext {
-        tile_size,
-        tile_origin_x,
-        tile_origin_y,
-        center_x,
-        center_y,
-        clip_rect,
-        clip_inverted,
-    } = context;
-    if tile_alpha.len() != tile_size as usize * tile_size as usize || dab.radius <= 0.0 {
+    let Some(setup) = RoundDabSetup::new(context, dab, tile_alpha.len(), 1) else {
         return false;
-    }
-
-    let tile_min_x = tile_origin_x as f32;
-    let tile_min_y = tile_origin_y as f32;
-    let tile_max_x = tile_min_x + tile_size as f32;
-    let tile_max_y = tile_min_y + tile_size as f32;
-
-    if center_x + dab.radius < tile_min_x
-        || center_y + dab.radius < tile_min_y
-        || center_x - dab.radius >= tile_max_x
-        || center_y - dab.radius >= tile_max_y
-    {
-        return false;
-    }
-
-    let start_x = ((center_x - dab.radius).floor().max(tile_min_x)) as i32;
-    let end_x = ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as i32;
-    let start_y = ((center_y - dab.radius).floor().max(tile_min_y)) as i32;
-    let end_y = ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as i32;
-
-    let hard_radius = dab.radius * dab.hardness;
-    let soft_width = (dab.radius - hard_radius).max(0.000_1);
+    };
     let mut changed = false;
 
-    for canvas_y in start_y..=end_y {
-        for canvas_x in start_x..=end_x {
-            if !pixel_is_within_clip(canvas_x, canvas_y, clip_rect, clip_inverted) {
+    for canvas_y in setup.start_y..=setup.end_y {
+        for canvas_x in setup.start_x..=setup.end_x {
+            let Some(coverage) = setup.coverage_at(canvas_x, canvas_y) else {
                 continue;
-            }
-
-            let pixel_center_x = canvas_x as f32 + 0.5;
-            let pixel_center_y = canvas_y as f32 + 0.5;
-            let delta_x = pixel_center_x - center_x;
-            let delta_y = pixel_center_y - center_y;
-            let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
-
-            if distance > dab.radius {
-                continue;
-            }
-
-            let coverage = if distance <= hard_radius {
-                1.0
-            } else {
-                let t = ((distance - hard_radius) / soft_width).clamp(0.0, 1.0);
-                1.0 - (t * t * (3.0 - 2.0 * t))
             };
             let alpha = (dab.opacity * dab.flow * coverage.clamp(0.0, 1.0)).clamp(0.0, 1.0);
             if alpha <= 0.0 {
                 continue;
             }
 
-            let local_x = (canvas_x - tile_origin_x) as usize;
-            let local_y = (canvas_y - tile_origin_y) as usize;
-            let index = local_y * tile_size as usize + local_x;
+            let index = setup.pixel_index(canvas_x, canvas_y, 1);
             let before = tile_alpha[index];
             let target = if reveal { 255.0 } else { 0.0 };
             let after = (before as f32 * (1.0 - alpha) + target * alpha)
@@ -322,6 +224,106 @@ fn apply_round_mask_dab(
     }
 
     changed
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoundDabSetup {
+    tile_size: u32,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    center_x: f32,
+    center_y: f32,
+    clip_rect: Option<CanvasRect>,
+    clip_inverted: bool,
+    radius: f32,
+    hard_radius: f32,
+    soft_width: f32,
+    start_x: i32,
+    end_x: i32,
+    start_y: i32,
+    end_y: i32,
+}
+
+impl RoundDabSetup {
+    fn new(
+        context: BrushTileContext,
+        dab: BrushDab,
+        buffer_len: usize,
+        pixel_stride: usize,
+    ) -> Option<Self> {
+        let BrushTileContext {
+            tile_size,
+            tile_origin_x,
+            tile_origin_y,
+            center_x,
+            center_y,
+            clip_rect,
+            clip_inverted,
+        } = context;
+        if buffer_len != tile_size as usize * tile_size as usize * pixel_stride || dab.radius <= 0.0
+        {
+            return None;
+        }
+
+        let tile_min_x = tile_origin_x as f32;
+        let tile_min_y = tile_origin_y as f32;
+        let tile_max_x = tile_min_x + tile_size as f32;
+        let tile_max_y = tile_min_y + tile_size as f32;
+
+        if center_x + dab.radius < tile_min_x
+            || center_y + dab.radius < tile_min_y
+            || center_x - dab.radius >= tile_max_x
+            || center_y - dab.radius >= tile_max_y
+        {
+            return None;
+        }
+
+        Some(Self {
+            tile_size,
+            tile_origin_x,
+            tile_origin_y,
+            center_x,
+            center_y,
+            clip_rect,
+            clip_inverted,
+            radius: dab.radius,
+            hard_radius: dab.radius * dab.hardness,
+            soft_width: (dab.radius - dab.radius * dab.hardness).max(0.000_1),
+            start_x: ((center_x - dab.radius).floor().max(tile_min_x)) as i32,
+            end_x: ((center_x + dab.radius).ceil().min(tile_max_x - 1.0)) as i32,
+            start_y: ((center_y - dab.radius).floor().max(tile_min_y)) as i32,
+            end_y: ((center_y + dab.radius).ceil().min(tile_max_y - 1.0)) as i32,
+        })
+    }
+
+    fn coverage_at(&self, canvas_x: i32, canvas_y: i32) -> Option<f32> {
+        if !pixel_is_within_clip(canvas_x, canvas_y, self.clip_rect, self.clip_inverted) {
+            return None;
+        }
+
+        let pixel_center_x = canvas_x as f32 + 0.5;
+        let pixel_center_y = canvas_y as f32 + 0.5;
+        let delta_x = pixel_center_x - self.center_x;
+        let delta_y = pixel_center_y - self.center_y;
+        let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
+
+        if distance > self.radius {
+            return None;
+        }
+
+        if distance <= self.hard_radius {
+            return Some(1.0);
+        }
+
+        let t = ((distance - self.hard_radius) / self.soft_width).clamp(0.0, 1.0);
+        Some(1.0 - (t * t * (3.0 - 2.0 * t)))
+    }
+
+    fn pixel_index(&self, canvas_x: i32, canvas_y: i32, pixel_stride: usize) -> usize {
+        let local_x = (canvas_x - self.tile_origin_x) as usize;
+        let local_y = (canvas_y - self.tile_origin_y) as usize;
+        (local_y * self.tile_size as usize + local_x) * pixel_stride
+    }
 }
 
 fn pixel_is_within_clip(
