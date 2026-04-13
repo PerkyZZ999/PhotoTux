@@ -371,6 +371,37 @@ fn copy_mapped_pixels(
     pixels
 }
 
+fn viewport_canvas_point(
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    canvas_x: i32,
+    canvas_y: i32,
+) -> (i32, i32) {
+    let viewport_x = (viewport_state.pan_x * scale_factor + canvas_x as f32 * viewport_state.zoom)
+        .round() as i32;
+    let viewport_y = (viewport_state.pan_y * scale_factor + canvas_y as f32 * viewport_state.zoom)
+        .round() as i32;
+    (viewport_x, viewport_y)
+}
+
+fn viewport_canvas_length(length: u32, zoom: f32) -> i32 {
+    (length as f32 * zoom).round().max(1.0) as i32
+}
+
+fn viewport_canvas_bounds(
+    viewport_state: ViewportState,
+    scale_factor: f32,
+    canvas_x: i32,
+    canvas_y: i32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (i32, i32, i32, i32) {
+    let (left, top) = viewport_canvas_point(viewport_state, scale_factor, canvas_x, canvas_y);
+    let right = left + viewport_canvas_length(canvas_width, viewport_state.zoom);
+    let bottom = top + viewport_canvas_length(canvas_height, viewport_state.zoom);
+    (left, top, right, bottom)
+}
+
 fn draw_canvas_raster(
     pixels: &mut [u8],
     frame_width: u32,
@@ -379,16 +410,14 @@ fn draw_canvas_raster(
     scale_factor: f32,
     canvas_raster: &CanvasRaster,
 ) {
-    let left = (viewport_state.pan_x * scale_factor).round() as i32;
-    let top = (viewport_state.pan_y * scale_factor).round() as i32;
-    let canvas_width = (canvas_raster.size.width as f32 * viewport_state.zoom)
-        .round()
-        .max(1.0) as i32;
-    let canvas_height = (canvas_raster.size.height as f32 * viewport_state.zoom)
-        .round()
-        .max(1.0) as i32;
-    let right = left + canvas_width;
-    let bottom = top + canvas_height;
+    let (left, top, right, bottom) = viewport_canvas_bounds(
+        viewport_state,
+        scale_factor,
+        0,
+        0,
+        canvas_raster.size.width,
+        canvas_raster.size.height,
+    );
 
     for y in top.max(0)..bottom.min(frame_height as i32) {
         for x in left.max(0)..right.min(frame_width as i32) {
@@ -448,18 +477,14 @@ fn draw_overlay_rect(
     scale_factor: f32,
     overlay: CanvasOverlayRect,
 ) {
-    let left = (viewport_state.pan_x * scale_factor + overlay.rect.x as f32 * viewport_state.zoom)
-        .round() as i32;
-    let top = (viewport_state.pan_y * scale_factor + overlay.rect.y as f32 * viewport_state.zoom)
-        .round() as i32;
-    let width = (overlay.rect.width as f32 * viewport_state.zoom)
-        .round()
-        .max(1.0) as i32;
-    let height = (overlay.rect.height as f32 * viewport_state.zoom)
-        .round()
-        .max(1.0) as i32;
-    let right = left + width;
-    let bottom = top + height;
+    let (left, top, right, bottom) = viewport_canvas_bounds(
+        viewport_state,
+        scale_factor,
+        overlay.rect.x,
+        overlay.rect.y,
+        overlay.rect.width,
+        overlay.rect.height,
+    );
 
     if let Some(fill) = overlay.fill_rgba {
         for y in top.max(0)..bottom.min(frame_height as i32) {
@@ -513,14 +538,7 @@ fn draw_overlay_path(
     let mut transformed = overlay
         .points
         .iter()
-        .map(|&(x, y)| {
-            (
-                (viewport_state.pan_x * scale_factor + x as f32 * viewport_state.zoom).round()
-                    as i32,
-                (viewport_state.pan_y * scale_factor + y as f32 * viewport_state.zoom).round()
-                    as i32,
-            )
-        })
+        .map(|&(x, y)| viewport_canvas_point(viewport_state, scale_factor, x, y))
         .collect::<Vec<_>>();
 
     if overlay.closed {
