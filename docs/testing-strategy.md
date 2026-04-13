@@ -102,6 +102,9 @@ Current implemented fixture set:
 - masked compositing and grouped-hierarchy scenes in `file_io` tests
 - lasso-aware transform parity fixture in `app_core` tests
 - guide-snapping interaction fixtures in `app_core` tests
+- single-text-layer editing scene in `app_core` tests
+- mixed raster-plus-text design scene in `app_core` tests
+- text export-versus-viewport parity scene in `app_core` tests
 
 Current manual validation companion docs:
 

@@ -1,13 +1,15 @@
 use anyhow::Result;
-use common::{APP_NAME, CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId};
+use common::{APP_NAME, CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, GroupId, LayerId};
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, CssProvider, Dialog,
+    ComboBoxText, Entry,
     EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
     FileChooserAction, FileChooserNative, FileFilter, GestureDrag, GestureStylus, HeaderBar, Image,
     Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
     ResponseType, Separator, gdk,
+    SpinButton,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -24,11 +26,13 @@ mod ui_templates;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
+    pub layer_id: Option<LayerId>,
     pub index: Option<usize>,
     pub group_id: Option<GroupId>,
     pub name: String,
     pub depth: usize,
     pub is_group: bool,
+    pub is_text: bool,
     pub visible: bool,
     pub opacity_percent: u8,
     pub has_mask: bool,
@@ -44,10 +48,36 @@ pub enum ShellToolKind {
     RectangularMarquee,
     Lasso,
     Transform,
+    Text,
     Brush,
     Eraser,
     Hand,
     Zoom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellTextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellTextSnapshot {
+    pub selected: bool,
+    pub editing: bool,
+    pub request_id: Option<u64>,
+    pub is_new_layer: bool,
+    pub layer_name: String,
+    pub content: String,
+    pub font_family: String,
+    pub font_size_px: u32,
+    pub line_height_percent: u32,
+    pub letter_spacing: i32,
+    pub fill_rgba: [u8; 4],
+    pub alignment: ShellTextAlignment,
+    pub origin_x: i32,
+    pub origin_y: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +93,7 @@ impl ShellToolKind {
             Self::RectangularMarquee => "Rectangular Marquee",
             Self::Lasso => "Lasso Tool",
             Self::Transform => "Transform Tool",
+            Self::Text => "Text Tool",
             Self::Brush => "Brush Tool",
             Self::Eraser => "Eraser Tool",
             Self::Hand => "Hand Tool",
@@ -114,6 +145,7 @@ pub struct ShellSnapshot {
     pub can_move_active_layer_into_selected_group: bool,
     pub can_move_active_layer_out_of_group: bool,
     pub active_layer_bounds: Option<CanvasRect>,
+    pub can_begin_transform: bool,
     pub transform_preview_rect: Option<CanvasRect>,
     pub transform_active: bool,
     pub transform_scale_percent: u32,
@@ -143,6 +175,7 @@ pub struct ShellSnapshot {
     pub can_undo: bool,
     pub can_redo: bool,
     pub history_entries: Vec<String>,
+    pub text: ShellTextSnapshot,
 }
 
 pub trait ShellController {
@@ -156,9 +189,9 @@ pub trait ShellController {
     fn toggle_active_layer_mask_enabled(&mut self);
     fn edit_active_layer_pixels(&mut self);
     fn edit_active_layer_mask(&mut self);
-    fn select_layer(&mut self, index: usize);
+    fn select_layer(&mut self, layer_id: LayerId);
     fn select_group(&mut self, group_id: GroupId);
-    fn toggle_layer_visibility(&mut self, index: usize);
+    fn toggle_layer_visibility(&mut self, layer_id: LayerId);
     fn toggle_group_visibility(&mut self, group_id: GroupId);
     fn create_group_from_active_layer(&mut self);
     fn ungroup_selected_group(&mut self);
@@ -215,6 +248,19 @@ pub trait ShellController {
     fn apply_destructive_filter(&mut self, filter: DestructiveFilterKind);
     fn poll_background_tasks(&mut self);
     fn select_tool(&mut self, tool: ShellToolKind);
+    fn begin_text_edit(&mut self);
+    fn update_text_session(
+        &mut self,
+        content: String,
+        font_family: String,
+        font_size_px: u32,
+        line_height_percent: u32,
+        letter_spacing: i32,
+        fill_rgba: [u8; 4],
+        alignment: ShellTextAlignment,
+    );
+    fn commit_text_session(&mut self);
+    fn cancel_text_session(&mut self);
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32);
     fn begin_canvas_interaction_with_pressure(
         &mut self,
@@ -534,10 +580,9 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         let cancel_transform = cancel_transform.clone();
         popover.connect_show(move |_| {
             let snapshot = shell_state.controller.borrow().snapshot();
-            let has_active_bounds = snapshot.active_layer_bounds.is_some();
             let transform_active = snapshot.transform_active;
 
-            start_transform.set_sensitive(has_active_bounds && !transform_active);
+            start_transform.set_sensitive(snapshot.can_begin_transform && !transform_active);
             scale_up.set_sensitive(transform_active);
             scale_down.set_sensitive(transform_active);
             commit_transform.set_sensitive(transform_active);
@@ -699,16 +744,17 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
                 .unwrap_or(0);
             let has_multiple_layers = layer_count > 1;
             let has_mask = snapshot.active_layer_has_mask;
+            let text_selected = snapshot.text.selected;
 
-            duplicate.set_sensitive(layer_count > 0);
+            duplicate.set_sensitive(layer_count > 0 && !text_selected);
             delete.set_sensitive(has_multiple_layers);
-            add_mask.set_sensitive(layer_count > 0 && !has_mask);
-            remove_mask.set_sensitive(has_mask);
-            toggle_mask.set_sensitive(has_mask);
-            edit_pixels.set_sensitive(layer_count > 0);
-            edit_mask.set_sensitive(has_mask);
-            move_up.set_sensitive(has_multiple_layers && active_index + 1 < layer_count);
-            move_down.set_sensitive(has_multiple_layers && active_index > 0);
+            add_mask.set_sensitive(layer_count > 0 && !text_selected && !has_mask);
+            remove_mask.set_sensitive(!text_selected && has_mask);
+            toggle_mask.set_sensitive(!text_selected && has_mask);
+            edit_pixels.set_sensitive(layer_count > 0 && !text_selected);
+            edit_mask.set_sensitive(!text_selected && has_mask);
+            move_up.set_sensitive(!text_selected && has_multiple_layers && active_index + 1 < layer_count);
+            move_down.set_sensitive(!text_selected && has_multiple_layers && active_index > 0);
         });
     }
 
@@ -1227,7 +1273,7 @@ fn build_help_menu_button(window: &ApplicationWindow) -> MenuButton {
                 "Keyboard Shortcuts",
                 "Core keyboard shortcuts",
                 Some(
-                    "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform\nEsc Cancel Transform or Clear Selection",
+                    "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nI Text Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform Or Text\nEsc Cancel Transform, Text, Or Clear Selection",
                 ),
             );
         });
@@ -1582,6 +1628,11 @@ fn build_left_tool_rail(
             ShellToolKind::Transform.label(),
         ),
         (
+            ShellToolKind::Text,
+            "layout-column-line.svg",
+            ShellToolKind::Text.label(),
+        ),
+        (
             ShellToolKind::Brush,
             "brush-2-line.svg",
             ShellToolKind::Brush.label(),
@@ -1601,7 +1652,7 @@ fn build_left_tool_rail(
     .into_iter()
     .enumerate()
     {
-        if index == 4 || index == 6 {
+        if index == 5 || index == 7 {
             let separator = Separator::new(Orientation::Horizontal);
             separator.add_css_class("tool-separator");
             rail.append(&separator);
@@ -1871,6 +1922,8 @@ struct ShellUiState {
     allow_close_once: Cell<bool>,
     prompted_recovery_path: RefCell<Option<PathBuf>>,
     presented_import_report_id: Cell<Option<u64>>,
+    presented_text_request_id: Cell<Option<u64>>,
+    text_dialog_visible: Cell<bool>,
     canvas_state: Rc<RefCell<CanvasHostState>>,
     automation_shortcuts_enabled: bool,
     tool_options_bar: GtkBox,
@@ -1932,6 +1985,8 @@ impl ShellUiState {
             allow_close_once: Cell::new(false),
             prompted_recovery_path: RefCell::new(None),
             presented_import_report_id: Cell::new(None),
+            presented_text_request_id: Cell::new(None),
+            text_dialog_visible: Cell::new(false),
             canvas_state,
             automation_shortcuts_enabled,
             tool_options_bar,
@@ -1982,9 +2037,9 @@ impl ShellUiState {
                 return true;
             }
             if matches!(key, gdk::Key::F4)
-                && let Some(index) = self.active_layer_index()
+                && let Some(layer_id) = self.selected_layer_id()
             {
-                self.controller.borrow_mut().toggle_layer_visibility(index);
+                self.controller.borrow_mut().toggle_layer_visibility(layer_id);
                 return true;
             }
             if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
@@ -2056,9 +2111,8 @@ impl ShellUiState {
                 }
                 Some(digit @ '1'..='9') => {
                     let layer_index = (digit as u8 - b'1') as usize;
-                    let layer_count = self.controller.borrow().snapshot().layers.len();
-                    if layer_index < layer_count {
-                        self.controller.borrow_mut().select_layer(layer_index);
+                    if let Some(layer_id) = self.nth_layer_id(layer_index) {
+                        self.controller.borrow_mut().select_layer(layer_id);
                         return true;
                     }
                 }
@@ -2129,13 +2183,22 @@ impl ShellUiState {
 
         match key {
             gdk::Key::Return | gdk::Key::KP_Enter => {
-                if self.controller.borrow().snapshot().transform_active {
+                let snapshot = self.controller.borrow().snapshot();
+                if snapshot.text.editing {
+                    self.controller.borrow_mut().commit_text_session();
+                    return true;
+                }
+                if snapshot.transform_active {
                     self.controller.borrow_mut().commit_transform();
                     return true;
                 }
             }
             gdk::Key::Escape => {
                 let snapshot = self.controller.borrow().snapshot();
+                if snapshot.text.editing {
+                    self.controller.borrow_mut().cancel_text_session();
+                    return true;
+                }
                 if snapshot.transform_active {
                     self.controller.borrow_mut().cancel_transform();
                     return true;
@@ -2161,6 +2224,10 @@ impl ShellUiState {
                 .controller
                 .borrow_mut()
                 .select_tool(ShellToolKind::Lasso),
+            Some('i') => self
+                .controller
+                .borrow_mut()
+                .select_tool(ShellToolKind::Text),
             Some('t') => self
                 .controller
                 .borrow_mut()
@@ -2187,13 +2254,24 @@ impl ShellUiState {
         true
     }
 
-    fn active_layer_index(&self) -> Option<usize> {
+    fn selected_layer_id(&self) -> Option<LayerId> {
         self.controller
             .borrow()
             .snapshot()
             .layers
             .iter()
-            .position(|layer| layer.is_active)
+            .find(|layer| layer.is_selected || layer.is_active)
+            .and_then(|layer| layer.layer_id)
+    }
+
+    fn nth_layer_id(&self, index: usize) -> Option<LayerId> {
+        self.controller
+            .borrow()
+            .snapshot()
+            .layers
+            .iter()
+            .filter_map(|layer| layer.layer_id)
+            .nth(index)
     }
 
     fn attach_window(&self, window: ApplicationWindow) {
@@ -2317,6 +2395,171 @@ impl ShellUiState {
         });
 
         dialog.show();
+    }
+
+    fn present_text_dialog(self: &Rc<Self>, text: &ShellTextSnapshot) {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            return;
+        };
+        if self.text_dialog_visible.replace(true) {
+            return;
+        }
+
+        let dialog = Dialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .resizable(false)
+            .title(if text.is_new_layer {
+                "Create Text Layer"
+            } else {
+                "Edit Text Layer"
+            })
+            .build();
+        dialog.add_button("Cancel", ResponseType::Cancel);
+        dialog.add_button(
+            if text.is_new_layer { "Create" } else { "Apply" },
+            ResponseType::Accept,
+        );
+
+        let body = GtkBox::new(Orientation::Vertical, 8);
+        body.set_margin_top(12);
+        body.set_margin_bottom(12);
+        body.set_margin_start(12);
+        body.set_margin_end(12);
+
+        let title = Label::new(Some(&format!(
+            "{} at {}, {}",
+            text.layer_name, text.origin_x, text.origin_y
+        )));
+        title.set_xalign(0.0);
+        title.add_css_class("panel-row");
+        body.append(&title);
+
+        let content_entry = Entry::new();
+        content_entry.set_hexpand(true);
+        content_entry.set_placeholder_text(Some("Text content"));
+        content_entry.set_text(&text.content);
+        body.append(&content_entry);
+
+        let font_row = GtkBox::new(Orientation::Horizontal, 6);
+        let font_family = ComboBoxText::new();
+        for family in [text.font_family.as_str(), "Bitmap Sans"] {
+            if font_family.active_text().as_ref().map(|value| value.as_str()) != Some(family) {
+                font_family.append_text(family);
+            }
+        }
+        font_family.set_active(Some(0));
+        font_row.append(&font_family);
+
+        let font_size = SpinButton::with_range(8.0, 256.0, 1.0);
+        font_size.set_value(text.font_size_px as f64);
+        font_row.append(&font_size);
+        body.append(&font_row);
+
+        let metrics_row = GtkBox::new(Orientation::Horizontal, 6);
+        let line_height = SpinButton::with_range(80.0, 300.0, 5.0);
+        line_height.set_value(text.line_height_percent as f64);
+        metrics_row.append(&line_height);
+
+        let letter_spacing = SpinButton::with_range(-8.0, 32.0, 1.0);
+        letter_spacing.set_value(text.letter_spacing as f64);
+        metrics_row.append(&letter_spacing);
+
+        let alignment = ComboBoxText::new();
+        alignment.append(Some("left"), "Left");
+        alignment.append(Some("center"), "Center");
+        alignment.append(Some("right"), "Right");
+        alignment.set_active_id(Some(match text.alignment {
+            ShellTextAlignment::Left => "left",
+            ShellTextAlignment::Center => "center",
+            ShellTextAlignment::Right => "right",
+        }));
+        metrics_row.append(&alignment);
+        body.append(&metrics_row);
+
+        let color_row = GtkBox::new(Orientation::Horizontal, 6);
+        let color_r = SpinButton::with_range(0.0, 255.0, 1.0);
+        color_r.set_value(text.fill_rgba[0] as f64);
+        color_row.append(&color_r);
+        let color_g = SpinButton::with_range(0.0, 255.0, 1.0);
+        color_g.set_value(text.fill_rgba[1] as f64);
+        color_row.append(&color_g);
+        let color_b = SpinButton::with_range(0.0, 255.0, 1.0);
+        color_b.set_value(text.fill_rgba[2] as f64);
+        color_row.append(&color_b);
+        let color_a = SpinButton::with_range(0.0, 255.0, 1.0);
+        color_a.set_value(text.fill_rgba[3] as f64);
+        color_row.append(&color_a);
+        body.append(&color_row);
+
+        dialog.content_area().append(&body);
+
+        let controller = self.controller.clone();
+        let fallback_font_family = text.font_family.clone();
+        let sync: Rc<dyn Fn()> = Rc::new({
+            let content_entry = content_entry.clone();
+            let font_family = font_family.clone();
+            let font_size = font_size.clone();
+            let line_height = line_height.clone();
+            let letter_spacing = letter_spacing.clone();
+            let alignment = alignment.clone();
+            let color_r = color_r.clone();
+            let color_g = color_g.clone();
+            let color_b = color_b.clone();
+            let color_a = color_a.clone();
+            move || {
+                controller.borrow_mut().update_text_session(
+                    content_entry.text().to_string(),
+                    font_family
+                        .active_text()
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| fallback_font_family.clone()),
+                    font_size.value().round() as u32,
+                    line_height.value().round() as u32,
+                    letter_spacing.value().round() as i32,
+                    [
+                        color_r.value().round() as u8,
+                        color_g.value().round() as u8,
+                        color_b.value().round() as u8,
+                        color_a.value().round() as u8,
+                    ],
+                    match alignment.active_id().as_ref().map(|id| id.as_str()) {
+                        Some("center") => ShellTextAlignment::Center,
+                        Some("right") => ShellTextAlignment::Right,
+                        _ => ShellTextAlignment::Left,
+                    },
+                );
+            }
+        });
+
+        {
+            let sync = sync.clone();
+            content_entry.connect_changed(move |_| sync());
+        }
+        for spin in [&font_size, &line_height, &letter_spacing, &color_r, &color_g, &color_b, &color_a] {
+            let sync = sync.clone();
+            spin.connect_value_changed(move |_| sync());
+        }
+        {
+            let sync = sync.clone();
+            font_family.connect_changed(move |_| sync());
+        }
+        {
+            let sync = sync.clone();
+            alignment.connect_changed(move |_| sync());
+        }
+
+        let shell_state = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            shell_state.text_dialog_visible.set(false);
+            match response {
+                ResponseType::Accept => shell_state.controller.borrow_mut().commit_text_session(),
+                _ => shell_state.controller.borrow_mut().cancel_text_session(),
+            }
+            dialog.destroy();
+        });
+
+        dialog.present();
     }
 
     fn handle_close_request(self: &Rc<Self>) -> bool {
@@ -2457,6 +2700,16 @@ impl ShellUiState {
             self.present_recovery_prompt(&current_snapshot);
         }
 
+        if current_snapshot.text.editing
+            && current_snapshot.text.request_id.is_some()
+            && self.presented_text_request_id.get() != current_snapshot.text.request_id
+            && !self.text_dialog_visible.get()
+        {
+            self.presented_text_request_id
+                .set(current_snapshot.text.request_id);
+            self.present_text_dialog(&current_snapshot.text);
+        }
+
         if let Some(report) = current_snapshot.latest_import_report.as_ref() {
             let already_presented = self.presented_import_report_id.get() == Some(report.id);
             if !already_presented && !self.import_report_visible.get() {
@@ -2548,6 +2801,59 @@ impl ShellUiState {
             label.set_xalign(0.0);
             label.add_css_class("panel-row");
             self.properties_body.append(&label);
+        }
+
+        if snapshot.text.selected || snapshot.text.editing {
+            for row in [
+                format!(
+                    "Text Content: {}",
+                    if snapshot.text.content.is_empty() {
+                        "<empty>"
+                    } else {
+                        snapshot.text.content.as_str()
+                    }
+                ),
+                format!(
+                    "Text Style: {} {}px | Line {}% | Track {}",
+                    snapshot.text.font_family,
+                    snapshot.text.font_size_px,
+                    snapshot.text.line_height_percent,
+                    snapshot.text.letter_spacing
+                ),
+                format!(
+                    "Text Fill: #{:02X}{:02X}{:02X}{:02X} | Align {:?}",
+                    snapshot.text.fill_rgba[0],
+                    snapshot.text.fill_rgba[1],
+                    snapshot.text.fill_rgba[2],
+                    snapshot.text.fill_rgba[3],
+                    snapshot.text.alignment
+                ),
+                format!(
+                    "Text Origin: {}, {}",
+                    snapshot.text.origin_x,
+                    snapshot.text.origin_y
+                ),
+            ] {
+                let label = Label::new(Some(&row));
+                label.set_xalign(0.0);
+                label.add_css_class("panel-row");
+                self.properties_body.append(&label);
+            }
+
+            let text_controls = GtkBox::new(Orientation::Horizontal, 6);
+            let edit_text = Button::with_label(if snapshot.text.editing {
+                "Editing Text"
+            } else {
+                "Edit Text"
+            });
+            edit_text.add_css_class("tool-chip");
+            edit_text.set_sensitive(snapshot.text.selected && !snapshot.text.editing);
+            {
+                let controller = self.controller.clone();
+                edit_text.connect_clicked(move |_| controller.borrow_mut().begin_text_edit());
+            }
+            text_controls.append(&edit_text);
+            self.properties_body.append(&text_controls);
         }
 
         let mask_banner = GtkBox::new(Orientation::Vertical, 6);
@@ -2719,7 +3025,7 @@ impl ShellUiState {
 
         let add_mask = Button::with_label("Add Mask");
         add_mask.add_css_class("tool-chip");
-        add_mask.set_sensitive(!snapshot.active_layer_has_mask);
+        add_mask.set_sensitive(!snapshot.text.selected && !snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
             add_mask.connect_clicked(move |_| controller.borrow_mut().add_active_layer_mask());
@@ -2755,7 +3061,9 @@ impl ShellUiState {
         let target_controls = GtkBox::new(Orientation::Horizontal, 6);
         let edit_pixels = Button::with_label("Edit Layer");
         edit_pixels.add_css_class("tool-chip");
-        edit_pixels.set_sensitive(snapshot.active_edit_target_name != "Layer Pixels");
+        edit_pixels.set_sensitive(
+            !snapshot.text.selected && snapshot.active_edit_target_name != "Layer Pixels",
+        );
         {
             let controller = self.controller.clone();
             edit_pixels
@@ -2766,7 +3074,9 @@ impl ShellUiState {
         let edit_mask = Button::with_label("Edit Mask");
         edit_mask.add_css_class("tool-chip");
         edit_mask.set_sensitive(
-            snapshot.active_layer_has_mask && snapshot.active_edit_target_name != "Layer Mask",
+            !snapshot.text.selected
+                && snapshot.active_layer_has_mask
+                && snapshot.active_edit_target_name != "Layer Mask",
         );
         {
             let controller = self.controller.clone();
@@ -2986,8 +3296,7 @@ impl ShellUiState {
         let begin_transform = Button::with_label("Start Xform");
         begin_transform.add_css_class("tool-chip");
         begin_transform.set_tooltip_text(Some("Start transform (T)"));
-        begin_transform
-            .set_sensitive(snapshot.active_layer_bounds.is_some() && !snapshot.transform_active);
+        begin_transform.set_sensitive(snapshot.can_begin_transform && !snapshot.transform_active);
         {
             let controller = self.controller.clone();
             begin_transform.connect_clicked(move |_| controller.borrow_mut().begin_transform());
@@ -3122,6 +3431,7 @@ impl ShellUiState {
             ("Ungroup", LayerAction::Ungroup),
             ("Duplicate", LayerAction::Duplicate),
             ("Delete", LayerAction::Delete),
+            ("Edit Text", LayerAction::EditText),
             ("Into Group", LayerAction::MoveIntoGroup),
             ("Out Group", LayerAction::MoveOutOfGroup),
             ("+ Mask", LayerAction::AddMask),
@@ -3149,19 +3459,37 @@ impl ShellUiState {
             button.add_css_class("layer-action-chip");
             match action {
                 LayerAction::AddGroup => {
-                    button.set_sensitive(snapshot.can_create_group_from_active_layer)
+                    button.set_sensitive(
+                        snapshot.can_create_group_from_active_layer && !snapshot.text.selected,
+                    )
                 }
                 LayerAction::Ungroup => button.set_sensitive(snapshot.can_ungroup_selected_group),
+                LayerAction::Duplicate => button.set_sensitive(!snapshot.text.selected),
+                LayerAction::EditText => {
+                    button.set_sensitive(snapshot.text.selected && !snapshot.text.editing)
+                }
                 LayerAction::MoveIntoGroup => {
-                    button.set_sensitive(snapshot.can_move_active_layer_into_selected_group)
+                    button.set_sensitive(
+                        snapshot.can_move_active_layer_into_selected_group
+                            && !snapshot.text.selected,
+                    )
                 }
                 LayerAction::MoveOutOfGroup => {
-                    button.set_sensitive(snapshot.can_move_active_layer_out_of_group)
+                    button.set_sensitive(
+                        snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected,
+                    )
                 }
-                LayerAction::AddMask => button.set_sensitive(!snapshot.active_layer_has_mask),
-                LayerAction::ToggleMask => button.set_sensitive(snapshot.active_layer_has_mask),
+                LayerAction::AddMask => {
+                    button.set_sensitive(!snapshot.text.selected && !snapshot.active_layer_has_mask)
+                }
+                LayerAction::ToggleMask => {
+                    button.set_sensitive(!snapshot.text.selected && snapshot.active_layer_has_mask)
+                }
                 LayerAction::ToggleMaskTarget => {
-                    button.set_sensitive(snapshot.active_layer_has_mask)
+                    button.set_sensitive(!snapshot.text.selected && snapshot.active_layer_has_mask)
+                }
+                LayerAction::MoveUp | LayerAction::MoveDown => {
+                    button.set_sensitive(!snapshot.text.selected)
                 }
                 _ => {}
             }
@@ -3172,6 +3500,7 @@ impl ShellUiState {
                 LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
                 LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
                 LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
+                LayerAction::EditText => controller.borrow_mut().begin_text_edit(),
                 LayerAction::MoveIntoGroup => controller
                     .borrow_mut()
                     .move_active_layer_into_selected_group(),
@@ -3224,10 +3553,10 @@ impl ShellUiState {
             let visibility =
                 build_icon_only_button(visibility_icon, "Toggle Visibility", "menu-button", 12);
             visibility.add_css_class("layer-visibility-button");
-            if let Some(index) = layer.index {
+            if let Some(layer_id) = layer.layer_id {
                 let controller = self.controller.clone();
                 visibility.connect_clicked(move |_| {
-                    controller.borrow_mut().toggle_layer_visibility(index)
+                    controller.borrow_mut().toggle_layer_visibility(layer_id)
                 });
             } else if let Some(group_id) = layer.group_id {
                 let controller = self.controller.clone();
@@ -3267,67 +3596,113 @@ impl ShellUiState {
                 let target_strip = GtkBox::new(Orientation::Horizontal, 3);
                 target_strip.add_css_class("layer-target-strip");
 
-                let layer_target = build_target_chip(
-                    "L",
-                    "Select the layer and edit its pixels",
-                    layer.is_active && !layer.mask_target_active,
-                    true,
-                );
-                if let Some(index) = layer.index {
-                    let controller = self.controller.clone();
-                    layer_target.connect_clicked(move |_| {
-                        let mut controller = controller.borrow_mut();
-                        controller.select_layer(index);
-                        controller.edit_active_layer_pixels();
-                    });
-                }
-                target_strip.append(&layer_target);
-
-                let mask_target = build_target_chip(
-                    if layer.mask_enabled { "M" } else { "M!" },
-                    "Select the layer and edit its mask",
-                    layer.mask_target_active,
-                    layer.has_mask,
-                );
-                if layer.has_mask
-                    && let Some(index) = layer.index
-                {
-                    let controller = self.controller.clone();
-                    mask_target.connect_clicked(move |_| {
-                        let mut controller = controller.borrow_mut();
-                        controller.select_layer(index);
-                        controller.edit_active_layer_mask();
-                    });
-                }
-                target_strip.append(&mask_target);
-                row.append(&target_strip);
-
-                let mask_suffix = if !layer.has_mask {
-                    String::new()
-                } else if layer.mask_target_active {
-                    if layer.mask_enabled {
-                        "  [Mask Editing]".to_string()
-                    } else {
-                        "  [Mask Editing Off]".to_string()
+                if layer.is_text {
+                    let text_target = build_target_chip(
+                        "T",
+                        "Select this text layer",
+                        layer.is_selected,
+                        true,
+                    );
+                    if let Some(layer_id) = layer.layer_id {
+                        let controller = self.controller.clone();
+                        text_target
+                            .connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
                     }
-                } else if layer.mask_enabled {
-                    "  [Mask]".to_string()
+                    target_strip.append(&text_target);
+
+                    let edit_target = build_target_chip(
+                        "E",
+                        "Open text editing",
+                        false,
+                        true,
+                    );
+                    if let Some(layer_id) = layer.layer_id {
+                        let controller = self.controller.clone();
+                        edit_target.connect_clicked(move |_| {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(layer_id);
+                            controller.begin_text_edit();
+                        });
+                    }
+                    target_strip.append(&edit_target);
+                    row.append(&target_strip);
+
+                    let select = Button::with_label(&format!(
+                        "{}  ({}%) [Text]",
+                        layer.name, layer.opacity_percent
+                    ));
+                    select.add_css_class("layer-select-button");
+                    if layer.is_selected {
+                        select.add_css_class("layer-select-button-active");
+                    }
+                    if let Some(layer_id) = layer.layer_id {
+                        let controller = self.controller.clone();
+                        select.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+                    }
+                    row.append(&select);
                 } else {
-                    "  [Mask Off]".to_string()
-                };
-                let select = Button::with_label(&format!(
-                    "{}  ({}%){}",
-                    layer.name, layer.opacity_percent, mask_suffix
-                ));
-                select.add_css_class("layer-select-button");
-                if layer.is_selected {
-                    select.add_css_class("layer-select-button-active");
+                    let layer_target = build_target_chip(
+                        "L",
+                        "Select the layer and edit its pixels",
+                        layer.is_active && !layer.mask_target_active,
+                        true,
+                    );
+                    if let Some(layer_id) = layer.layer_id {
+                        let controller = self.controller.clone();
+                        layer_target.connect_clicked(move |_| {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(layer_id);
+                            controller.edit_active_layer_pixels();
+                        });
+                    }
+                    target_strip.append(&layer_target);
+
+                    let mask_target = build_target_chip(
+                        if layer.mask_enabled { "M" } else { "M!" },
+                        "Select the layer and edit its mask",
+                        layer.mask_target_active,
+                        layer.has_mask,
+                    );
+                    if layer.has_mask
+                        && let Some(layer_id) = layer.layer_id
+                    {
+                        let controller = self.controller.clone();
+                        mask_target.connect_clicked(move |_| {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(layer_id);
+                            controller.edit_active_layer_mask();
+                        });
+                    }
+                    target_strip.append(&mask_target);
+                    row.append(&target_strip);
+
+                    let mask_suffix = if !layer.has_mask {
+                        String::new()
+                    } else if layer.mask_target_active {
+                        if layer.mask_enabled {
+                            "  [Mask Editing]".to_string()
+                        } else {
+                            "  [Mask Editing Off]".to_string()
+                        }
+                    } else if layer.mask_enabled {
+                        "  [Mask]".to_string()
+                    } else {
+                        "  [Mask Off]".to_string()
+                    };
+                    let select = Button::with_label(&format!(
+                        "{}  ({}%){}",
+                        layer.name, layer.opacity_percent, mask_suffix
+                    ));
+                    select.add_css_class("layer-select-button");
+                    if layer.is_selected {
+                        select.add_css_class("layer-select-button-active");
+                    }
+                    if let Some(layer_id) = layer.layer_id {
+                        let controller = self.controller.clone();
+                        select.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
+                    }
+                    row.append(&select);
                 }
-                if let Some(index) = layer.index {
-                    let controller = self.controller.clone();
-                    select.connect_clicked(move |_| controller.borrow_mut().select_layer(index));
-                }
-                row.append(&select);
             }
 
             self.layers_body.append(&row);
@@ -3509,6 +3884,7 @@ fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
         ShellToolKind::RectangularMarquee => "focus-3-line.svg",
         ShellToolKind::Lasso => "focus-3-line.svg",
         ShellToolKind::Transform => "expand-diagonal-2-line.svg",
+        ShellToolKind::Text => "layout-column-line.svg",
         ShellToolKind::Brush => "brush-2-line.svg",
         ShellToolKind::Eraser => "eraser-line.svg",
         ShellToolKind::Hand => "hand.svg",
@@ -3521,6 +3897,7 @@ fn shell_tool_shortcut(tool: ShellToolKind) -> &'static str {
         ShellToolKind::Move => "V",
         ShellToolKind::RectangularMarquee => "M",
         ShellToolKind::Lasso => "L",
+        ShellToolKind::Text => "I",
         ShellToolKind::Transform => "T",
         ShellToolKind::Brush => "B",
         ShellToolKind::Eraser => "E",
@@ -3535,6 +3912,18 @@ fn shell_status_hint(snapshot: &ShellSnapshot) -> String {
         snapshot.active_tool_name,
         shell_tool_shortcut(snapshot.active_tool)
     );
+    if snapshot.text.editing {
+        return format!(
+            "{} | Enter apply | Esc cancel | Font {} {}px | Align {:?}",
+            tool_hint,
+            snapshot.text.font_family,
+            snapshot.text.font_size_px,
+            snapshot.text.alignment,
+        );
+    }
+    if matches!(snapshot.active_tool, ShellToolKind::Text) {
+        return format!("{} | Click canvas to place text | Enter edit dialog", tool_hint);
+    }
     if matches!(
         snapshot.active_tool,
         ShellToolKind::Brush | ShellToolKind::Eraser
@@ -3676,6 +4065,7 @@ enum LayerAction {
     Ungroup,
     Duplicate,
     Delete,
+    EditText,
     MoveIntoGroup,
     MoveOutOfGroup,
     AddMask,
@@ -5148,7 +5538,8 @@ paned > separator:hover {
 mod tests {
     use super::{
         LayerPanelItem, ShellGuide, ShellImportDiagnostic, ShellImportReport, ShellSnapshot,
-        ShellToolKind, brush_preview_radius, build_brush_preview_paths,
+        ShellTextAlignment, ShellTextSnapshot, ShellToolKind, brush_preview_radius,
+        build_brush_preview_paths,
         format_import_report_details, shell_status_hint,
     };
     use common::CanvasSize;
@@ -5181,6 +5572,7 @@ mod tests {
             can_move_active_layer_into_selected_group: false,
             can_move_active_layer_out_of_group: false,
             active_layer_bounds: None,
+            can_begin_transform: false,
             transform_preview_rect: None,
             transform_active: false,
             transform_scale_percent: 100,
@@ -5210,6 +5602,22 @@ mod tests {
             can_undo: false,
             can_redo: false,
             history_entries: Vec::new(),
+            text: ShellTextSnapshot {
+                selected: false,
+                editing: false,
+                request_id: None,
+                is_new_layer: false,
+                layer_name: "Text 1".to_string(),
+                content: String::new(),
+                font_family: "Bitmap Sans".to_string(),
+                font_size_px: 16,
+                line_height_percent: 120,
+                letter_spacing: 0,
+                fill_rgba: [255, 255, 255, 255],
+                alignment: ShellTextAlignment::Left,
+                origin_x: 0,
+                origin_y: 0,
+            },
         }
     }
 

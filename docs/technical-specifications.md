@@ -367,6 +367,11 @@ Use a tile-aware composition pipeline with dirty-tile invalidation and an offscr
 - brush hover preview now stays shell-local in `ui_shell`, where GTK motion and stylus updates drive overlay-only cursor feedback for radius, hardness, spacing, and pressure-sized previews without mutating document state or canvas revision on hover.
 - built-in brush presets now live in the controller layer as named parameter bundles surfaced through the shell snapshot; because they are shipped defaults rather than user-authored assets, they currently do not participate in document persistence.
 - destructive filters now route through `app_core` as worker-backed commands with revision-guarded completion, snapshot-based undo/redo, and an intentionally narrow initial scope of active-layer pixel operations only.
+- text layers now exist as document-owned headless entities with editable content, single-style formatting, blend/visibility metadata, and a document-owned placement transform instead of shell-owned transient text state.
+- `.ptx` project format version 2 stores editable text layers inline in the manifest while keeping raster payload blobs reserved for raster layers and masks.
+- initial text rendering now uses a shared bitmap-font rasterization path in `file_io`, so viewport rendering, committed preview, and raster export all flow through the same compositing boundary instead of GTK-owned text widgets.
+- the initial text release supports one style run per text layer with `Bitmap Sans`-style bitmap glyph rendering, fill RGBA, font size, line height, letter spacing, left/center/right alignment, blend mode, opacity, visibility, and document-owned placement transforms.
+- explicit non-goals for the initial text release are system font loading, OpenType shaping, kerning pairs, rich text spans, text on path, paragraph layout beyond simple line splitting, IME composition, and other advanced typography features that would require a broader font/layout engine.
 
 ### PSD Mapping Principle
 PSD interoperability must map into the PhotoTux document model without changing the internal architecture to mirror Photoshop-specific internals.

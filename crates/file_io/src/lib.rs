@@ -3,8 +3,10 @@ use color_math::{BlendModeMath, blend_rgba_over};
 use common::{CanvasSize, GroupId, LayerId};
 use doc_model::{
     BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerGroup, LayerHierarchyNode,
-    MaskTile, RasterLayer, RasterTile, TileCoord,
+    MaskTile, RasterLayer, RasterTile, TextAlignment, TextLayer, TextStyle, TextTransform,
+    TileCoord,
 };
+use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{ImageBuffer, ImageFormat, Rgb, Rgba};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const PROJECT_FILE_EXTENSION: &str = "ptx";
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 2;
 pub const CURRENT_PSD_IMPORT_MANIFEST_VERSION: u32 = 1;
 pub const RECOVERY_FILE_SUFFIX: &str = ".autosave";
 
@@ -251,6 +253,8 @@ pub struct ProjectManifest {
     pub active_edit_target: LayerEditTarget,
     pub layers: Vec<ManifestLayerRecord>,
     #[serde(default)]
+    pub text_layers: Vec<ManifestTextLayerRecord>,
+    #[serde(default)]
     pub layer_hierarchy: Vec<ManifestHierarchyNode>,
     #[serde(default)]
     pub guides: Vec<ManifestGuideRecord>,
@@ -289,6 +293,11 @@ impl From<&Document> for ProjectManifest {
             canvas_size: document.canvas_size,
             active_edit_target: document.active_edit_target,
             layers,
+            text_layers: document
+                .text_layers()
+                .iter()
+                .map(ManifestTextLayerRecord::from)
+                .collect(),
             layer_hierarchy: document
                 .layer_hierarchy
                 .iter()
@@ -320,6 +329,33 @@ pub struct ManifestLayerRecord {
     pub offset_y: i32,
     pub payload_path: String,
     pub mask_payload_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestTextLayerRecord {
+    pub id: LayerId,
+    pub name: String,
+    pub visible: bool,
+    pub opacity_percent: u8,
+    pub blend_mode: BlendMode,
+    pub transform: TextTransform,
+    pub content: String,
+    pub style: TextStyle,
+}
+
+impl From<&TextLayer> for ManifestTextLayerRecord {
+    fn from(layer: &TextLayer) -> Self {
+        Self {
+            id: layer.id,
+            name: layer.name.clone(),
+            visible: layer.visible,
+            opacity_percent: layer.opacity_percent,
+            blend_mode: layer.blend_mode,
+            transform: layer.transform,
+            content: layer.content.clone(),
+            style: layer.style.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -450,16 +486,27 @@ impl TryFrom<ProjectFile> for Document {
 
     fn try_from(project_file: ProjectFile) -> anyhow::Result<Self> {
         let ProjectFile { manifest, layers } = project_file;
-        if manifest.format_version != CURRENT_PROJECT_FORMAT_VERSION {
+        if manifest.format_version == 0 || manifest.format_version > CURRENT_PROJECT_FORMAT_VERSION {
             anyhow::bail!(
-                "unsupported .ptx version: expected {}, got {}",
+                "unsupported .ptx version: supported up to {}, got {}",
                 CURRENT_PROJECT_FORMAT_VERSION,
                 manifest.format_version
             );
         }
 
-        let mut restored_layers = Vec::with_capacity(manifest.layers.len());
-        for manifest_layer in manifest.layers {
+        let ProjectManifest {
+            format_version: _,
+            canvas_size,
+            active_edit_target,
+            layers: manifest_layers,
+            text_layers: manifest_text_layers,
+            layer_hierarchy,
+            guides,
+            guides_visible,
+        } = manifest;
+
+        let mut restored_layers = Vec::with_capacity(manifest_layers.len());
+        for manifest_layer in manifest_layers {
             let payload = layers
                 .iter()
                 .find(|candidate| candidate.id == manifest_layer.id)
@@ -509,15 +556,33 @@ impl TryFrom<ProjectFile> for Document {
             });
         }
 
+        let restored_text_layers = manifest_text_layers
+            .into_iter()
+            .map(|layer| TextLayer {
+                id: layer.id,
+                name: layer.name,
+                visible: layer.visible,
+                opacity_percent: layer.opacity_percent,
+                blend_mode: layer.blend_mode,
+                transform: layer.transform,
+                content: layer.content,
+                style: layer.style,
+            })
+            .collect::<Vec<_>>();
+
         let fallback_hierarchy = restored_layers
             .iter()
             .map(|layer| LayerHierarchyNode::Layer(layer.id))
+            .chain(
+                restored_text_layers
+                    .iter()
+                    .map(|layer| LayerHierarchyNode::Layer(layer.id)),
+            )
             .collect::<Vec<_>>();
-        let restored_hierarchy = if manifest.layer_hierarchy.is_empty() {
+        let restored_hierarchy = if layer_hierarchy.is_empty() {
             fallback_hierarchy.clone()
         } else {
-            manifest
-                .layer_hierarchy
+            layer_hierarchy
                 .iter()
                 .map(manifest_hierarchy_to_document)
                 .collect()
@@ -525,16 +590,17 @@ impl TryFrom<ProjectFile> for Document {
 
         let mut document = Document {
             id: common::DocumentId::new(),
-            canvas_size: manifest.canvas_size,
+            canvas_size,
             layer_hierarchy: fallback_hierarchy,
             layers: restored_layers,
+            text_layers: restored_text_layers,
             active_layer_index: 0,
-            active_edit_target: manifest.active_edit_target,
+            active_edit_target,
             tile_size: common::DEFAULT_TILE_SIZE,
             selection: None,
             selection_inverted: false,
-            guides: manifest.guides.iter().map(Guide::from).collect(),
-            guides_visible: manifest.guides_visible,
+            guides: guides.iter().map(Guide::from).collect(),
+            guides_visible,
         };
         document
             .set_layer_hierarchy(restored_hierarchy)
@@ -1222,19 +1288,35 @@ fn composite_hierarchy_nodes(
     for node in nodes {
         match node {
             LayerHierarchyNode::Layer(layer_id) => {
-                let Some(layer) = document.layer_by_id(*layer_id) else {
-                    continue;
-                };
-                if !ancestors_visible || !layer.visible {
+                if let Some(layer) = document.layer_by_id(*layer_id) {
+                    if !ancestors_visible || !layer.visible {
+                        continue;
+                    }
+
+                    let effective_opacity =
+                        ancestor_opacity * (layer.opacity_percent as f32 / 100.0);
+                    if effective_opacity <= 0.0 {
+                        continue;
+                    }
+
+                    composite_layer_into(document, layer, output, clip_rect, effective_opacity);
                     continue;
                 }
 
-                let effective_opacity = ancestor_opacity * (layer.opacity_percent as f32 / 100.0);
+                let Some(text_layer) = document.text_layer_by_id(*layer_id) else {
+                    continue;
+                };
+                if !ancestors_visible || !text_layer.visible {
+                    continue;
+                }
+
+                let effective_opacity =
+                    ancestor_opacity * (text_layer.opacity_percent as f32 / 100.0);
                 if effective_opacity <= 0.0 {
                     continue;
                 }
 
-                composite_layer_into(document, layer, output, clip_rect, effective_opacity);
+                composite_text_layer_into(text_layer, output, clip_rect, effective_opacity, document.canvas_size);
             }
             LayerHierarchyNode::Group(group) => {
                 if !ancestors_visible || !group.visible {
@@ -1330,6 +1412,246 @@ fn composite_layer_into(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitmapTextFamily {
+    Sans,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GlyphSpan {
+    start_column: u8,
+    width: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextLayoutMetrics {
+    scale: i32,
+    line_height_px: i32,
+    line_widths: Vec<i32>,
+    max_line_width: i32,
+    height_px: i32,
+}
+
+const EMPTY_GLYPH: [u8; 8] = [0; 8];
+const PLACEHOLDER_GLYPH: char = '?';
+const SPACE_SANS_COLUMNS: u8 = 4;
+
+fn bitmap_text_family(font_family: &str) -> BitmapTextFamily {
+    if font_family.to_ascii_lowercase().contains("mono") {
+        BitmapTextFamily::Mono
+    } else {
+        BitmapTextFamily::Sans
+    }
+}
+
+fn glyph_bitmap(character: char) -> [u8; 8] {
+    BASIC_FONTS
+        .get(character)
+        .or_else(|| BASIC_FONTS.get(PLACEHOLDER_GLYPH))
+        .unwrap_or(EMPTY_GLYPH)
+}
+
+fn glyph_span(character: char, family: BitmapTextFamily) -> GlyphSpan {
+    match family {
+        BitmapTextFamily::Mono => GlyphSpan {
+            start_column: 0,
+            width: 8,
+        },
+        BitmapTextFamily::Sans => {
+            if character == ' ' {
+                return GlyphSpan {
+                    start_column: 0,
+                    width: SPACE_SANS_COLUMNS,
+                };
+            }
+
+            let glyph = glyph_bitmap(character);
+            let mut min_column = 8_u8;
+            let mut max_column = 0_u8;
+            let mut found = false;
+
+            for column in 0..8_u8 {
+                let bit = 1_u8 << column;
+                if glyph.iter().any(|row| (*row & bit) != 0) {
+                    min_column = min_column.min(column);
+                    max_column = max_column.max(column);
+                    found = true;
+                }
+            }
+
+            if !found {
+                GlyphSpan {
+                    start_column: 0,
+                    width: SPACE_SANS_COLUMNS,
+                }
+            } else {
+                GlyphSpan {
+                    start_column: min_column,
+                    width: max_column - min_column + 1,
+                }
+            }
+        }
+    }
+}
+
+fn glyph_draw_width_px(character: char, family: BitmapTextFamily, scale: i32) -> i32 {
+    i32::from(glyph_span(character, family).width.max(1)) * scale.max(1)
+}
+
+fn line_width_px(line: &str, style: &TextStyle, family: BitmapTextFamily, scale: i32) -> i32 {
+    let characters = line.chars().collect::<Vec<_>>();
+    if characters.is_empty() {
+        return 0;
+    }
+
+    let mut width = 0_i32;
+    for (index, character) in characters.iter().enumerate() {
+        width += glyph_draw_width_px(*character, family, scale);
+        if index + 1 < characters.len() {
+            width += style.letter_spacing;
+        }
+    }
+
+    width.max(0)
+}
+
+fn text_layout_metrics(layer: &TextLayer) -> Option<TextLayoutMetrics> {
+    if layer.content.is_empty() {
+        return None;
+    }
+
+    let scale = ((layer.style.font_size_px.max(1) + 7) / 8) as i32;
+    let glyph_height_px = 8 * scale;
+    let line_height_px = ((layer.style.font_size_px.max(1) * layer.style.line_height_percent)
+        .div_ceil(100)) as i32;
+    let line_height_px = line_height_px.max(glyph_height_px);
+    let family = bitmap_text_family(&layer.style.font_family);
+    let line_widths = layer
+        .content
+        .split('\n')
+        .map(|line| line_width_px(line, &layer.style, family, scale))
+        .collect::<Vec<_>>();
+    let max_line_width = line_widths.iter().copied().max().unwrap_or(0);
+    let height_px = glyph_height_px
+        + line_height_px * (layer.content.split('\n').count().saturating_sub(1) as i32);
+
+    Some(TextLayoutMetrics {
+        scale,
+        line_height_px,
+        line_widths,
+        max_line_width,
+        height_px,
+    })
+}
+
+pub fn text_layer_bounds(layer: &TextLayer) -> Option<common::CanvasRect> {
+    let layout = text_layout_metrics(layer)?;
+    if layout.max_line_width <= 0 || layout.height_px <= 0 {
+        return None;
+    }
+
+    Some(common::CanvasRect::new(
+        layer.transform.origin_x,
+        layer.transform.origin_y,
+        layout.max_line_width as u32,
+        layout.height_px as u32,
+    ))
+}
+
+fn alignment_offset_px(alignment: TextAlignment, max_width: i32, line_width: i32) -> i32 {
+    match alignment {
+        TextAlignment::Left => 0,
+        TextAlignment::Center => (max_width - line_width) / 2,
+        TextAlignment::Right => max_width - line_width,
+    }
+}
+
+fn composite_text_layer_into(
+    layer: &TextLayer,
+    output: &mut [u8],
+    clip_rect: Option<common::CanvasRect>,
+    layer_opacity: f32,
+    canvas_size: CanvasSize,
+) {
+    let Some(layout) = text_layout_metrics(layer) else {
+        return;
+    };
+    let family = bitmap_text_family(&layer.style.font_family);
+    let glyph_scale = layout.scale.max(1);
+    let text_color = layer.style.fill_rgba;
+    if text_color[3] == 0 {
+        return;
+    }
+
+    for (line_index, line) in layer.content.split('\n').enumerate() {
+        let Some(&line_width) = layout.line_widths.get(line_index) else {
+            continue;
+        };
+        let mut cursor_x = layer.transform.origin_x
+            + alignment_offset_px(layer.style.alignment, layout.max_line_width, line_width);
+        let baseline_y = layer.transform.origin_y + line_index as i32 * layout.line_height_px;
+
+        for character in line.chars() {
+            let glyph = glyph_bitmap(character);
+            let span = glyph_span(character, family);
+            let draw_width_px = i32::from(span.width.max(1)) * glyph_scale;
+
+            if character != ' ' {
+                for (row_index, row_bits) in glyph.iter().enumerate() {
+                    for column in span.start_column..span.start_column + span.width.max(1) {
+                        if (*row_bits & (1_u8 << column)) == 0 {
+                            continue;
+                        }
+
+                        let pixel_origin_x =
+                            cursor_x + i32::from(column - span.start_column) * glyph_scale;
+                        let pixel_origin_y = baseline_y + row_index as i32 * glyph_scale;
+
+                        for scale_y in 0..glyph_scale {
+                            let canvas_y = pixel_origin_y + scale_y;
+                            if canvas_y < 0 || canvas_y >= canvas_size.height as i32 {
+                                continue;
+                            }
+                            if let Some(rect) = clip_rect
+                                && (canvas_y < rect.y
+                                    || canvas_y >= rect.y + rect.height as i32)
+                            {
+                                continue;
+                            }
+
+                            for scale_x in 0..glyph_scale {
+                                let canvas_x = pixel_origin_x + scale_x;
+                                if canvas_x < 0 || canvas_x >= canvas_size.width as i32 {
+                                    continue;
+                                }
+                                if let Some(rect) = clip_rect
+                                    && (canvas_x < rect.x
+                                        || canvas_x >= rect.x + rect.width as i32)
+                                {
+                                    continue;
+                                }
+
+                                let dst_index = (canvas_y as usize * canvas_size.width as usize
+                                    + canvas_x as usize)
+                                    * 4;
+                                composite_pixel(
+                                    &mut output[dst_index..dst_index + 4],
+                                    &text_color,
+                                    layer_opacity,
+                                    layer.blend_mode,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            cursor_x += draw_width_px + layer.style.letter_spacing;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1344,7 +1666,10 @@ mod tests {
         save_document_to_path, update_flattened_region_rgba,
     };
     use color_math::{BlendModeMath, blend_rgba_over};
-    use doc_model::{BlendMode, Document, LayerGroup, LayerHierarchyNode, TileCoord};
+    use doc_model::{
+        BlendMode, Document, LayerGroup, LayerHierarchyNode, TextAlignment, TextStyle,
+        TextTransform, TileCoord,
+    };
     use image::{ImageBuffer, ImageFormat, Rgba};
     use std::fs;
     #[cfg(unix)]
@@ -1574,6 +1899,32 @@ mod tests {
         document
     }
 
+    fn build_text_scene() -> Document {
+        let mut document = Document::new(128, 96);
+        let text_layer_id = document.add_text_layer(
+            "Title",
+            "PhotoTux",
+            TextTransform::new(18, 24),
+        );
+        let text_layer = document
+            .text_layer_mut(
+                document
+                    .text_layer_index_by_id(text_layer_id)
+                    .expect("text layer should exist"),
+            )
+            .expect("text layer should be mutable");
+        text_layer.opacity_percent = 82;
+        text_layer.style = TextStyle {
+            font_family: "Noto Sans".to_string(),
+            font_size_px: 54,
+            line_height_percent: 135,
+            letter_spacing: 8,
+            fill_rgba: [230, 220, 205, 255],
+            alignment: TextAlignment::Center,
+        };
+        document
+    }
+
     #[test]
     fn project_manifest_uses_current_version() {
         let document = Document::new(1920, 1080);
@@ -1628,11 +1979,30 @@ mod tests {
         assert_eq!(restored.layers[1].offset_x, 0);
         assert!(restored.layers[1].payload_path.starts_with("layers/"));
         assert!(restored.layers[1].payload_path.ends_with(".png"));
+        assert!(restored.text_layers.is_empty());
         assert_eq!(restored.layer_hierarchy.len(), 1);
         assert!(matches!(
             restored.layer_hierarchy[0],
             ManifestHierarchyNode::Group(_)
         ));
+    }
+
+    #[test]
+    fn project_manifest_roundtrips_text_layers_through_json() {
+        let document = build_text_scene();
+
+        let manifest = ProjectManifest::from(&document);
+        let json = serde_json::to_string_pretty(&manifest).expect("manifest should serialize");
+        let restored: ProjectManifest =
+            serde_json::from_str(&json).expect("manifest should deserialize");
+
+        assert_eq!(restored.text_layers.len(), 1);
+        assert_eq!(restored.text_layers[0].name, "Title");
+        assert_eq!(restored.text_layers[0].content, "PhotoTux");
+        assert_eq!(restored.text_layers[0].transform, TextTransform::new(18, 24));
+        assert_eq!(restored.text_layers[0].style.font_family, "Noto Sans");
+        assert_eq!(restored.text_layers[0].style.font_size_px, 54);
+        assert_eq!(restored.text_layers[0].style.alignment, TextAlignment::Center);
     }
 
     #[test]
@@ -1712,6 +2082,43 @@ mod tests {
             ]
         );
         assert!(!restored.guides_visible());
+    }
+
+    #[test]
+    fn save_and_load_document_roundtrip_preserves_text_layers() {
+        let document = build_text_scene();
+
+        let path = temporary_project_path();
+        save_document_to_path(&path, &document).expect("save should succeed");
+        let restored = load_document_from_path(&path).expect("load should succeed");
+        fs::remove_file(&path).expect("temporary project file should be removed");
+
+        assert_eq!(restored.text_layer_count(), 1);
+        let restored_text_layer = restored.text_layers().first().expect("text layer exists");
+        assert_eq!(restored_text_layer.name, "Title");
+        assert_eq!(restored_text_layer.content, "PhotoTux");
+        assert_eq!(restored_text_layer.opacity_percent, 82);
+        assert_eq!(restored_text_layer.transform, TextTransform::new(18, 24));
+        assert_eq!(restored_text_layer.style.font_family, "Noto Sans");
+        assert_eq!(restored_text_layer.style.font_size_px, 54);
+        assert_eq!(restored_text_layer.style.line_height_percent, 135);
+        assert_eq!(restored_text_layer.style.letter_spacing, 8);
+        assert_eq!(restored_text_layer.style.fill_rgba, [230, 220, 205, 255]);
+        assert_eq!(restored_text_layer.style.alignment, TextAlignment::Center);
+        assert!(restored.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn document_loader_accepts_v1_projects_without_text_layers() {
+        let document = Document::new(64, 64);
+        let mut project_file = ProjectFile::from(&document);
+        project_file.manifest.format_version = 1;
+
+        let restored = Document::try_from(project_file).expect("v1 project should still load");
+
+        assert_eq!(restored.canvas_size, document.canvas_size);
+        assert_eq!(restored.layer_count(), document.layer_count());
+        assert_eq!(restored.text_layer_count(), 0);
     }
 
     #[test]

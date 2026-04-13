@@ -11,6 +11,7 @@ use common::{CanvasRaster, CanvasRect, DestructiveFilterKind};
 use doc_model::{
     BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerHierarchyNode,
     LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape,
+    TextAlignment, TextLayer, TextStyle, TextTransform,
 };
 use file_io::{
     PROJECT_FILE_EXTENSION, PsdImportDiagnostic, PsdImportDiagnosticSeverity, PsdImportResult,
@@ -18,6 +19,7 @@ use file_io::{
     flatten_document_rgba, import_jpeg_from_path, import_png_from_path,
     import_psd_from_path_with_sidecar, import_webp_from_path, load_document_from_path,
     recovery_path_for_project_path, remove_file_if_exists, save_document_to_path,
+    text_layer_bounds,
 };
 use history_engine::HistoryStack;
 use image_ops::apply_destructive_filter_rgba;
@@ -28,7 +30,7 @@ use tool_system::{
 };
 use ui_shell::{
     LayerPanelItem, ShellController, ShellGuide, ShellImportDiagnostic, ShellImportReport,
-    ShellSnapshot, ShellToolKind,
+    ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
 };
 
 pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
@@ -57,6 +59,8 @@ struct PhotoTuxController {
     latest_import_report: Option<ShellImportReport>,
     next_import_report_id: u64,
     next_layer_number: usize,
+    next_text_layer_number: usize,
+    next_text_dialog_request_id: u64,
     active_tool: ShellToolKind,
     canvas_revision: u64,
     dirty_since_primary_save: bool,
@@ -71,6 +75,7 @@ struct PhotoTuxController {
     jobs: JobSystem,
     cached_canvas_raster: Option<Vec<u8>>,
     transform_session: Option<TransformSession>,
+    text_session: Option<TextEditSession>,
     interaction: Option<CanvasInteraction>,
     snapping_enabled: bool,
     temporary_snap_bypass: bool,
@@ -165,6 +170,15 @@ enum CanvasInteraction {
         last_pressure: f32,
         aggregate: Option<BrushStrokeRecord>,
     },
+    TextMove {
+        layer_id: common::LayerId,
+        start_canvas_x: i32,
+        start_canvas_y: i32,
+        start_origin_x: i32,
+        start_origin_y: i32,
+        before: TextLayer,
+        snapping_base_bounds: Option<CanvasRect>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +192,7 @@ enum EditorOperation {
     BrushStroke(BrushStrokeRecord),
     TransformLayer(LayerTransformRecord),
     MoveLayer(MoveLayerRecord),
+    TextLayer(TextLayerRecord),
     Selection(SelectionRecord),
     Guides(GuideStateRecord),
     MaskState(MaskStateRecord),
@@ -227,6 +242,37 @@ struct DestructiveFilterRecord {
     after: LayerStateSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextLayerRecord {
+    layer_id: common::LayerId,
+    before: Option<TextLayer>,
+    after: Option<TextLayer>,
+    before_hierarchy: Vec<LayerHierarchyNode>,
+    after_hierarchy: Vec<LayerHierarchyNode>,
+    before_active_layer_id: common::LayerId,
+    after_active_layer_id: common::LayerId,
+    before_selected_target: LayerHierarchyNodeRef,
+    after_selected_target: LayerHierarchyNodeRef,
+}
+
+#[derive(Debug, Clone)]
+struct TextEditSession {
+    request_id: u64,
+    draft: TextLayer,
+    before: Option<TextLayer>,
+    before_hierarchy: Vec<LayerHierarchyNode>,
+    before_active_layer_id: common::LayerId,
+    before_selected_target: LayerHierarchyNodeRef,
+    insert_after_layer_id: Option<common::LayerId>,
+    target_group_id: Option<common::GroupId>,
+}
+
+impl TextEditSession {
+    fn is_new_layer(&self) -> bool {
+        self.before.is_none()
+    }
+}
+
 #[derive(Debug)]
 struct DocumentLoadState {
     document: Document,
@@ -247,6 +293,49 @@ impl DestructiveFilterRecord {
 
     fn redo(&self, document: &mut Document) {
         let _ = document.apply_layer_state_snapshot(self.layer_id, self.after.clone());
+    }
+}
+
+impl TextLayerRecord {
+    fn undo(&self, controller: &mut PhotoTuxController) {
+        self.apply(
+            controller,
+            self.before.clone(),
+            self.before_hierarchy.clone(),
+            self.before_active_layer_id,
+            self.before_selected_target,
+        );
+    }
+
+    fn redo(&self, controller: &mut PhotoTuxController) {
+        self.apply(
+            controller,
+            self.after.clone(),
+            self.after_hierarchy.clone(),
+            self.after_active_layer_id,
+            self.after_selected_target,
+        );
+    }
+
+    fn apply(
+        &self,
+        controller: &mut PhotoTuxController,
+        layer: Option<TextLayer>,
+        hierarchy: Vec<LayerHierarchyNode>,
+        active_layer_id: common::LayerId,
+        selected_target: LayerHierarchyNodeRef,
+    ) {
+        match layer {
+            Some(layer) => controller.document.upsert_text_layer_storage(layer),
+            None => {
+                controller.document.remove_text_layer_storage(self.layer_id);
+            }
+        }
+        let _ = controller.document.set_layer_hierarchy(hierarchy);
+        if let Some(layer_index) = controller.document.layer_index_by_id(active_layer_id) {
+            let _ = controller.document.set_active_layer(layer_index);
+        }
+        controller.selected_structure_target = selected_target;
     }
 }
 
@@ -861,6 +950,8 @@ impl PhotoTuxController {
             latest_import_report: None,
             next_import_report_id: 1,
             next_layer_number: 4,
+            next_text_layer_number: 1,
+            next_text_dialog_request_id: 1,
             active_tool: ShellToolKind::Brush,
             canvas_revision: 1,
             dirty_since_primary_save: false,
@@ -875,6 +966,7 @@ impl PhotoTuxController {
             jobs: JobSystem::new(),
             cached_canvas_raster: None,
             transform_session: None,
+            text_session: None,
             interaction: None,
             snapping_enabled: true,
             temporary_snap_bypass: false,
@@ -896,13 +988,302 @@ impl PhotoTuxController {
         controller
     }
 
-    fn active_layer_name(&self) -> String {
+    fn active_raster_layer_name(&self) -> String {
         self.document.active_layer().name.clone()
+    }
+
+    fn active_layer_name(&self) -> String {
+        if let Some(text_layer) = self.visible_text_layer_state() {
+            return text_layer.name.clone();
+        }
+        self.selected_structure_name()
+    }
+
+    fn selected_layer_id(&self) -> Option<common::LayerId> {
+        match self.selected_structure_target {
+            LayerHierarchyNodeRef::Layer(layer_id) => Some(layer_id),
+            LayerHierarchyNodeRef::Group(_) => None,
+        }
+    }
+
+    fn selected_text_layer_id(&self) -> Option<common::LayerId> {
+        let layer_id = self.selected_layer_id()?;
+        self.document.text_layer_by_id(layer_id).map(|_| layer_id)
+    }
+
+    fn selected_text_layer(&self) -> Option<&TextLayer> {
+        let layer_id = self.selected_text_layer_id()?;
+        self.document.text_layer_by_id(layer_id)
+    }
+
+    fn visible_text_layer_state(&self) -> Option<&TextLayer> {
+        if let Some(session) = &self.text_session {
+            return Some(&session.draft);
+        }
+        self.selected_text_layer()
+    }
+
+    fn selected_text_alignment(&self) -> ShellTextAlignment {
+        match self
+            .visible_text_layer_state()
+            .map(|layer| layer.style.alignment)
+            .unwrap_or(TextAlignment::Left)
+        {
+            TextAlignment::Left => ShellTextAlignment::Left,
+            TextAlignment::Center => ShellTextAlignment::Center,
+            TextAlignment::Right => ShellTextAlignment::Right,
+        }
+    }
+
+    fn text_snapshot(&self) -> ShellTextSnapshot {
+        let text_layer = self.visible_text_layer_state();
+        let (selected, editing, request_id, is_new_layer) = match &self.text_session {
+            Some(session) => (true, true, Some(session.request_id), session.is_new_layer()),
+            None => (self.selected_text_layer().is_some(), false, None, false),
+        };
+
+        ShellTextSnapshot {
+            selected,
+            editing,
+            request_id,
+            is_new_layer,
+            layer_name: text_layer
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| "Text".to_string()),
+            content: text_layer
+                .map(|layer| layer.content.clone())
+                .unwrap_or_default(),
+            font_family: text_layer
+                .map(|layer| layer.style.font_family.clone())
+                .unwrap_or_else(|| TextStyle::default().font_family),
+            font_size_px: text_layer
+                .map(|layer| layer.style.font_size_px)
+                .unwrap_or_else(|| TextStyle::default().font_size_px),
+            line_height_percent: text_layer
+                .map(|layer| layer.style.line_height_percent)
+                .unwrap_or_else(|| TextStyle::default().line_height_percent),
+            letter_spacing: text_layer
+                .map(|layer| layer.style.letter_spacing)
+                .unwrap_or_else(|| TextStyle::default().letter_spacing),
+            fill_rgba: text_layer
+                .map(|layer| layer.style.fill_rgba)
+                .unwrap_or_else(|| TextStyle::default().fill_rgba),
+            alignment: self.selected_text_alignment(),
+            origin_x: text_layer.map(|layer| layer.transform.origin_x).unwrap_or_default(),
+            origin_y: text_layer.map(|layer| layer.transform.origin_y).unwrap_or_default(),
+        }
+    }
+
+    fn next_text_request_id(&mut self) -> u64 {
+        let request_id = self.next_text_dialog_request_id;
+        self.next_text_dialog_request_id = self.next_text_dialog_request_id.saturating_add(1);
+        request_id
+    }
+
+    fn next_text_layer_name(&mut self) -> String {
+        let name = format!("Text {}", self.next_text_layer_number);
+        self.next_text_layer_number = self.next_text_layer_number.saturating_add(1);
+        name
+    }
+
+    fn suggested_text_layer_name(content: &str, fallback: &str) -> String {
+        content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(24).collect::<String>())
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn text_style_from_session(
+        font_family: String,
+        font_size_px: u32,
+        line_height_percent: u32,
+        letter_spacing: i32,
+        fill_rgba: [u8; 4],
+        alignment: ShellTextAlignment,
+    ) -> TextStyle {
+        TextStyle {
+            font_family,
+            font_size_px: font_size_px.clamp(8, 256),
+            line_height_percent: line_height_percent.clamp(80, 300),
+            letter_spacing: letter_spacing.clamp(-8, 32),
+            fill_rgba,
+            alignment: match alignment {
+                ShellTextAlignment::Left => TextAlignment::Left,
+                ShellTextAlignment::Center => TextAlignment::Center,
+                ShellTextAlignment::Right => TextAlignment::Right,
+            },
+        }
+    }
+
+    fn begin_new_text_session(&mut self, canvas_x: i32, canvas_y: i32) {
+        if self.transform_session.is_some() {
+            self.status_message = "Commit or cancel the active transform before adding text"
+                .to_string();
+            return;
+        }
+
+        let layer_name = self.next_text_layer_name();
+        let mut draft = TextLayer::new(
+            layer_name.clone(),
+            "Text",
+            TextTransform::new(canvas_x, canvas_y),
+        );
+        draft.style.fill_rgba = self.foreground_color;
+
+        let insert_after_layer_id = match self.selected_structure_target {
+            LayerHierarchyNodeRef::Layer(layer_id) => Some(layer_id),
+            LayerHierarchyNodeRef::Group(_) => Some(self.active_layer_id()),
+        };
+
+        self.text_session = Some(TextEditSession {
+            request_id: self.next_text_request_id(),
+            draft,
+            before: None,
+            before_hierarchy: self.document.layer_hierarchy().to_vec(),
+            before_active_layer_id: self.active_layer_id(),
+            before_selected_target: self.selected_structure_target,
+            insert_after_layer_id,
+            target_group_id: self.selected_group_id(),
+        });
+        self.status_message = format!("Editing {}", layer_name);
+        self.bump_canvas_revision();
+    }
+
+    fn begin_selected_text_session(&mut self) {
+        let Some(layer) = self.selected_text_layer().cloned() else {
+            self.status_message = "Select a text layer before editing text".to_string();
+            return;
+        };
+        if self.transform_session.is_some() {
+            self.status_message =
+                "Commit or cancel the active transform before editing text".to_string();
+            return;
+        }
+
+        self.text_session = Some(TextEditSession {
+            request_id: self.next_text_request_id(),
+            draft: layer.clone(),
+            before: Some(layer.clone()),
+            before_hierarchy: self.document.layer_hierarchy().to_vec(),
+            before_active_layer_id: self.active_layer_id(),
+            before_selected_target: self.selected_structure_target,
+            insert_after_layer_id: None,
+            target_group_id: self.document.group_for_layer(layer.id),
+        });
+        self.status_message = format!("Editing {}", layer.name);
+        self.bump_canvas_revision();
+    }
+
+    fn cancel_text_session_inner(&mut self) {
+        if self.text_session.take().is_some() {
+            self.status_message = "Cancelled text edit".to_string();
+            self.bump_canvas_revision();
+        }
+    }
+
+    fn update_text_session_inner(
+        &mut self,
+        content: String,
+        font_family: String,
+        font_size_px: u32,
+        line_height_percent: u32,
+        letter_spacing: i32,
+        fill_rgba: [u8; 4],
+        alignment: ShellTextAlignment,
+    ) {
+        let Some(session) = &mut self.text_session else {
+            return;
+        };
+
+        session.draft.content = content;
+        session.draft.style = Self::text_style_from_session(
+            font_family,
+            font_size_px,
+            line_height_percent,
+            letter_spacing,
+            fill_rgba,
+            alignment,
+        );
+        session.draft.name = Self::suggested_text_layer_name(&session.draft.content, &session.draft.name);
+        self.bump_canvas_revision();
+    }
+
+    fn commit_text_session_inner(&mut self) {
+        let Some(session) = self.text_session.take() else {
+            return;
+        };
+
+        let before = session.before.clone();
+        let before_hierarchy = session.before_hierarchy.clone();
+        let before_active_layer_id = session.before_active_layer_id;
+        let before_selected_target = session.before_selected_target;
+        let after_layer = session.draft.clone();
+
+        let applied = if session.is_new_layer() {
+            if !self
+                .document
+                .insert_text_layer(after_layer.clone(), session.insert_after_layer_id)
+            {
+                false
+            } else {
+                if let Some(group_id) = session.target_group_id {
+                    let _ = self.document.move_node_into_group(
+                        LayerHierarchyNodeRef::Layer(after_layer.id),
+                        group_id,
+                    );
+                }
+                true
+            }
+        } else {
+            self.document.upsert_text_layer_storage(after_layer.clone());
+            true
+        };
+
+        if !applied {
+            self.status_message = "Failed to commit text edit".to_string();
+            self.bump_canvas_revision();
+            return;
+        }
+
+        self.selected_structure_target = LayerHierarchyNodeRef::Layer(after_layer.id);
+        self.bump_canvas_revision();
+        self.mark_document_dirty();
+
+        let record = TextLayerRecord {
+            layer_id: after_layer.id,
+            before,
+            after: Some(after_layer.clone()),
+            before_hierarchy,
+            after_hierarchy: self.document.layer_hierarchy().to_vec(),
+            before_active_layer_id,
+            after_active_layer_id: self.active_layer_id(),
+            before_selected_target,
+            after_selected_target: self.selected_structure_target,
+        };
+
+        let label = if session.is_new_layer() {
+            format!("Add Text {}", after_layer.name)
+        } else {
+            format!("Edit Text {}", after_layer.name)
+        };
+        self.push_operation(label, EditorOperation::TextLayer(record));
+        self.status_message = format!("Updated {}", after_layer.name);
+    }
+
+    fn can_begin_transform(&self) -> bool {
+        self.text_session.is_none()
+            && self.selected_text_layer().is_none()
+            && self.active_raster_layer_bounds().is_some()
     }
 
     fn can_apply_destructive_filters(&self) -> bool {
         self.pending_filter_job.is_none()
             && self.transform_session.is_none()
+            && self.text_session.is_none()
+            && self.selected_text_layer().is_none()
             && self.document.active_edit_target() == LayerEditTarget::LayerPixels
             && self
                 .document
@@ -945,13 +1326,20 @@ impl PhotoTuxController {
 
     fn snapping_temporarily_bypassed(&self) -> bool {
         self.temporary_snap_bypass
-            && matches!(self.interaction, Some(CanvasInteraction::Move { .. }))
+            && matches!(
+                self.interaction,
+                Some(CanvasInteraction::Move { .. } | CanvasInteraction::TextMove { .. })
+            )
     }
 
     fn move_snapping_base_bounds(&self) -> Option<CanvasRect> {
+        if self.selected_text_layer().is_some() {
+            return self.selected_layer_bounds();
+        }
+
         if let Some(selection_shape) = self.document.selection_shape() {
             let selection_bounds = selection_shape.bounds();
-            let layer_bounds = self.active_layer_bounds()?;
+            let layer_bounds = self.active_raster_layer_bounds()?;
             let left = layer_bounds.x.max(selection_bounds.x);
             let top = layer_bounds.y.max(selection_bounds.y);
             let right = (layer_bounds.x + layer_bounds.width as i32)
@@ -968,7 +1356,7 @@ impl PhotoTuxController {
             }
         }
 
-        self.active_layer_bounds()
+        self.selected_layer_bounds()
     }
 
     fn transform_snapping_base_bounds(&self) -> Option<CanvasRect> {
@@ -1062,22 +1450,43 @@ impl PhotoTuxController {
         self.document.active_layer().id
     }
 
+    fn active_raster_layer_bounds(&self) -> Option<CanvasRect> {
+        self.document
+            .layer_canvas_bounds(self.document.active_layer_index())
+    }
+
+    fn selected_layer_bounds(&self) -> Option<CanvasRect> {
+        if let Some(text_layer) = self.visible_text_layer_state() {
+            return text_layer_bounds(text_layer);
+        }
+        self.active_raster_layer_bounds()
+    }
+
     fn reset_selected_structure_target_to_active_layer(&mut self) {
         self.selected_structure_target = LayerHierarchyNodeRef::Layer(self.active_layer_id());
     }
 
     fn selected_structure_name(&self) -> String {
+        if let Some(session) = &self.text_session {
+            return session.draft.name.clone();
+        }
+
         match self.selected_structure_target {
-            LayerHierarchyNodeRef::Layer(layer_id) => self
-                .document
-                .layer_by_id(layer_id)
-                .map(|layer| layer.name.clone())
-                .unwrap_or_else(|| self.active_layer_name()),
+            LayerHierarchyNodeRef::Layer(layer_id) => {
+                if let Some(layer) = self.document.layer_by_id(layer_id) {
+                    return layer.name.clone();
+                }
+                if let Some(layer) = self.document.text_layer_by_id(layer_id) {
+                    return layer.name.clone();
+                }
+
+                self.active_raster_layer_name()
+            }
             LayerHierarchyNodeRef::Group(group_id) => self
                 .document
                 .group(group_id)
                 .map(|group| group.name.clone())
-                .unwrap_or_else(|| self.active_layer_name()),
+                .unwrap_or_else(|| self.active_raster_layer_name()),
         }
     }
 
@@ -1292,6 +1701,10 @@ impl PhotoTuxController {
     }
 
     fn active_edit_target_name(&self) -> &'static str {
+        if self.visible_text_layer_state().is_some() {
+            return "Text Layer";
+        }
+
         match self.document.active_edit_target() {
             LayerEditTarget::LayerPixels => "Layer Pixels",
             LayerEditTarget::LayerMask => "Layer Mask",
@@ -1328,40 +1741,65 @@ impl PhotoTuxController {
         for node in nodes.iter().rev() {
             match node {
                 LayerHierarchyNode::Layer(layer_id) => {
-                    let Some(layer_index) = self.document.layer_index_by_id(*layer_id) else {
+                    if let Some(layer_index) = self.document.layer_index_by_id(*layer_id) {
+                        let Some(layer) = self.document.layer(layer_index) else {
+                            continue;
+                        };
+                        output.push(LayerPanelItem {
+                            layer_id: Some(*layer_id),
+                            index: Some(layer_index),
+                            group_id: None,
+                            name: layer.name.clone(),
+                            depth,
+                            is_group: false,
+                            is_text: false,
+                            visible: layer.visible,
+                            opacity_percent: layer.opacity_percent,
+                            has_mask: layer.mask.is_some(),
+                            mask_enabled: layer
+                                .mask
+                                .as_ref()
+                                .map(|mask| mask.enabled)
+                                .unwrap_or(false),
+                            mask_target_active: layer_index == self.document.active_layer_index()
+                                && self.document.active_edit_target() == LayerEditTarget::LayerMask,
+                            is_selected: self.selected_structure_target
+                                == LayerHierarchyNodeRef::Layer(*layer_id),
+                            is_active: layer_index == self.document.active_layer_index(),
+                        });
                         continue;
-                    };
-                    let Some(layer) = self.document.layer(layer_index) else {
+                    }
+
+                    let Some(text_layer) = self.document.text_layer_by_id(*layer_id) else {
                         continue;
                     };
                     output.push(LayerPanelItem {
-                        index: Some(layer_index),
+                        layer_id: Some(*layer_id),
+                        index: None,
                         group_id: None,
-                        name: layer.name.clone(),
+                        name: text_layer.name.clone(),
                         depth,
                         is_group: false,
-                        visible: layer.visible,
-                        opacity_percent: layer.opacity_percent,
-                        has_mask: layer.mask.is_some(),
-                        mask_enabled: layer
-                            .mask
-                            .as_ref()
-                            .map(|mask| mask.enabled)
-                            .unwrap_or(false),
-                        mask_target_active: layer_index == self.document.active_layer_index()
-                            && self.document.active_edit_target() == LayerEditTarget::LayerMask,
+                        is_text: true,
+                        visible: text_layer.visible,
+                        opacity_percent: text_layer.opacity_percent,
+                        has_mask: false,
+                        mask_enabled: false,
+                        mask_target_active: false,
                         is_selected: self.selected_structure_target
                             == LayerHierarchyNodeRef::Layer(*layer_id),
-                        is_active: layer_index == self.document.active_layer_index(),
+                        is_active: self.selected_text_layer_id() == Some(*layer_id),
                     });
                 }
                 LayerHierarchyNode::Group(group) => {
                     output.push(LayerPanelItem {
+                        layer_id: None,
                         index: None,
                         group_id: Some(group.id),
                         name: group.name.clone(),
                         depth,
                         is_group: true,
+                        is_text: false,
                         visible: group.visible,
                         opacity_percent: group.opacity_percent,
                         has_mask: false,
@@ -1540,8 +1978,7 @@ impl PhotoTuxController {
     }
 
     fn active_layer_bounds(&self) -> Option<CanvasRect> {
-        self.document
-            .layer_canvas_bounds(self.document.active_layer_index())
+        self.selected_layer_bounds()
     }
 
     fn primary_document_path(&self) -> PathBuf {
@@ -1628,6 +2065,25 @@ impl PhotoTuxController {
             .max(self.document.layer_count().saturating_add(1));
     }
 
+    fn recompute_next_text_layer_number(&mut self) {
+        let highest_explicit_layer = self
+            .document
+            .text_layers()
+            .iter()
+            .filter_map(|layer| {
+                layer
+                    .name
+                    .strip_prefix("Text ")
+                    .and_then(|suffix| suffix.parse::<usize>().ok())
+            })
+            .max()
+            .unwrap_or(self.document.text_layer_count());
+
+        self.next_text_layer_number = highest_explicit_layer
+            .saturating_add(1)
+            .max(self.document.text_layer_count().saturating_add(1));
+    }
+
     fn replace_document_after_load(&mut self, state: DocumentLoadState) {
         self.document = state.document;
         self.reset_selected_structure_target_to_active_layer();
@@ -1635,6 +2091,7 @@ impl PhotoTuxController {
         self.document_path = state.document_path;
         self.working_directory = state.working_directory;
         self.transform_session = None;
+        self.text_session = None;
         self.interaction = None;
         self.active_tool = ShellToolKind::Brush;
         self.refresh_recovery_path();
@@ -1643,6 +2100,7 @@ impl PhotoTuxController {
         self.dirty_since_autosave = state.dirty_since_autosave;
         self.last_change_at = state.last_change_at;
         self.recompute_next_layer_number();
+        self.recompute_next_text_layer_number();
         self.reset_history_to(&state.history_label);
         self.bump_canvas_revision();
         self.status_message = state.status_message;
@@ -1752,9 +2210,14 @@ impl PhotoTuxController {
                     self.document_path = document_path;
                     self.document_title = document_title;
                     self.recovery_path = Some(recovery_path.clone());
+                    self.transform_session = None;
+                    self.text_session = None;
+                    self.interaction = None;
                     self.dirty_since_primary_save = true;
                     self.dirty_since_autosave = false;
                     self.last_change_at = None;
+                    self.recompute_next_layer_number();
+                    self.recompute_next_text_layer_number();
                     self.bump_canvas_revision();
                     self.push_history("Recovered Autosave");
                     self.status_message =
@@ -2014,6 +2477,30 @@ impl PhotoTuxController {
             BlendMode::Lighten,
         ];
 
+        if let Some(layer_id) = self.selected_text_layer_id() {
+            let Some(current_mode) = self
+                .document
+                .text_layer_by_id(layer_id)
+                .map(|layer| layer.blend_mode)
+            else {
+                return;
+            };
+            let current_index = MODES
+                .iter()
+                .position(|mode| *mode == current_mode)
+                .unwrap_or(0) as isize;
+            let next_index = (current_index + step).rem_euclid(MODES.len() as isize) as usize;
+            if self
+                .document
+                .set_text_layer_blend_mode(layer_id, MODES[next_index])
+            {
+                self.bump_canvas_revision();
+                self.mark_document_dirty();
+                self.push_history(format!("Set Blend Mode {:?}", MODES[next_index]));
+            }
+            return;
+        }
+
         let active_index = self.document.active_layer_index();
         let current_mode = self.document.active_layer().blend_mode;
         let current_index = MODES
@@ -2030,6 +2517,10 @@ impl PhotoTuxController {
 
     fn begin_transform_session_if_needed(&mut self) {
         if self.transform_session.is_some() {
+            return;
+        }
+
+        if !self.can_begin_transform() {
             return;
         }
 
@@ -2068,6 +2559,23 @@ impl PhotoTuxController {
 
     fn preview_canvas_raster(&self) -> CanvasRaster {
         let mut preview_document = self.document.clone();
+        if let Some(session) = &self.text_session {
+            if session.is_new_layer() {
+                let _ = preview_document.insert_text_layer(
+                    session.draft.clone(),
+                    session.insert_after_layer_id,
+                );
+                if let Some(group_id) = session.target_group_id {
+                    let _ = preview_document.move_node_into_group(
+                        LayerHierarchyNodeRef::Layer(session.draft.id),
+                        group_id,
+                    );
+                }
+            } else {
+                preview_document.upsert_text_layer_storage(session.draft.clone());
+            }
+        }
+
         if let Some(session) = &self.transform_session
             && let Some(layer_index) = preview_document.layer_index_by_id(session.layer_id)
         {
@@ -2091,7 +2599,19 @@ impl PhotoTuxController {
 
 impl ShellController for PhotoTuxController {
     fn snapshot(&self) -> ShellSnapshot {
-        let active_layer = self.document.active_layer();
+        let active_layer_name = self.active_layer_name();
+        let active_layer_opacity_percent = self
+            .visible_text_layer_state()
+            .map(|layer| layer.opacity_percent)
+            .unwrap_or_else(|| self.document.active_layer().opacity_percent);
+        let active_layer_visible = self
+            .visible_text_layer_state()
+            .map(|layer| layer.visible)
+            .unwrap_or_else(|| self.document.active_layer().visible);
+        let active_layer_blend_mode = self
+            .visible_text_layer_state()
+            .map(|layer| format!("{:?}", layer.blend_mode))
+            .unwrap_or_else(|| format!("{:?}", self.document.active_layer().blend_mode));
         ShellSnapshot {
             document_title: self.document_title.clone(),
             project_path: self.document_path.clone(),
@@ -2105,16 +2625,22 @@ impl ShellController for PhotoTuxController {
             active_tool_name: self.active_tool.label().to_string(),
             active_tool: self.active_tool,
             layers: self.layer_items(),
-            active_layer_name: active_layer.name.clone(),
-            active_layer_opacity_percent: active_layer.opacity_percent,
-            active_layer_visible: active_layer.visible,
-            active_layer_blend_mode: format!("{:?}", active_layer.blend_mode),
-            active_layer_has_mask: active_layer.mask.is_some(),
-            active_layer_mask_enabled: active_layer
-                .mask
-                .as_ref()
-                .map(|mask| mask.enabled)
-                .unwrap_or(false),
+            active_layer_name,
+            active_layer_opacity_percent,
+            active_layer_visible,
+            active_layer_blend_mode,
+            active_layer_has_mask: self.visible_text_layer_state().is_none()
+                && self.document.active_layer().mask.is_some(),
+            active_layer_mask_enabled: if self.visible_text_layer_state().is_some() {
+                false
+            } else {
+                self.document
+                    .active_layer()
+                    .mask
+                    .as_ref()
+                    .map(|mask| mask.enabled)
+                    .unwrap_or(false)
+            },
             active_edit_target_name: self.active_edit_target_name().to_string(),
             selected_structure_name: self.selected_structure_name(),
             selected_structure_is_group: matches!(
@@ -2137,6 +2663,7 @@ impl ShellController for PhotoTuxController {
                 .group_for_layer(self.active_layer_id())
                 .is_some(),
             active_layer_bounds: self.active_layer_bounds(),
+            can_begin_transform: self.can_begin_transform(),
             transform_preview_rect: self.transform_preview_rect(),
             transform_active: self.transform_session.is_some(),
             transform_scale_percent: self
@@ -2192,11 +2719,12 @@ impl ShellController for PhotoTuxController {
                 .rev()
                 .map(|entry| entry.label.clone())
                 .collect(),
+            text: self.text_snapshot(),
         }
     }
 
     fn canvas_raster(&self) -> CanvasRaster {
-        if self.transform_session.is_some() {
+        if self.transform_session.is_some() || self.text_session.is_some() {
             self.preview_canvas_raster()
         } else {
             if let Some(ref cached) = self.cached_canvas_raster {
@@ -2233,6 +2761,34 @@ impl ShellController for PhotoTuxController {
     }
 
     fn delete_active_layer(&mut self) {
+        if let Some(layer) = self.selected_text_layer().cloned() {
+            let before_hierarchy = self.document.layer_hierarchy().to_vec();
+            let before_active_layer_id = self.active_layer_id();
+            let before_selected_target = self.selected_structure_target;
+            if !self.document.remove_text_layer(layer.id) {
+                return;
+            }
+            self.reset_selected_structure_target_to_active_layer();
+            self.bump_canvas_revision();
+            self.mark_document_dirty();
+            self.push_operation(
+                format!("Delete Text {}", layer.name),
+                EditorOperation::TextLayer(TextLayerRecord {
+                    layer_id: layer.id,
+                    before: Some(layer.clone()),
+                    after: None,
+                    before_hierarchy,
+                    after_hierarchy: self.document.layer_hierarchy().to_vec(),
+                    before_active_layer_id,
+                    after_active_layer_id: self.active_layer_id(),
+                    before_selected_target,
+                    after_selected_target: self.selected_structure_target,
+                }),
+            );
+            self.status_message = format!("Deleted {}", layer.name);
+            return;
+        }
+
         let active_index = self.document.active_layer_index();
         let active_name = self.active_layer_name();
         if self.document.delete_layer(active_index) {
@@ -2343,9 +2899,19 @@ impl ShellController for PhotoTuxController {
         }
     }
 
-    fn select_layer(&mut self, index: usize) {
-        if self.document.set_active_layer(index) {
-            self.selected_structure_target = LayerHierarchyNodeRef::Layer(self.active_layer_id());
+    fn select_layer(&mut self, layer_id: common::LayerId) {
+        self.cancel_text_session_inner();
+        if let Some(index) = self.document.layer_index_by_id(layer_id) {
+            if self.document.set_active_layer(index) {
+                self.selected_structure_target = LayerHierarchyNodeRef::Layer(layer_id);
+                self.status_message = format!("Selected {}", self.selected_structure_name());
+            }
+            return;
+        }
+
+        if self.document.text_layer_by_id(layer_id).is_some() {
+            self.selected_structure_target = LayerHierarchyNodeRef::Layer(layer_id);
+            self.status_message = format!("Selected {}", self.selected_structure_name());
         }
     }
 
@@ -2356,14 +2922,27 @@ impl ShellController for PhotoTuxController {
         }
     }
 
-    fn toggle_layer_visibility(&mut self, index: usize) {
-        if let Some(layer) = self.document.layer(index) {
+    fn toggle_layer_visibility(&mut self, layer_id: common::LayerId) {
+        if let Some(index) = self.document.layer_index_by_id(layer_id)
+            && let Some(layer) = self.document.layer(index)
+        {
             let visible = !layer.visible;
             let layer_name = layer.name.clone();
             self.document.set_layer_visibility(index, visible);
             self.bump_canvas_revision();
             self.mark_document_dirty();
             self.push_history(format!("Toggle Visibility {}", layer_name));
+            return;
+        }
+
+        if let Some(layer) = self.document.text_layer_by_id(layer_id) {
+            let visible = !layer.visible;
+            let layer_name = layer.name.clone();
+            if self.document.set_text_layer_visibility(layer_id, visible) {
+                self.bump_canvas_revision();
+                self.mark_document_dirty();
+                self.push_history(format!("Toggle Visibility {}", layer_name));
+            }
         }
     }
 
@@ -2396,6 +2975,20 @@ impl ShellController for PhotoTuxController {
     }
 
     fn increase_active_layer_opacity(&mut self) {
+        if let Some(layer_id) = self.selected_text_layer_id() {
+            let next_opacity = self
+                .document
+                .text_layer_by_id(layer_id)
+                .map(|layer| (layer.opacity_percent + 10).min(100))
+                .unwrap_or(100);
+            if self.document.set_text_layer_opacity(layer_id, next_opacity) {
+                self.bump_canvas_revision();
+                self.mark_document_dirty();
+                self.push_history(format!("Increase Opacity {}", self.active_layer_name()));
+            }
+            return;
+        }
+
         let active_index = self.document.active_layer_index();
         let next_opacity = (self.document.active_layer().opacity_percent + 10).min(100);
         self.document.set_layer_opacity(active_index, next_opacity);
@@ -2405,6 +2998,20 @@ impl ShellController for PhotoTuxController {
     }
 
     fn decrease_active_layer_opacity(&mut self) {
+        if let Some(layer_id) = self.selected_text_layer_id() {
+            let next_opacity = self
+                .document
+                .text_layer_by_id(layer_id)
+                .map(|layer| layer.opacity_percent.saturating_sub(10))
+                .unwrap_or(0);
+            if self.document.set_text_layer_opacity(layer_id, next_opacity) {
+                self.bump_canvas_revision();
+                self.mark_document_dirty();
+                self.push_history(format!("Decrease Opacity {}", self.active_layer_name()));
+            }
+            return;
+        }
+
         let active_index = self.document.active_layer_index();
         let next_opacity = self
             .document
@@ -2621,6 +3228,12 @@ impl ShellController for PhotoTuxController {
     }
 
     fn begin_transform(&mut self) {
+        if !self.can_begin_transform() {
+            self.status_message =
+                "Transform is only available for raster layers when no text edit is active"
+                    .to_string();
+            return;
+        }
         self.begin_transform_session_if_needed();
     }
 
@@ -2751,6 +3364,11 @@ impl ShellController for PhotoTuxController {
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
+                EditorOperation::TextLayer(record) => {
+                    record.undo(self);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
                 EditorOperation::Selection(record) => {
                     record.undo(&mut self.document);
                     self.mark_document_dirty();
@@ -2797,6 +3415,11 @@ impl ShellController for PhotoTuxController {
                 }
                 EditorOperation::MoveLayer(record) => {
                     record.redo(&mut self.document);
+                    self.bump_canvas_revision();
+                    self.mark_document_dirty();
+                }
+                EditorOperation::TextLayer(record) => {
+                    record.redo(self);
                     self.bump_canvas_revision();
                     self.mark_document_dirty();
                 }
@@ -2996,6 +3619,12 @@ impl ShellController for PhotoTuxController {
             self.status_message = "Another filter is already in progress".to_string();
             return;
         }
+        if self.text_session.is_some() || self.selected_text_layer().is_some() {
+            self.status_message =
+                "Commit or cancel text editing before applying a destructive filter"
+                    .to_string();
+            return;
+        }
         if self.transform_session.is_some() {
             self.status_message =
                 "Commit or cancel the active transform before applying a filter".to_string();
@@ -3036,6 +3665,42 @@ impl ShellController for PhotoTuxController {
 
     fn select_tool(&mut self, tool: ShellToolKind) {
         self.active_tool = tool;
+        if tool == ShellToolKind::Text {
+            self.status_message = "Click the canvas to place a text layer".to_string();
+        }
+    }
+
+    fn begin_text_edit(&mut self) {
+        self.begin_selected_text_session();
+    }
+
+    fn update_text_session(
+        &mut self,
+        content: String,
+        font_family: String,
+        font_size_px: u32,
+        line_height_percent: u32,
+        letter_spacing: i32,
+        fill_rgba: [u8; 4],
+        alignment: ShellTextAlignment,
+    ) {
+        self.update_text_session_inner(
+            content,
+            font_family,
+            font_size_px,
+            line_height_percent,
+            letter_spacing,
+            fill_rgba,
+            alignment,
+        );
+    }
+
+    fn commit_text_session(&mut self) {
+        self.commit_text_session_inner();
+    }
+
+    fn cancel_text_session(&mut self) {
+        self.cancel_text_session_inner();
     }
 
     fn begin_canvas_interaction(&mut self, canvas_x: i32, canvas_y: i32) {
@@ -3050,6 +3715,19 @@ impl ShellController for PhotoTuxController {
     ) {
         match self.active_tool {
             ShellToolKind::Move => {
+                if let Some(text_layer) = self.selected_text_layer().cloned() {
+                    self.interaction = Some(CanvasInteraction::TextMove {
+                        layer_id: text_layer.id,
+                        start_canvas_x: canvas_x,
+                        start_canvas_y: canvas_y,
+                        start_origin_x: text_layer.transform.origin_x,
+                        start_origin_y: text_layer.transform.origin_y,
+                        before: text_layer,
+                        snapping_base_bounds: self.move_snapping_base_bounds(),
+                    });
+                    return;
+                }
+
                 let layer_index = self.document.active_layer_index();
                 let (start_offset_x, start_offset_y) =
                     self.document.layer_offset(layer_index).unwrap_or((0, 0));
@@ -3094,6 +3772,9 @@ impl ShellController for PhotoTuxController {
                         snapping_base_bounds: self.transform_snapping_base_bounds(),
                     });
                 }
+            }
+            ShellToolKind::Text => {
+                self.begin_new_text_session(canvas_x, canvas_y);
             }
             ShellToolKind::Brush | ShellToolKind::Eraser => {
                 let mode = if self.active_tool == ShellToolKind::Brush {
@@ -3218,6 +3899,44 @@ impl ShellController for PhotoTuxController {
                     start_offset_x,
                     start_offset_y,
                     initial_state,
+                    snapping_base_bounds,
+                })
+            }
+            CanvasInteraction::TextMove {
+                layer_id,
+                start_canvas_x,
+                start_canvas_y,
+                start_origin_x,
+                start_origin_y,
+                before,
+                snapping_base_bounds,
+            } => {
+                let raw_delta_x = canvas_x - start_canvas_x;
+                let raw_delta_y = canvas_y - start_canvas_y;
+                let (translate_x, translate_y) = self.snapped_translation(
+                    snapping_base_bounds,
+                    raw_delta_x,
+                    raw_delta_y,
+                );
+                let _ = self.document.set_text_layer_transform(
+                    layer_id,
+                    TextTransform::new(
+                        start_origin_x + translate_x,
+                        start_origin_y + translate_y,
+                    ),
+                );
+                self.cached_canvas_raster = None;
+                self.dirty_since_primary_save = true;
+                self.dirty_since_autosave = true;
+                self.last_change_at = Some(std::time::Instant::now());
+                self.bump_canvas_revision();
+                Some(CanvasInteraction::TextMove {
+                    layer_id,
+                    start_canvas_x,
+                    start_canvas_y,
+                    start_origin_x,
+                    start_origin_y,
+                    before,
                     snapping_base_bounds,
                 })
             }
@@ -3359,6 +4078,31 @@ impl ShellController for PhotoTuxController {
                     }
                 }
             }
+            Some(CanvasInteraction::TextMove {
+                layer_id,
+                before,
+                ..
+            }) => {
+                let Some(after) = self.document.text_layer_by_id(layer_id).cloned() else {
+                    return;
+                };
+                if before != after {
+                    self.push_operation(
+                        format!("Move Text {}", after.name),
+                        EditorOperation::TextLayer(TextLayerRecord {
+                            layer_id,
+                            before: Some(before),
+                            after: Some(after),
+                            before_hierarchy: self.document.layer_hierarchy().to_vec(),
+                            after_hierarchy: self.document.layer_hierarchy().to_vec(),
+                            before_active_layer_id: self.active_layer_id(),
+                            after_active_layer_id: self.active_layer_id(),
+                            before_selected_target: self.selected_structure_target,
+                            after_selected_target: self.selected_structure_target,
+                        }),
+                    );
+                }
+            }
             Some(CanvasInteraction::Marquee {
                 before,
                 before_inverted,
@@ -3424,8 +4168,8 @@ mod tests {
     use super::{AUTOSAVE_IDLE_INTERVAL, PhotoTuxController};
     use common::{CanvasRect, DestructiveFilterKind};
     use file_io::{
-        PsdImportSidecar, export_png_to_path, flatten_document_rgba, load_document_from_path,
-        recovery_path_for_project_path, save_document_to_path,
+        PsdImportSidecar, export_png_to_path, flatten_document_rgba, import_png_from_path,
+        load_document_from_path, recovery_path_for_project_path, save_document_to_path,
     };
     use std::fs;
     #[cfg(unix)]
@@ -3613,6 +4357,74 @@ mod tests {
                 set_pixel(&mut document, top_index, x, y, [240, 180, 100, 255]);
             }
         }
+
+        document
+    }
+
+    fn build_single_text_fixture_document() -> doc_model::Document {
+        let mut document = doc_model::Document::new(128, 96);
+        document.rename_layer(0, "Backdrop");
+        for y in 0..32 {
+            for x in 0..64 {
+                set_pixel(&mut document, 0, x, y, [24, 36, 56, 255]);
+            }
+        }
+
+        let text_id = document.add_text_layer(
+            "Title",
+            "PhotoTux",
+            doc_model::TextTransform::new(16, 18),
+        );
+        let style = doc_model::TextStyle {
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 24,
+            line_height_percent: 120,
+            letter_spacing: 1,
+            fill_rgba: [240, 232, 180, 255],
+            alignment: doc_model::TextAlignment::Left,
+        };
+        assert!(document.set_text_layer_style(text_id, style));
+        document
+    }
+
+    fn build_text_design_fixture_document() -> doc_model::Document {
+        let mut document = build_representative_controller_document();
+
+        let title_id = document.add_text_layer(
+            "Hero Title",
+            "PhotoTux",
+            doc_model::TextTransform::new(18, 18),
+        );
+        assert!(document.set_text_layer_style(
+            title_id,
+            doc_model::TextStyle {
+                font_family: "Bitmap Sans".to_string(),
+                font_size_px: 28,
+                line_height_percent: 130,
+                letter_spacing: 1,
+                fill_rgba: [252, 230, 160, 255],
+                alignment: doc_model::TextAlignment::Left,
+            }
+        ));
+
+        let caption_id = document.add_text_layer(
+            "Caption",
+            "Rust GTK4 + wgpu",
+            doc_model::TextTransform::new(18, 54),
+        );
+        assert!(document.set_text_layer_style(
+            caption_id,
+            doc_model::TextStyle {
+                font_family: "Bitmap Sans".to_string(),
+                font_size_px: 16,
+                line_height_percent: 120,
+                letter_spacing: 0,
+                fill_rgba: [170, 214, 255, 220],
+                alignment: doc_model::TextAlignment::Left,
+            }
+        ));
+        assert!(document.set_text_layer_opacity(caption_id, 85));
+        assert!(document.set_text_layer_blend_mode(caption_id, doc_model::BlendMode::Screen));
 
         document
     }
@@ -3826,6 +4638,148 @@ mod tests {
         );
     }
 
+    
+    #[test]
+    fn text_tool_preview_commit_and_history_roundtrip() {
+        let mut controller = PhotoTuxController::new();
+        let before = controller.canvas_raster();
+
+        controller.select_tool(ShellToolKind::Text);
+        controller.begin_canvas_interaction(18, 22);
+        assert!(controller.snapshot().text.editing);
+
+        controller.update_text_session(
+            "PhotoTux".to_string(),
+            "Bitmap Sans".to_string(),
+            24,
+            130,
+            1,
+            [244, 232, 176, 255],
+            ui_shell::ShellTextAlignment::Center,
+        );
+
+        let preview = controller.canvas_raster();
+        assert_ne!(before.pixels, preview.pixels);
+
+        controller.commit_text_session();
+
+        let snapshot = controller.snapshot();
+        assert_eq!(controller.document.text_layer_count(), 1);
+        assert!(snapshot.text.selected);
+        assert!(!snapshot.text.editing);
+        assert_eq!(preview.pixels, controller.canvas_raster().pixels);
+
+        controller.undo();
+        assert_eq!(controller.document.text_layer_count(), 0);
+
+        controller.redo();
+        assert_eq!(controller.document.text_layer_count(), 1);
+        assert!(controller
+            .snapshot()
+            .history_entries
+            .iter()
+            .any(|entry| entry.contains("Add Text")));
+    }
+
+    #[test]
+    fn text_layer_edit_and_move_roundtrip_history() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_single_text_fixture_document();
+        controller.reset_selected_structure_target_to_active_layer();
+
+        let text_layer_id = controller.document.text_layers()[0].id;
+        let original_text = controller.document.text_layer_by_id(text_layer_id).unwrap().content.clone();
+        let original_transform = controller
+            .document
+            .text_layer_by_id(text_layer_id)
+            .unwrap()
+            .transform
+            .clone();
+
+        controller.select_layer(text_layer_id);
+        controller.begin_text_edit();
+        controller.update_text_session(
+            "PhotoTux Beta".to_string(),
+            "Bitmap Sans".to_string(),
+            20,
+            125,
+            0,
+            [255, 210, 128, 255],
+            ui_shell::ShellTextAlignment::Left,
+        );
+        controller.commit_text_session();
+
+        assert_eq!(
+            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
+            "PhotoTux Beta"
+        );
+
+        controller.undo();
+        assert_eq!(
+            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
+            original_text
+        );
+
+        controller.redo();
+        assert_eq!(
+            controller.document.text_layer_by_id(text_layer_id).unwrap().content,
+            "PhotoTux Beta"
+        );
+
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(original_transform.origin_x, original_transform.origin_y);
+        controller.update_canvas_interaction(
+            original_transform.origin_x + 14,
+            original_transform.origin_y + 10,
+        );
+        controller.end_canvas_interaction();
+
+        let moved_transform = controller
+            .document
+            .text_layer_by_id(text_layer_id)
+            .unwrap()
+            .transform
+            .clone();
+        assert_ne!(moved_transform, original_transform);
+
+        controller.undo();
+        assert_eq!(
+            controller.document.text_layer_by_id(text_layer_id).unwrap().transform,
+            original_transform
+        );
+
+        controller.redo();
+        assert_eq!(
+            controller.document.text_layer_by_id(text_layer_id).unwrap().transform,
+            moved_transform
+        );
+    }
+
+    #[test]
+    fn text_design_fixture_export_roundtrip_matches_canvas_raster() {
+        let working_directory = unique_temp_dir("text-export");
+        fs::create_dir_all(&working_directory)
+            .expect("text export working directory should be created");
+        let export_path = working_directory.join("text-scene.png");
+
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_text_design_fixture_document();
+        controller.reset_selected_structure_target_to_active_layer();
+
+        let expected = controller.canvas_raster();
+        assert_eq!(expected.pixels, flatten_document_rgba(&controller.document));
+
+        controller.export_document(export_path.clone());
+        wait_for_background_jobs(&mut controller);
+
+        let imported = import_png_from_path(&export_path)
+            .expect("exported text design scene should import as PNG");
+        assert_eq!(flatten_document_rgba(&imported), expected.pixels);
+
+        fs::remove_file(&export_path).expect("exported text design scene should be removed");
+        fs::remove_dir_all(&working_directory)
+            .expect("text export working directory should be removed");
+    }
     #[test]
     fn color_actions_update_snapshot() {
         let mut controller = PhotoTuxController::new();
@@ -5120,7 +6074,8 @@ mod tests {
         controller.create_group_from_active_layer();
         let group_id = first_group_id(&controller.document);
 
-        controller.select_layer(1);
+        let second_layer_id = controller.document.layer(1).map(|layer| layer.id).unwrap();
+        controller.select_layer(second_layer_id);
         let moved_layer_id = controller.document.active_layer().id;
         controller.select_group(group_id);
         controller.move_active_layer_into_selected_group();

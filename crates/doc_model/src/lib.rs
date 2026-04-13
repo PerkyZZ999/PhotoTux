@@ -294,6 +294,87 @@ pub struct LayerStateSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerKind {
+    Raster,
+    Text,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextStyle {
+    pub font_family: String,
+    pub font_size_px: u32,
+    pub line_height_percent: u32,
+    pub letter_spacing: i32,
+    pub fill_rgba: [u8; 4],
+    pub alignment: TextAlignment,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 48,
+            line_height_percent: 120,
+            letter_spacing: 0,
+            fill_rgba: [255, 255, 255, 255],
+            alignment: TextAlignment::Left,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextTransform {
+    pub origin_x: i32,
+    pub origin_y: i32,
+}
+
+impl TextTransform {
+    pub const fn new(origin_x: i32, origin_y: i32) -> Self {
+        Self { origin_x, origin_y }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextLayer {
+    pub id: LayerId,
+    pub name: String,
+    pub visible: bool,
+    pub opacity_percent: u8,
+    pub blend_mode: BlendMode,
+    pub transform: TextTransform,
+    pub content: String,
+    pub style: TextStyle,
+}
+
+impl TextLayer {
+    pub fn new(
+        name: impl Into<String>,
+        content: impl Into<String>,
+        transform: TextTransform,
+    ) -> Self {
+        Self {
+            id: LayerId::new(),
+            name: name.into(),
+            visible: true,
+            opacity_percent: 100,
+            blend_mode: BlendMode::Normal,
+            transform,
+            content: content.into(),
+            style: TextStyle::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerHierarchyNodeRef {
     Layer(LayerId),
     Group(GroupId),
@@ -331,6 +412,7 @@ pub struct Document {
     pub id: DocumentId,
     pub canvas_size: CanvasSize,
     pub layers: Vec<RasterLayer>,
+    pub text_layers: Vec<TextLayer>,
     pub layer_hierarchy: Vec<LayerHierarchyNode>,
     pub active_layer_index: usize,
     pub active_edit_target: LayerEditTarget,
@@ -349,6 +431,7 @@ impl Document {
             id: DocumentId::new(),
             canvas_size: CanvasSize::new(width, height),
             layers: vec![background],
+            text_layers: Vec::new(),
             layer_hierarchy: vec![LayerHierarchyNode::Layer(background_id)],
             active_layer_index: 0,
             active_edit_target: LayerEditTarget::LayerPixels,
@@ -380,6 +463,10 @@ impl Document {
 
     pub fn layer_count(&self) -> usize {
         self.layers.len()
+    }
+
+    pub fn total_layer_count(&self) -> usize {
+        self.layers.len() + self.text_layers.len()
     }
 
     pub fn active_layer(&self) -> &RasterLayer {
@@ -562,6 +649,7 @@ impl Document {
             .layers
             .iter()
             .map(|layer| layer.id)
+            .chain(self.text_layers.iter().map(|layer| layer.id))
             .collect::<HashSet<_>>();
         let mut referenced_layer_ids = HashSet::new();
         let mut referenced_group_ids = HashSet::new();
@@ -583,9 +671,45 @@ impl Document {
         self.layers.get(index)
     }
 
+    pub fn text_layers(&self) -> &[TextLayer] {
+        &self.text_layers
+    }
+
+    pub fn text_layer_count(&self) -> usize {
+        self.text_layers.len()
+    }
+
+    pub fn text_layer(&self, index: usize) -> Option<&TextLayer> {
+        self.text_layers.get(index)
+    }
+
+    pub fn text_layer_mut(&mut self, index: usize) -> Option<&mut TextLayer> {
+        self.text_layers.get_mut(index)
+    }
+
     pub fn layer_by_id(&self, layer_id: LayerId) -> Option<&RasterLayer> {
         let index = self.layer_index_by_id(layer_id)?;
         self.layers.get(index)
+    }
+
+    pub fn text_layer_by_id(&self, layer_id: LayerId) -> Option<&TextLayer> {
+        let index = self.text_layer_index_by_id(layer_id)?;
+        self.text_layers.get(index)
+    }
+
+    pub fn text_layer_mut_by_id(&mut self, layer_id: LayerId) -> Option<&mut TextLayer> {
+        let index = self.text_layer_index_by_id(layer_id)?;
+        self.text_layers.get_mut(index)
+    }
+
+    pub fn layer_kind_by_id(&self, layer_id: LayerId) -> Option<LayerKind> {
+        if self.layer_index_by_id(layer_id).is_some() {
+            return Some(LayerKind::Raster);
+        }
+        if self.text_layer_index_by_id(layer_id).is_some() {
+            return Some(LayerKind::Text);
+        }
+        None
     }
 
     pub fn layer_mut(&mut self, index: usize) -> Option<&mut RasterLayer> {
@@ -594,6 +718,137 @@ impl Document {
 
     pub fn layer_index_by_id(&self, layer_id: LayerId) -> Option<usize> {
         self.layers.iter().position(|layer| layer.id == layer_id)
+    }
+
+    pub fn text_layer_index_by_id(&self, layer_id: LayerId) -> Option<usize> {
+        self.text_layers.iter().position(|layer| layer.id == layer_id)
+    }
+
+    pub fn has_visible_text_layers(&self) -> bool {
+        self.text_layers.iter().any(|layer| layer.visible)
+    }
+
+    pub fn insert_text_layer(&mut self, layer: TextLayer, after_layer_id: Option<LayerId>) -> bool {
+        if self.layer_kind_by_id(layer.id).is_some() {
+            return false;
+        }
+
+        let backup_hierarchy = self.layer_hierarchy.clone();
+        self.text_layers.push(layer.clone());
+        if self.group_count() == 0 {
+            if let Some(after_layer_id) = after_layer_id {
+                self.insert_flat_layer_after(after_layer_id, layer.id);
+            } else {
+                self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer.id));
+            }
+        } else {
+            self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer.id));
+        }
+
+        if self.validate_layer_hierarchy().is_err() {
+            self.text_layers.retain(|candidate| candidate.id != layer.id);
+            self.layer_hierarchy = backup_hierarchy;
+            return false;
+        }
+
+        true
+    }
+
+    pub fn upsert_text_layer_storage(&mut self, layer: TextLayer) {
+        if let Some(existing) = self.text_layer_mut_by_id(layer.id) {
+            *existing = layer;
+        } else {
+            self.text_layers.push(layer);
+        }
+    }
+
+    pub fn remove_text_layer_storage(&mut self, layer_id: LayerId) -> bool {
+        let Some(index) = self.text_layer_index_by_id(layer_id) else {
+            return false;
+        };
+        self.text_layers.remove(index);
+        true
+    }
+
+    pub fn remove_text_layer(&mut self, layer_id: LayerId) -> bool {
+        let Some(text_index) = self.text_layer_index_by_id(layer_id) else {
+            return false;
+        };
+
+        let mut hierarchy = self.layer_hierarchy.clone();
+        if Self::extract_node_from_nodes(&mut hierarchy, LayerHierarchyNodeRef::Layer(layer_id))
+            .is_none()
+        {
+            return false;
+        }
+
+        self.text_layers.remove(text_index);
+        self.set_layer_hierarchy(hierarchy).is_ok()
+    }
+
+    pub fn rename_text_layer(&mut self, layer_id: LayerId, name: impl Into<String>) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.name = name.into();
+        true
+    }
+
+    pub fn set_text_layer_visibility(&mut self, layer_id: LayerId, visible: bool) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.visible = visible;
+        true
+    }
+
+    pub fn set_text_layer_opacity(&mut self, layer_id: LayerId, opacity_percent: u8) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.opacity_percent = opacity_percent.min(100);
+        true
+    }
+
+    pub fn set_text_layer_blend_mode(&mut self, layer_id: LayerId, blend_mode: BlendMode) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.blend_mode = blend_mode;
+        true
+    }
+
+    pub fn set_text_layer_content(&mut self, layer_id: LayerId, content: impl Into<String>) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.content = content.into();
+        true
+    }
+
+    pub fn set_text_layer_style(&mut self, layer_id: LayerId, style: TextStyle) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.style = style;
+        true
+    }
+
+    pub fn set_text_layer_transform(&mut self, layer_id: LayerId, transform: TextTransform) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.transform = transform;
+        true
+    }
+
+    pub fn translate_text_layer(&mut self, layer_id: LayerId, delta_x: i32, delta_y: i32) -> bool {
+        let Some(layer) = self.text_layer_mut_by_id(layer_id) else {
+            return false;
+        };
+        layer.transform.origin_x += delta_x;
+        layer.transform.origin_y += delta_y;
+        true
     }
 
     pub fn tile_origin(&self, coord: TileCoord) -> (u32, u32) {
@@ -899,11 +1154,60 @@ impl Document {
     }
 
     fn rebuild_flat_layer_hierarchy(&mut self) {
-        self.layer_hierarchy = self
-            .layers
+        if self.layer_hierarchy.iter().any(|node| matches!(node, LayerHierarchyNode::Group(_))) {
+            return;
+        }
+
+        let mut raster_ids = self.layers.iter().map(|layer| layer.id);
+        let text_ids = self
+            .text_layers
             .iter()
-            .map(|layer| LayerHierarchyNode::Layer(layer.id))
-            .collect();
+            .map(|layer| layer.id)
+            .collect::<HashSet<_>>();
+        let mut rebuilt = Vec::with_capacity(self.total_layer_count());
+
+        for node in &self.layer_hierarchy {
+            match node {
+                LayerHierarchyNode::Layer(layer_id) if text_ids.contains(layer_id) => {
+                    rebuilt.push(LayerHierarchyNode::Layer(*layer_id));
+                }
+                LayerHierarchyNode::Layer(_) => {
+                    if let Some(layer_id) = raster_ids.next() {
+                        rebuilt.push(LayerHierarchyNode::Layer(layer_id));
+                    }
+                }
+                LayerHierarchyNode::Group(_) => {}
+            }
+        }
+
+        for layer_id in raster_ids {
+            rebuilt.push(LayerHierarchyNode::Layer(layer_id));
+        }
+
+        for layer in &self.text_layers {
+            if !rebuilt.iter().any(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == layer.id)) {
+                rebuilt.push(LayerHierarchyNode::Layer(layer.id));
+            }
+        }
+
+        self.layer_hierarchy = rebuilt;
+    }
+
+    fn insert_flat_layer_after(&mut self, after_layer_id: LayerId, inserted_layer_id: LayerId) {
+        if self.group_count() != 0 {
+            self.layer_hierarchy
+                .push(LayerHierarchyNode::Layer(inserted_layer_id));
+            return;
+        }
+
+        let insertion_index = self
+            .layer_hierarchy
+            .iter()
+            .position(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == after_layer_id))
+            .map(|index| index + 1)
+            .unwrap_or(self.layer_hierarchy.len());
+        self.layer_hierarchy
+            .insert(insertion_index, LayerHierarchyNode::Layer(inserted_layer_id));
     }
 
     pub fn selection(&self) -> Option<RectSelection> {
@@ -1016,13 +1320,32 @@ impl Document {
     }
 
     pub fn add_layer(&mut self, name: impl Into<String>) -> LayerId {
+        let active_layer_id = self.active_layer().id;
         let layer = RasterLayer::new(name);
         let layer_id = layer.id;
         self.layers.insert(self.active_layer_index + 1, layer);
         if self.group_count() == 0 {
-            self.rebuild_flat_layer_hierarchy();
+            self.insert_flat_layer_after(active_layer_id, layer_id);
         }
         self.active_layer_index += 1;
+        layer_id
+    }
+
+    pub fn add_text_layer(
+        &mut self,
+        name: impl Into<String>,
+        content: impl Into<String>,
+        transform: TextTransform,
+    ) -> LayerId {
+        let active_layer_id = self.active_layer().id;
+        let layer = TextLayer::new(name, content, transform);
+        let layer_id = layer.id;
+        self.text_layers.push(layer);
+        if self.group_count() == 0 {
+            self.insert_flat_layer_after(active_layer_id, layer_id);
+        } else {
+            self.layer_hierarchy.push(LayerHierarchyNode::Layer(layer_id));
+        }
         layer_id
     }
 
@@ -1095,6 +1418,7 @@ impl Document {
 
     pub fn duplicate_layer(&mut self, index: usize) -> Option<LayerId> {
         let source = self.layers.get(index)?.clone();
+        let source_id = source.id;
         let duplicate_id = LayerId::new();
         let duplicate_name = format!("{} copy", source.name);
 
@@ -1117,7 +1441,7 @@ impl Document {
 
         self.layers.insert(index + 1, duplicate);
         if self.group_count() == 0 {
-            self.rebuild_flat_layer_hierarchy();
+            self.insert_flat_layer_after(source_id, duplicate_id);
         }
         self.active_layer_index = index + 1;
         Some(duplicate_id)
@@ -1327,8 +1651,12 @@ impl Document {
             return false;
         }
 
+        let deleted_layer_id = self.layers[index].id;
         self.layers.remove(index);
         if self.group_count() == 0 {
+            self.layer_hierarchy.retain(
+                |node| !matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == deleted_layer_id),
+            );
             self.rebuild_flat_layer_hierarchy();
         }
         if self.active_layer_index >= self.layers.len() {
@@ -1348,7 +1676,8 @@ impl Document {
 mod tests {
     use super::{
         BlendMode, Document, FreeformSelection, Guide, LayerEditTarget, LayerHierarchyNode,
-        LayerHierarchyNodeRef, RasterTile, SelectionPoint, SelectionShape, TileCoord,
+        LayerHierarchyNodeRef, LayerKind, RasterTile, SelectionPoint, SelectionShape,
+        TextAlignment, TextStyle, TextTransform, TileCoord,
     };
     use common::CanvasRect;
 
@@ -1408,6 +1737,86 @@ mod tests {
         assert_eq!(document.active_layer_index, 1);
         assert_eq!(document.active_layer().name, "Sketch");
         assert!(document.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn text_layers_are_document_owned_and_hierarchy_addressable() {
+        let mut document = Document::new(640, 480);
+
+        let text_layer_id = document.add_text_layer(
+            "Title",
+            "PhotoTux",
+            TextTransform::new(120, 80),
+        );
+        let text_index = document
+            .text_layer_index_by_id(text_layer_id)
+            .expect("text layer should be tracked");
+        let text_layer = document
+            .text_layer(text_index)
+            .expect("text layer should be accessible");
+
+        assert_eq!(document.text_layer_count(), 1);
+        assert_eq!(document.total_layer_count(), 2);
+        assert_eq!(document.layer_kind_by_id(text_layer_id), Some(LayerKind::Text));
+        assert_eq!(text_layer.name, "Title");
+        assert_eq!(text_layer.content, "PhotoTux");
+        assert_eq!(text_layer.transform, TextTransform::new(120, 80));
+        assert_eq!(text_layer.style.alignment, TextAlignment::Left);
+        assert!(document.has_visible_text_layers());
+        assert!(document.validate_layer_hierarchy().is_ok());
+        assert!(document
+            .layer_hierarchy()
+            .iter()
+            .any(|node| matches!(node, LayerHierarchyNode::Layer(layer_id) if *layer_id == text_layer_id)));
+    }
+
+    #[test]
+    fn text_layers_can_be_grouped_like_other_layer_nodes() {
+        let mut document = Document::new(640, 480);
+        let text_layer_id = document.add_text_layer(
+            "Caption",
+            "Editable",
+            TextTransform::new(12, 18),
+        );
+
+        let group_id = document
+            .wrap_hierarchy_node_in_group(LayerHierarchyNodeRef::Layer(text_layer_id), "Type")
+            .expect("text layer should be wrappable");
+
+        assert_eq!(document.group_for_layer(text_layer_id), Some(group_id));
+        assert!(document.validate_layer_hierarchy().is_ok());
+    }
+
+    #[test]
+    fn text_style_updates_can_be_applied_headlessly() {
+        let mut document = Document::new(640, 480);
+        let text_layer_id = document.add_text_layer(
+            "Label",
+            "Draft",
+            TextTransform::new(20, 32),
+        );
+        let text_layer = document
+            .text_layer_mut(
+                document
+                    .text_layer_index_by_id(text_layer_id)
+                    .expect("text layer should exist"),
+            )
+            .expect("text layer should be mutable");
+        text_layer.style = TextStyle {
+            font_family: "Noto Sans".to_string(),
+            font_size_px: 64,
+            line_height_percent: 140,
+            letter_spacing: 12,
+            fill_rgba: [200, 210, 220, 255],
+            alignment: TextAlignment::Center,
+        };
+
+        assert_eq!(text_layer.style.font_family, "Noto Sans");
+        assert_eq!(text_layer.style.font_size_px, 64);
+        assert_eq!(text_layer.style.line_height_percent, 140);
+        assert_eq!(text_layer.style.letter_spacing, 12);
+        assert_eq!(text_layer.style.fill_rgba, [200, 210, 220, 255]);
+        assert_eq!(text_layer.style.alignment, TextAlignment::Center);
     }
 
     #[test]
