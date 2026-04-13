@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="tool_options_bar_root">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">6</property>
+    <style>
+      <class name="tool-options-bar"/>
+    </style>
+    <child>
+      <object class="GtkImage" id="tool_options_icon">
+        <style>
+          <class name="tool-options-icon"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkLabel" id="tool_options_label">
+        <property name="label">Brush Tool</property>
+        <style>
+          <class name="tool-options-label"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_1">
+        <property name="label">Preset: Soft Round</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_2">
+        <property name="label">Size 24</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_3">
+        <property name="label">Hardness 80%</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_4">
+        <property name="label">Opacity 100%</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_5">
+        <property name="label">Flow 100%</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="tool_option_chip_6">
+        <property name="label">Mode Normal</property>
+        <style>
+          <class name="tool-chip"/>
+          <class name="tool-option-chip"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

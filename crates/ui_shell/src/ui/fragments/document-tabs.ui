@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkBox" id="document_tabs_root">
+    <property name="orientation">horizontal</property>
+    <property name="spacing">4</property>
+    <style>
+      <class name="document-tabs"/>
+    </style>
+    <child>
+      <object class="GtkButton" id="document_tab_active_button">
+        <property name="can-focus">False</property>
+        <style>
+          <class name="document-tab-active"/>
+        </style>
+        <child>
+          <object class="GtkBox" id="document_tab_content">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">6</property>
+            <style>
+              <class name="document-tab-content"/>
+            </style>
+            <child>
+              <object class="GtkLabel" id="document_tab_title">
+                <property name="label">Untitled</property>
+                <style>
+                  <class name="document-tab-title"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="document_tab_add_button">
+        <property name="label">+</property>
+        <property name="sensitive">False</property>
+        <property name="tooltip-text">Multiple document tabs are not active yet</property>
+        <style>
+          <class name="document-tab-add"/>
+        </style>
+      </object>
+    </child>
+  </object>
+</interface>

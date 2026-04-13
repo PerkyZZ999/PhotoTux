@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkHeaderBar" id="shell_titlebar_root">
+    <property name="show-title-buttons">True</property>
+    <style>
+      <class name="titlebar"/>
+    </style>
+    <child type="start">
+      <object class="GtkBox" id="shell_titlebar_brand">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">6</property>
+        <style>
+          <class name="app-brand"/>
+        </style>
+        <child>
+          <object class="GtkImage" id="shell_titlebar_logo">
+            <style>
+              <class name="titlebar-icon"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="shell_titlebar_app_name">
+            <property name="label">PhotoTux</property>
+            <style>
+              <class name="titlebar-app-name"/>
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child type="end">
+      <object class="GtkBox" id="shell_titlebar_actions">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">6</property>
+        <style>
+          <class name="titlebar-actions"/>
+        </style>
+        <child>
+          <object class="GtkButton" id="shell_titlebar_workspace_button">
+            <property name="label">Essentials</property>
+            <style>
+              <class name="chrome-button"/>
+              <class name="workspace-chip"/>
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_titlebar_search_button">
+            <property name="tooltip-text">Search</property>
+            <style>
+              <class name="chrome-button"/>
+              <class name="chrome-icon-button"/>
+            </style>
+            <child>
+              <object class="GtkImage" id="shell_titlebar_search_icon">
+                <style>
+                  <class name="titlebar-icon"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

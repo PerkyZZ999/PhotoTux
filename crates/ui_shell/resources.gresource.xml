@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/phototux">
+    <file alias="src/ui/dialogs/info-dialog.ui">src/ui/dialogs/info-dialog.ui</file>
+    <file alias="src/ui/fragments/panel-group.ui">src/ui/fragments/panel-group.ui</file>
+    <file alias="src/ui/fragments/titlebar.ui">src/ui/fragments/titlebar.ui</file>
+    <file alias="src/ui/fragments/tool-options-bar.ui">src/ui/fragments/tool-options-bar.ui</file>
+    <file alias="src/ui/fragments/document-tabs.ui">src/ui/fragments/document-tabs.ui</file>
+    <file alias="src/ui/fragments/status-bar.ui">src/ui/fragments/status-bar.ui</file>
+    <file alias="assets/logo/Logo_01.png">assets/logo/Logo_01.png</file>
+    <file alias="assets/icons/remixicon/brush-2-line.svg">assets/icons/remixicon/brush-2-line.svg</file>
+    <file alias="assets/icons/remixicon/drag-move-line.svg">assets/icons/remixicon/drag-move-line.svg</file>
+    <file alias="assets/icons/remixicon/eraser-line.svg">assets/icons/remixicon/eraser-line.svg</file>
+    <file alias="assets/icons/remixicon/expand-diagonal-2-line.svg">assets/icons/remixicon/expand-diagonal-2-line.svg</file>
+    <file alias="assets/icons/remixicon/export-line.svg">assets/icons/remixicon/export-line.svg</file>
+    <file alias="assets/icons/remixicon/eye-line.svg">assets/icons/remixicon/eye-line.svg</file>
+    <file alias="assets/icons/remixicon/eye-off-line.svg">assets/icons/remixicon/eye-off-line.svg</file>
+    <file alias="assets/icons/remixicon/focus-3-line.svg">assets/icons/remixicon/focus-3-line.svg</file>
+    <file alias="assets/icons/remixicon/folder-open-line.svg">assets/icons/remixicon/folder-open-line.svg</file>
+    <file alias="assets/icons/remixicon/hand.svg">assets/icons/remixicon/hand.svg</file>
+    <file alias="assets/icons/remixicon/history-line.svg">assets/icons/remixicon/history-line.svg</file>
+    <file alias="assets/icons/remixicon/image-add-line.svg">assets/icons/remixicon/image-add-line.svg</file>
+    <file alias="assets/icons/remixicon/layout-column-line.svg">assets/icons/remixicon/layout-column-line.svg</file>
+    <file alias="assets/icons/remixicon/palette-line.svg">assets/icons/remixicon/palette-line.svg</file>
+    <file alias="assets/icons/remixicon/save-3-line.svg">assets/icons/remixicon/save-3-line.svg</file>
+    <file alias="assets/icons/remixicon/search-line.svg">assets/icons/remixicon/search-line.svg</file>
+    <file alias="assets/icons/remixicon/settings-4-line.svg">assets/icons/remixicon/settings-4-line.svg</file>
+    <file alias="assets/icons/remixicon/zoom-in-line.svg">assets/icons/remixicon/zoom-in-line.svg</file>
+  </gresource>
+</gresources>
