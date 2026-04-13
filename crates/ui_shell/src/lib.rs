@@ -403,21 +403,23 @@ enum PendingDocumentAction {
 }
 
 impl PendingDocumentAction {
+    const fn is_open_project(&self) -> bool {
+        matches!(self, Self::ChooseOpenProject | Self::OpenProject(_))
+    }
+
     const fn prompt_title(&self) -> &'static str {
-        match self {
-            Self::ChooseOpenProject | Self::OpenProject(_) => {
-                "Save changes before opening another project?"
-            }
-            Self::ChooseImportImage | Self::ImportImage(_) => "Save changes before importing?",
+        if self.is_open_project() {
+            "Save changes before opening another project?"
+        } else {
+            "Save changes before importing?"
         }
     }
 
     const fn prompt_action_phrase(&self) -> &'static str {
-        match self {
-            Self::ChooseOpenProject | Self::OpenProject(_) => "open another project",
-            Self::ChooseImportImage | Self::ImportImage(_) => {
-                "import a file that replaces the current document"
-            }
+        if self.is_open_project() {
+            "open another project"
+        } else {
+            "import a file that replaces the current document"
         }
     }
 
@@ -1320,46 +1322,44 @@ impl ShellUiState {
     }
 
     fn request_open_project(self: &Rc<Self>) {
-        let snapshot = self.controller.borrow().snapshot();
-        if snapshot.dirty {
-            self.present_document_replacement_prompt(
-                &snapshot,
-                PendingDocumentAction::ChooseOpenProject,
-            );
-        } else if let Some(window) = self.window.borrow().as_ref() {
-            file_workflow::choose_open_project(window, self.clone());
-        }
+        self.request_document_replacement(PendingDocumentAction::ChooseOpenProject);
     }
 
     fn request_import_image(self: &Rc<Self>) {
-        let snapshot = self.controller.borrow().snapshot();
-        if snapshot.dirty {
-            self.present_document_replacement_prompt(
-                &snapshot,
-                PendingDocumentAction::ChooseImportImage,
-            );
-        } else if let Some(window) = self.window.borrow().as_ref() {
-            file_workflow::choose_import_image(window, self.clone());
-        }
+        self.request_document_replacement(PendingDocumentAction::ChooseImportImage);
+    }
+
+    fn perform_document_replacement_choice(
+        self: &Rc<Self>,
+        action: &PendingDocumentAction,
+    ) -> bool {
+        let chooser: fn(&ApplicationWindow, Rc<ShellUiState>) = match action {
+            PendingDocumentAction::ChooseOpenProject => file_workflow::choose_open_project,
+            PendingDocumentAction::ChooseImportImage => file_workflow::choose_import_image,
+            _ => return false,
+        };
+
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
+            return true;
+        };
+
+        chooser(&window, self.clone());
+        true
     }
 
     fn perform_document_replacement(self: &Rc<Self>, action: PendingDocumentAction) {
+        if self.perform_document_replacement_choice(&action) {
+            return;
+        }
+
         match action {
-            PendingDocumentAction::ChooseOpenProject => {
-                if let Some(window) = self.window.borrow().as_ref() {
-                    file_workflow::choose_open_project(window, self.clone());
-                }
-            }
-            PendingDocumentAction::ChooseImportImage => {
-                if let Some(window) = self.window.borrow().as_ref() {
-                    file_workflow::choose_import_image(window, self.clone());
-                }
-            }
             PendingDocumentAction::OpenProject(path) => {
                 self.controller.borrow_mut().open_document(path);
             }
             PendingDocumentAction::ImportImage(path) => {
                 self.controller.borrow_mut().import_image(path);
+            }
+            PendingDocumentAction::ChooseOpenProject | PendingDocumentAction::ChooseImportImage => {
             }
         }
     }
