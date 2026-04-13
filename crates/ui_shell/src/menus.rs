@@ -28,36 +28,80 @@ pub(super) fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUi
     bar
 }
 
-fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Edit").build();
+fn build_top_level_menu(label: &str) -> (MenuButton, Popover, GtkBox) {
+    let button = MenuButton::builder().label(label).build();
     button.set_has_frame(false);
     button.add_css_class("menu-button");
-
     let (popover, menu) = create_menu_popover(&button);
+    (button, popover, menu)
+}
 
-    let undo = build_icon_label_button("arrow-go-back-line.svg", "Undo");
-    undo.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        undo.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().undo();
-        });
-    }
-    menu.append(&undo);
+fn finish_top_level_menu(button: MenuButton, popover: Popover, menu: GtkBox) -> MenuButton {
+    popover.set_child(Some(&menu));
+    button.set_popover(Some(&popover));
+    button
+}
 
-    let redo = build_icon_label_button("arrow-go-forward-line.svg", "Redo");
-    redo.add_css_class("menu-dropdown-item");
-    {
+fn append_menu_item<F>(menu: &GtkBox, popover: &Popover, item: &Button, action: F)
+where
+    F: Fn() + 'static,
+{
+    item.add_css_class("menu-dropdown-item");
+    let popover = popover.clone();
+    item.connect_clicked(move |_| {
+        popover.popdown();
+        action();
+    });
+    menu.append(item);
+}
+
+fn append_icon_menu_item<F>(
+    menu: &GtkBox,
+    popover: &Popover,
+    icon: &str,
+    label: &str,
+    action: F,
+) -> Button
+where
+    F: Fn() + 'static,
+{
+    let item = build_icon_label_button(icon, label);
+    append_menu_item(menu, popover, &item, action);
+    item
+}
+
+fn append_icon_shortcut_menu_item<F>(
+    menu: &GtkBox,
+    popover: &Popover,
+    icon: &str,
+    label: &str,
+    shortcut: Option<&str>,
+    action: F,
+) -> Button
+where
+    F: Fn() + 'static,
+{
+    let item = build_icon_label_shortcut_button(icon, label, shortcut);
+    append_menu_item(menu, popover, &item, action);
+    item
+}
+
+fn append_menu_separator(menu: &GtkBox) {
+    menu.append(&Separator::new(Orientation::Horizontal));
+}
+
+fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
+    let (button, popover, menu) = build_top_level_menu("Edit");
+
+    let undo = append_icon_menu_item(&menu, &popover, "arrow-go-back-line.svg", "Undo", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        redo.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().redo();
-        });
-    }
-    menu.append(&redo);
+        move || controller.borrow_mut().undo()
+    });
+
+    let redo = append_icon_menu_item(&menu, &popover, "arrow-go-forward-line.svg", "Redo", {
+        let controller = shell_state.controller.clone();
+        move || controller.borrow_mut().redo()
+    });
 
     {
         let shell_state = shell_state.clone();
@@ -70,155 +114,93 @@ fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Image").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Image");
 
-    let (popover, menu) = create_menu_popover(&button);
-
-    let start_transform = build_icon_label_shortcut_button(
+    let start_transform = append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
         "expand-diagonal-2-line.svg",
         "Start Transform",
         Some("T"),
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().begin_transform()
+        },
     );
-    start_transform.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        start_transform.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().begin_transform();
-        });
-    }
-    menu.append(&start_transform);
 
-    let scale_up = build_icon_label_button("add-line.svg", "Scale Transform Up");
-    scale_up.add_css_class("menu-dropdown-item");
-    {
+    let scale_up = append_icon_menu_item(&menu, &popover, "add-line.svg", "Scale Transform Up", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_up.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_up();
-        });
-    }
-    menu.append(&scale_up);
+        move || controller.borrow_mut().scale_transform_up()
+    });
 
-    let scale_down = build_icon_label_button("subtract-line.svg", "Scale Transform Down");
-    scale_down.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_down.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_down();
-        });
-    }
-    menu.append(&scale_down);
+    let scale_down = append_icon_menu_item(
+        &menu,
+        &popover,
+        "subtract-line.svg",
+        "Scale Transform Down",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().scale_transform_down()
+        },
+    );
 
-    let scale_x_up = build_icon_label_button("add-line.svg", "Scale X Up");
-    scale_x_up.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "add-line.svg", "Scale X Up", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_x_up.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_x_up();
-        });
-    }
-    menu.append(&scale_x_up);
+        move || controller.borrow_mut().scale_transform_x_up()
+    });
 
-    let scale_x_down = build_icon_label_button("subtract-line.svg", "Scale X Down");
-    scale_x_down.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "subtract-line.svg", "Scale X Down", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_x_down.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_x_down();
-        });
-    }
-    menu.append(&scale_x_down);
+        move || controller.borrow_mut().scale_transform_x_down()
+    });
 
-    let scale_y_up = build_icon_label_button("add-line.svg", "Scale Y Up");
-    scale_y_up.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "add-line.svg", "Scale Y Up", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_y_up.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_y_up();
-        });
-    }
-    menu.append(&scale_y_up);
+        move || controller.borrow_mut().scale_transform_y_up()
+    });
 
-    let scale_y_down = build_icon_label_button("subtract-line.svg", "Scale Y Down");
-    scale_y_down.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "subtract-line.svg", "Scale Y Down", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        scale_y_down.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().scale_transform_y_down();
-        });
-    }
-    menu.append(&scale_y_down);
+        move || controller.borrow_mut().scale_transform_y_down()
+    });
 
-    let rotate_left = build_icon_label_button("history-line.svg", "Rotate Left");
-    rotate_left.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "history-line.svg", "Rotate Left", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        rotate_left.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().rotate_transform_left();
-        });
-    }
-    menu.append(&rotate_left);
+        move || controller.borrow_mut().rotate_transform_left()
+    });
 
-    let rotate_right = build_icon_label_button("history-line.svg", "Rotate Right");
-    rotate_right.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "history-line.svg", "Rotate Right", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        rotate_right.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().rotate_transform_right();
-        });
-    }
-    menu.append(&rotate_right);
+        move || controller.borrow_mut().rotate_transform_right()
+    });
 
-    let commit_transform =
-        build_icon_label_shortcut_button("check-line.svg", "Commit Transform", Some("Enter"));
-    commit_transform.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        commit_transform.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().commit_transform();
-        });
-    }
-    menu.append(&commit_transform);
+    let commit_transform = append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "check-line.svg",
+        "Commit Transform",
+        Some("Enter"),
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().commit_transform()
+        },
+    );
 
-    let cancel_transform =
-        build_icon_label_shortcut_button("close-line.svg", "Cancel Transform", Some("Esc"));
-    cancel_transform.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        cancel_transform.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().cancel_transform();
-        });
-    }
-    menu.append(&cancel_transform);
+    let cancel_transform = append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "close-line.svg",
+        "Cancel Transform",
+        Some("Esc"),
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().cancel_transform()
+        },
+    );
 
     {
         let shell_state = shell_state.clone();
@@ -239,138 +221,76 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Layer").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Layer");
 
-    let (popover, menu) = create_menu_popover(&button);
-
-    let add = build_icon_label_button("add-line.svg", "New Layer");
-    add.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "add-line.svg", "New Layer", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        add.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().add_layer();
-        });
-    }
-    menu.append(&add);
+        move || controller.borrow_mut().add_layer()
+    });
 
-    let duplicate = build_icon_label_button("file-copy-line.svg", "Duplicate Layer");
-    duplicate.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        duplicate.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().duplicate_active_layer();
+    let duplicate =
+        append_icon_menu_item(&menu, &popover, "file-copy-line.svg", "Duplicate Layer", {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().duplicate_active_layer()
         });
-    }
-    menu.append(&duplicate);
 
-    let delete = build_icon_label_button("delete-bin-line.svg", "Delete Layer");
-    delete.add_css_class("menu-dropdown-item");
-    {
+    let delete = append_icon_menu_item(&menu, &popover, "delete-bin-line.svg", "Delete Layer", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        delete.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().delete_active_layer();
-        });
-    }
-    menu.append(&delete);
+        move || controller.borrow_mut().delete_active_layer()
+    });
 
-    let add_mask = build_icon_label_button("add-line.svg", "Add Layer Mask");
-    add_mask.add_css_class("menu-dropdown-item");
-    {
+    let add_mask = append_icon_menu_item(&menu, &popover, "add-line.svg", "Add Layer Mask", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        add_mask.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().add_active_layer_mask();
-        });
-    }
-    menu.append(&add_mask);
+        move || controller.borrow_mut().add_active_layer_mask()
+    });
 
-    let remove_mask = build_icon_label_button("delete-bin-line.svg", "Delete Layer Mask");
-    remove_mask.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        remove_mask.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().remove_active_layer_mask();
-        });
-    }
-    menu.append(&remove_mask);
+    let remove_mask = append_icon_menu_item(
+        &menu,
+        &popover,
+        "delete-bin-line.svg",
+        "Delete Layer Mask",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().remove_active_layer_mask()
+        },
+    );
 
-    let toggle_mask =
-        build_icon_label_button("contrast-2-line.svg", "Enable or Disable Layer Mask");
-    toggle_mask.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        toggle_mask.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().toggle_active_layer_mask_enabled();
-        });
-    }
-    menu.append(&toggle_mask);
+    let toggle_mask = append_icon_menu_item(
+        &menu,
+        &popover,
+        "contrast-2-line.svg",
+        "Enable or Disable Layer Mask",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().toggle_active_layer_mask_enabled()
+        },
+    );
 
-    let edit_pixels = build_icon_label_button("brush-2-line.svg", "Edit Layer Pixels");
-    edit_pixels.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        edit_pixels.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().edit_active_layer_pixels();
+    let edit_pixels =
+        append_icon_menu_item(&menu, &popover, "brush-2-line.svg", "Edit Layer Pixels", {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().edit_active_layer_pixels()
         });
-    }
-    menu.append(&edit_pixels);
 
-    let edit_mask = build_icon_label_button("eraser-line.svg", "Edit Layer Mask");
-    edit_mask.add_css_class("menu-dropdown-item");
-    {
+    let edit_mask = append_icon_menu_item(&menu, &popover, "eraser-line.svg", "Edit Layer Mask", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        edit_mask.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().edit_active_layer_mask();
-        });
-    }
-    menu.append(&edit_mask);
+        move || controller.borrow_mut().edit_active_layer_mask()
+    });
 
-    let move_up = build_icon_label_button("arrow-up-line.svg", "Move Layer Up");
-    move_up.add_css_class("menu-dropdown-item");
-    {
+    let move_up = append_icon_menu_item(&menu, &popover, "arrow-up-line.svg", "Move Layer Up", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        move_up.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().move_active_layer_up();
-        });
-    }
-    menu.append(&move_up);
+        move || controller.borrow_mut().move_active_layer_up()
+    });
 
-    let move_down = build_icon_label_button("arrow-down-line.svg", "Move Layer Down");
-    move_down.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        move_down.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().move_active_layer_down();
+    let move_down =
+        append_icon_menu_item(&menu, &popover, "arrow-down-line.svg", "Move Layer Down", {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().move_active_layer_down()
         });
-    }
-    menu.append(&move_down);
 
     {
         let shell_state = shell_state.clone();
@@ -409,41 +329,33 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Select").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Select");
 
-    let (popover, menu) = create_menu_popover(&button);
+    let clear = append_icon_menu_item(
+        &menu,
+        &popover,
+        "close-circle-line.svg",
+        "Clear Selection",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().clear_selection()
+        },
+    );
 
-    let clear = build_icon_label_button("close-circle-line.svg", "Clear Selection");
-    clear.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        clear.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().clear_selection();
-        });
-    }
-    menu.append(&clear);
-
-    let invert = build_icon_label_button("contrast-2-line.svg", "Invert Selection");
-    invert.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        invert.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().invert_selection();
-        });
-    }
-    menu.append(&invert);
+    let invert = append_icon_menu_item(
+        &menu,
+        &popover,
+        "contrast-2-line.svg",
+        "Invert Selection",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().invert_selection()
+        },
+    );
 
     {
         let shell_state = shell_state.clone();
@@ -461,97 +373,77 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Filter").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Filter");
 
-    let (popover, menu) = create_menu_popover(&button);
+    let opacity_up = append_icon_menu_item(
+        &menu,
+        &popover,
+        "add-circle-line.svg",
+        "Increase Layer Opacity",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().increase_active_layer_opacity()
+        },
+    );
 
-    let opacity_up = build_icon_label_button("add-circle-line.svg", "Increase Layer Opacity");
-    opacity_up.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        opacity_up.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().increase_active_layer_opacity();
+    let opacity_down = append_icon_menu_item(
+        &menu,
+        &popover,
+        "indeterminate-circle-line.svg",
+        "Decrease Layer Opacity",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().decrease_active_layer_opacity()
+        },
+    );
+
+    let next_blend = append_icon_menu_item(
+        &menu,
+        &popover,
+        "arrow-right-s-line.svg",
+        "Next Blend Mode",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().next_active_layer_blend_mode()
+        },
+    );
+
+    let previous_blend = append_icon_menu_item(
+        &menu,
+        &popover,
+        "arrow-left-s-line.svg",
+        "Previous Blend Mode",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().previous_active_layer_blend_mode()
+        },
+    );
+
+    append_menu_separator(&menu);
+
+    let invert_colors =
+        append_icon_menu_item(&menu, &popover, "refresh-line.svg", "Invert Colors", {
+            let controller = shell_state.controller.clone();
+            move || {
+                controller
+                    .borrow_mut()
+                    .apply_destructive_filter(DestructiveFilterKind::InvertColors)
+            }
         });
-    }
-    menu.append(&opacity_up);
 
-    let opacity_down =
-        build_icon_label_button("indeterminate-circle-line.svg", "Decrease Layer Opacity");
-    opacity_down.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        opacity_down.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().decrease_active_layer_opacity();
+    let desaturate =
+        append_icon_menu_item(&menu, &popover, "contrast-drop-2-line.svg", "Desaturate", {
+            let controller = shell_state.controller.clone();
+            move || {
+                controller
+                    .borrow_mut()
+                    .apply_destructive_filter(DestructiveFilterKind::Desaturate)
+            }
         });
-    }
-    menu.append(&opacity_down);
-
-    let next_blend = build_icon_label_button("arrow-right-s-line.svg", "Next Blend Mode");
-    next_blend.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        next_blend.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().next_active_layer_blend_mode();
-        });
-    }
-    menu.append(&next_blend);
-
-    let previous_blend = build_icon_label_button("arrow-left-s-line.svg", "Previous Blend Mode");
-    previous_blend.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        previous_blend.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().previous_active_layer_blend_mode();
-        });
-    }
-    menu.append(&previous_blend);
-
-    let filter_separator = Separator::new(Orientation::Horizontal);
-    menu.append(&filter_separator);
-
-    let invert_colors = build_icon_label_button("refresh-line.svg", "Invert Colors");
-    invert_colors.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        invert_colors.connect_clicked(move |_| {
-            popover.popdown();
-            controller
-                .borrow_mut()
-                .apply_destructive_filter(DestructiveFilterKind::InvertColors);
-        });
-    }
-    menu.append(&invert_colors);
-
-    let desaturate = build_icon_label_button("contrast-drop-2-line.svg", "Desaturate");
-    desaturate.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        desaturate.connect_clicked(move |_| {
-            popover.popdown();
-            controller
-                .borrow_mut()
-                .apply_destructive_filter(DestructiveFilterKind::Desaturate);
-        });
-    }
-    menu.append(&desaturate);
 
     {
         let shell_state = shell_state.clone();
@@ -574,275 +466,213 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("View").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("View");
 
-    let (popover, menu) = create_menu_popover(&button);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "zoom-in-line.svg",
+        "Zoom In",
+        Some("Ctrl++"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.canvas_state.borrow_mut().zoom_in()
+        },
+    );
 
-    let zoom_in = build_icon_label_shortcut_button("zoom-in-line.svg", "Zoom In", Some("Ctrl++"));
-    zoom_in.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        zoom_in.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.canvas_state.borrow_mut().zoom_in();
-        });
-    }
-    menu.append(&zoom_in);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "zoom-out-line.svg",
+        "Zoom Out",
+        Some("Ctrl+-"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.canvas_state.borrow_mut().zoom_out()
+        },
+    );
 
-    let zoom_out =
-        build_icon_label_shortcut_button("zoom-out-line.svg", "Zoom Out", Some("Ctrl+-"));
-    zoom_out.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        zoom_out.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.canvas_state.borrow_mut().zoom_out();
-        });
-    }
-    menu.append(&zoom_out);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "fullscreen-line.svg",
+        "Fit To View",
+        Some("Ctrl+0"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.canvas_state.borrow_mut().fit_to_view()
+        },
+    );
 
-    let fit =
-        build_icon_label_shortcut_button("fullscreen-line.svg", "Fit To View", Some("Ctrl+0"));
-    fit.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        fit.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.canvas_state.borrow_mut().fit_to_view();
-        });
-    }
-    menu.append(&fit);
+    append_icon_menu_item(
+        &menu,
+        &popover,
+        "layout-column-line.svg",
+        "Add Horizontal Guide",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().add_horizontal_guide()
+        },
+    );
 
-    let add_horizontal_guide =
-        build_icon_label_button("layout-column-line.svg", "Add Horizontal Guide");
-    add_horizontal_guide.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(
+        &menu,
+        &popover,
+        "layout-column-line.svg",
+        "Add Vertical Guide",
+        {
+            let controller = shell_state.controller.clone();
+            move || controller.borrow_mut().add_vertical_guide()
+        },
+    );
+
+    append_icon_menu_item(&menu, &popover, "eye-line.svg", "Show/Hide Guides", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        add_horizontal_guide.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().add_horizontal_guide();
-        });
-    }
-    menu.append(&add_horizontal_guide);
+        move || controller.borrow_mut().toggle_guides_visible()
+    });
 
-    let add_vertical_guide =
-        build_icon_label_button("layout-column-line.svg", "Add Vertical Guide");
-    add_vertical_guide.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "settings-4-line.svg", "Toggle Snapping", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        add_vertical_guide.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().add_vertical_guide();
-        });
-    }
-    menu.append(&add_vertical_guide);
+        move || controller.borrow_mut().toggle_snapping_enabled()
+    });
 
-    let toggle_guides = build_icon_label_button("eye-line.svg", "Show/Hide Guides");
-    toggle_guides.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "eye-off-line.svg", "Remove Last Guide", {
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        toggle_guides.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().toggle_guides_visible();
-        });
-    }
-    menu.append(&toggle_guides);
+        move || controller.borrow_mut().remove_last_guide()
+    });
 
-    let toggle_snapping = build_icon_label_button("settings-4-line.svg", "Toggle Snapping");
-    toggle_snapping.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        toggle_snapping.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().toggle_snapping_enabled();
-        });
-    }
-    menu.append(&toggle_snapping);
-
-    let remove_guide = build_icon_label_button("eye-off-line.svg", "Remove Last Guide");
-    remove_guide.add_css_class("menu-dropdown-item");
-    {
-        let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        remove_guide.connect_clicked(move |_| {
-            popover.popdown();
-            controller.borrow_mut().remove_last_guide();
-        });
-    }
-    menu.append(&remove_guide);
-
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("File").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("File");
 
-    let (popover, menu) = create_menu_popover(&button);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "folder-open-line.svg",
+        "Open Project...",
+        Some("Ctrl+O"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.request_open_project()
+        },
+    );
 
-    let open_project =
-        build_icon_label_shortcut_button("folder-open-line.svg", "Open Project...", Some("Ctrl+O"));
-    open_project.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        open_project.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.request_open_project();
-        });
-    }
-    menu.append(&open_project);
+    append_icon_menu_item(
+        &menu,
+        &popover,
+        "image-add-line.svg",
+        "Import Image Or PSD...",
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.request_import_image()
+        },
+    );
 
-    let import_image = build_icon_label_button("image-add-line.svg", "Import Image Or PSD...");
-    import_image.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        import_image.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.request_import_image();
-        });
-    }
-    menu.append(&import_image);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "save-3-line.svg",
+        "Save",
+        Some("Ctrl+S"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.request_project_save()
+        },
+    );
 
-    let save = build_icon_label_shortcut_button("save-3-line.svg", "Save", Some("Ctrl+S"));
-    save.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        save.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.request_project_save();
-        });
-    }
-    menu.append(&save);
-
-    let save_as =
-        build_icon_label_shortcut_button("save-3-line.svg", "Save As...", Some("Ctrl+Shift+S"));
-    save_as.add_css_class("menu-dropdown-item");
-    {
-        let shell_state = shell_state.clone();
-        let popover = popover.clone();
-        save_as.connect_clicked(move |_| {
-            popover.popdown();
-            shell_state.request_project_save_as();
-        });
-    }
-    menu.append(&save_as);
+    append_icon_shortcut_menu_item(
+        &menu,
+        &popover,
+        "save-3-line.svg",
+        "Save As...",
+        Some("Ctrl+Shift+S"),
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.request_project_save_as()
+        },
+    );
 
     for (label, extension) in [
         ("Export PNG...", "png"),
         ("Export JPEG...", "jpg"),
         ("Export WebP...", "webp"),
     ] {
-        let export = build_icon_label_button("export-line.svg", label);
-        export.add_css_class("menu-dropdown-item");
         let parent = window.clone();
         let controller = shell_state.controller.clone();
-        let popover = popover.clone();
-        export.connect_clicked(move |_| {
-            popover.popdown();
+        append_icon_menu_item(&menu, &popover, "export-line.svg", label, move || {
             file_workflow::choose_export_path(&parent, controller.clone(), extension);
         });
-        menu.append(&export);
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let button = MenuButton::builder().label("Window").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Window");
 
-    let (popover, menu) = create_menu_popover(&button);
-
-    let color_toggle = build_icon_label_button("palette-line.svg", "Toggle Color Panel");
-    color_toggle.add_css_class("menu-dropdown-item");
-    {
-        let panel = shell_state.color_group.clone();
-        let popover = popover.clone();
-        color_toggle.connect_clicked(move |_| {
-            popover.popdown();
-            panel.set_visible(!panel.is_visible());
+    let color_toggle =
+        append_icon_menu_item(&menu, &popover, "palette-line.svg", "Toggle Color Panel", {
+            let panel = shell_state.color_group.clone();
+            move || panel.set_visible(!panel.is_visible())
         });
-    }
-    menu.append(&color_toggle);
 
-    let properties_toggle =
-        build_icon_label_button("equalizer-line.svg", "Toggle Properties Panel");
-    properties_toggle.add_css_class("menu-dropdown-item");
-    {
-        let panel = shell_state.properties_group.clone();
-        let popover = popover.clone();
-        properties_toggle.connect_clicked(move |_| {
-            popover.popdown();
-            panel.set_visible(!panel.is_visible());
-        });
-    }
-    menu.append(&properties_toggle);
+    let properties_toggle = append_icon_menu_item(
+        &menu,
+        &popover,
+        "equalizer-line.svg",
+        "Toggle Properties Panel",
+        {
+            let panel = shell_state.properties_group.clone();
+            move || panel.set_visible(!panel.is_visible())
+        },
+    );
 
-    let layers_toggle = build_icon_label_button("layout-column-line.svg", "Toggle Layers Panel");
-    layers_toggle.add_css_class("menu-dropdown-item");
-    {
-        let panel = shell_state.layers_group.clone();
-        let popover = popover.clone();
-        layers_toggle.connect_clicked(move |_| {
-            popover.popdown();
-            panel.set_visible(!panel.is_visible());
-        });
-    }
-    menu.append(&layers_toggle);
+    let layers_toggle = append_icon_menu_item(
+        &menu,
+        &popover,
+        "layout-column-line.svg",
+        "Toggle Layers Panel",
+        {
+            let panel = shell_state.layers_group.clone();
+            move || panel.set_visible(!panel.is_visible())
+        },
+    );
 
-    let history_toggle = build_icon_label_button("history-line.svg", "Toggle History Panel");
-    history_toggle.add_css_class("menu-dropdown-item");
-    {
-        let panel = shell_state.history_group.clone();
-        let popover = popover.clone();
-        history_toggle.connect_clicked(move |_| {
-            popover.popdown();
-            panel.set_visible(!panel.is_visible());
-        });
-    }
-    menu.append(&history_toggle);
+    let history_toggle = append_icon_menu_item(
+        &menu,
+        &popover,
+        "history-line.svg",
+        "Toggle History Panel",
+        {
+            let panel = shell_state.history_group.clone();
+            move || panel.set_visible(!panel.is_visible())
+        },
+    );
 
-    let show_all = build_icon_label_button("layout-grid-line.svg", "Show All Panels");
-    show_all.add_css_class("menu-dropdown-item");
-    {
-        let color_group = shell_state.color_group.clone();
-        let properties_group = shell_state.properties_group.clone();
-        let layers_group = shell_state.layers_group.clone();
-        let history_group = shell_state.history_group.clone();
-        let popover = popover.clone();
-        show_all.connect_clicked(move |_| {
-            popover.popdown();
-            color_group.set_visible(true);
-            properties_group.set_visible(true);
-            layers_group.set_visible(true);
-            history_group.set_visible(true);
-        });
-    }
-    menu.append(&show_all);
+    let show_all = append_icon_menu_item(
+        &menu,
+        &popover,
+        "layout-grid-line.svg",
+        "Show All Panels",
+        {
+            let color_group = shell_state.color_group.clone();
+            let properties_group = shell_state.properties_group.clone();
+            let layers_group = shell_state.layers_group.clone();
+            let history_group = shell_state.history_group.clone();
+            move || {
+                color_group.set_visible(true);
+                properties_group.set_visible(true);
+                layers_group.set_visible(true);
+                history_group.set_visible(true);
+            }
+        },
+    );
 
     {
         let color_group = shell_state.color_group.clone();
@@ -898,44 +728,35 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
     }
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
 
 fn build_help_menu_button(window: &ApplicationWindow) -> MenuButton {
-    let button = MenuButton::builder().label("Help").build();
-    button.set_has_frame(false);
-    button.add_css_class("menu-button");
+    let (button, popover, menu) = build_top_level_menu("Help");
 
-    let (popover, menu) = create_menu_popover(&button);
+    append_icon_menu_item(
+        &menu,
+        &popover,
+        "keyboard-line.svg",
+        "Keyboard Shortcuts",
+        {
+            let parent = window.clone();
+            move || {
+                file_workflow::show_info_dialog(
+                    &parent,
+                    "Keyboard Shortcuts",
+                    "Core keyboard shortcuts",
+                    Some(
+                        "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nI Text Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform Or Text\nEsc Cancel Transform, Text, Or Clear Selection",
+                    ),
+                );
+            }
+        },
+    );
 
-    let shortcuts = build_icon_label_button("keyboard-line.svg", "Keyboard Shortcuts");
-    shortcuts.add_css_class("menu-dropdown-item");
-    {
+    append_icon_menu_item(&menu, &popover, "information-line.svg", "About PhotoTux", {
         let parent = window.clone();
-        let popover = popover.clone();
-        shortcuts.connect_clicked(move |_| {
-            popover.popdown();
-            file_workflow::show_info_dialog(
-                &parent,
-                "Keyboard Shortcuts",
-                "Core keyboard shortcuts",
-                Some(
-                    "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nI Text Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform Or Text\nEsc Cancel Transform, Text, Or Clear Selection",
-                ),
-            );
-        });
-    }
-    menu.append(&shortcuts);
-
-    let about = build_icon_label_button("information-line.svg", "About PhotoTux");
-    about.add_css_class("menu-dropdown-item");
-    {
-        let parent = window.clone();
-        let popover = popover.clone();
-        about.connect_clicked(move |_| {
-            popover.popdown();
+        move || {
             file_workflow::show_info_dialog(
                 &parent,
                 "About PhotoTux",
@@ -944,11 +765,8 @@ fn build_help_menu_button(window: &ApplicationWindow) -> MenuButton {
                     "Linux-first raster editor built with Rust, GTK4, and wgpu.\n\nThe GTK shell owns menus, panels, and status surfaces while the document model remains the source of truth.",
                 ),
             );
-        });
-    }
-    menu.append(&about);
+        }
+    });
 
-    popover.set_child(Some(&menu));
-    button.set_popover(Some(&popover));
-    button
+    finish_top_level_menu(button, popover, menu)
 }
