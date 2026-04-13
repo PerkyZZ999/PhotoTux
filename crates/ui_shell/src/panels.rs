@@ -1,4 +1,7 @@
 use super::*;
+use crate::ui_support::{
+    build_tool_chip_icon_button, build_tool_chip_icon_label_button,
+};
 
 impl ShellUiState {
     pub(super) fn refresh_tool_buttons(&self, snapshot: &ShellSnapshot) {
@@ -20,16 +23,14 @@ impl ShellUiState {
         self.color_body.append(&chip_row);
 
         let buttons = GtkBox::new(Orientation::Horizontal, 6);
-        let swap = Button::with_label("Swap");
-        swap.add_css_class("tool-chip");
+        let swap = build_tool_chip_icon_button("swap-line.svg", "Swap foreground and background colors");
         {
             let controller = self.controller.clone();
             swap.connect_clicked(move |_| controller.borrow_mut().swap_colors());
         }
         buttons.append(&swap);
 
-        let reset = Button::with_label("Reset");
-        reset.add_css_class("tool-chip");
+        let reset = build_tool_chip_icon_button("refresh-line.svg", "Reset colors to black and white");
         {
             let controller = self.controller.clone();
             reset.connect_clicked(move |_| controller.borrow_mut().reset_colors());
@@ -120,12 +121,11 @@ impl ShellUiState {
             }
 
             let text_controls = GtkBox::new(Orientation::Horizontal, 6);
-            let edit_text = Button::with_label(if snapshot.text.editing {
+            let edit_text = build_tool_chip_icon_label_button("text.svg", if snapshot.text.editing {
                 "Editing Text"
             } else {
                 "Edit Text"
             });
-            edit_text.add_css_class("tool-chip");
             edit_text.set_sensitive(snapshot.text.selected && !snapshot.text.editing);
             {
                 let controller = self.controller.clone();
@@ -252,9 +252,8 @@ impl ShellUiState {
         }
 
         let controls = GtkBox::new(Orientation::Horizontal, 6);
-        let opacity_down = Button::with_label("Opacity -");
-        opacity_down.add_css_class("tool-chip");
-        opacity_down.set_tooltip_text(Some("Decrease active layer opacity"));
+        let opacity_down =
+            build_tool_chip_icon_button("subtract-line.svg", "Decrease active layer opacity");
         {
             let controller = self.controller.clone();
             opacity_down
@@ -262,9 +261,8 @@ impl ShellUiState {
         }
         controls.append(&opacity_down);
 
-        let opacity_up = Button::with_label("Opacity +");
-        opacity_up.add_css_class("tool-chip");
-        opacity_up.set_tooltip_text(Some("Increase active layer opacity"));
+        let opacity_up =
+            build_tool_chip_icon_button("add-line.svg", "Increase active layer opacity");
         {
             let controller = self.controller.clone();
             opacity_up
@@ -274,9 +272,7 @@ impl ShellUiState {
         self.properties_body.append(&controls);
 
         let blend_controls = GtkBox::new(Orientation::Horizontal, 6);
-        let blend_prev = Button::with_label("Blend -");
-        blend_prev.add_css_class("tool-chip");
-        blend_prev.set_tooltip_text(Some("Previous blend mode"));
+        let blend_prev = build_tool_chip_icon_button("arrow-go-back-line.svg", "Previous blend mode");
         {
             let controller = self.controller.clone();
             blend_prev.connect_clicked(move |_| {
@@ -285,9 +281,7 @@ impl ShellUiState {
         }
         blend_controls.append(&blend_prev);
 
-        let blend_next = Button::with_label("Blend +");
-        blend_next.add_css_class("tool-chip");
-        blend_next.set_tooltip_text(Some("Next blend mode"));
+        let blend_next = build_tool_chip_icon_button("arrow-go-forward-line.svg", "Next blend mode");
         {
             let controller = self.controller.clone();
             blend_next
@@ -298,8 +292,7 @@ impl ShellUiState {
 
         let mask_controls = GtkBox::new(Orientation::Horizontal, 6);
 
-        let add_mask = Button::with_label("Add Mask");
-        add_mask.add_css_class("tool-chip");
+        let add_mask = build_tool_chip_icon_label_button("add-line.svg", "Add Mask");
         add_mask.set_sensitive(!snapshot.text.selected && !snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
@@ -307,12 +300,18 @@ impl ShellUiState {
         }
         mask_controls.append(&add_mask);
 
-        let toggle_mask = Button::with_label(if snapshot.active_layer_mask_enabled {
+        let toggle_mask = build_tool_chip_icon_label_button(
+            if snapshot.active_layer_mask_enabled {
+                "eye-off-line.svg"
+            } else {
+                "eye-line.svg"
+            },
+            if snapshot.active_layer_mask_enabled {
             "Mask Off"
         } else {
             "Mask On"
-        });
-        toggle_mask.add_css_class("tool-chip");
+        },
+        );
         toggle_mask.set_sensitive(snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
@@ -322,8 +321,7 @@ impl ShellUiState {
         }
         mask_controls.append(&toggle_mask);
 
-        let remove_mask = Button::with_label("Delete Mask");
-        remove_mask.add_css_class("tool-chip");
+        let remove_mask = build_tool_chip_icon_label_button("delete-bin-line.svg", "Delete Mask");
         remove_mask.set_sensitive(snapshot.active_layer_has_mask);
         {
             let controller = self.controller.clone();
@@ -334,8 +332,7 @@ impl ShellUiState {
         self.properties_body.append(&mask_controls);
 
         let target_controls = GtkBox::new(Orientation::Horizontal, 6);
-        let edit_pixels = Button::with_label("Edit Layer");
-        edit_pixels.add_css_class("tool-chip");
+        let edit_pixels = build_tool_chip_icon_label_button("edit-line.svg", "Edit Layer");
         edit_pixels
             .set_sensitive(!snapshot.text.selected && snapshot.active_edit_target_name != "Layer Pixels");
         {
@@ -345,8 +342,7 @@ impl ShellUiState {
         }
         target_controls.append(&edit_pixels);
 
-        let edit_mask = Button::with_label("Edit Mask");
-        edit_mask.add_css_class("tool-chip");
+        let edit_mask = build_tool_chip_icon_label_button("layout-column-line.svg", "Edit Mask");
         edit_mask.set_sensitive(
             !snapshot.text.selected
                 && snapshot.active_layer_has_mask
@@ -360,8 +356,8 @@ impl ShellUiState {
         self.properties_body.append(&target_controls);
 
         let selection_controls = GtkBox::new(Orientation::Horizontal, 6);
-        let clear_selection = Button::with_label("Clear Sel");
-        clear_selection.add_css_class("tool-chip");
+        let clear_selection =
+            build_tool_chip_icon_label_button("close-line.svg", "Clear Selection");
         clear_selection.set_tooltip_text(Some("Clear selection (Ctrl+D)"));
         clear_selection.set_sensitive(snapshot.selection_rect.is_some());
         {
@@ -370,8 +366,8 @@ impl ShellUiState {
         }
         selection_controls.append(&clear_selection);
 
-        let invert_selection = Button::with_label("Invert Sel");
-        invert_selection.add_css_class("tool-chip");
+        let invert_selection =
+            build_tool_chip_icon_label_button("swap-line.svg", "Invert Selection");
         invert_selection.set_tooltip_text(Some("Invert selection (Ctrl+I)"));
         invert_selection.set_sensitive(snapshot.selection_rect.is_some());
         {
@@ -383,8 +379,8 @@ impl ShellUiState {
 
         let brush_preset_controls = GtkBox::new(Orientation::Horizontal, 6);
 
-        let preset_prev = Button::with_label("Preset -");
-        preset_prev.add_css_class("tool-chip");
+        let preset_prev =
+            build_tool_chip_icon_button("arrow-go-back-line.svg", "Previous brush preset");
         {
             let controller = self.controller.clone();
             preset_prev.connect_clicked(move |_| controller.borrow_mut().previous_brush_preset());
@@ -396,8 +392,8 @@ impl ShellUiState {
         preset_current.add_css_class("panel-row");
         brush_preset_controls.append(&preset_current);
 
-        let preset_next = Button::with_label("Preset +");
-        preset_next.add_css_class("tool-chip");
+        let preset_next =
+            build_tool_chip_icon_button("arrow-go-forward-line.svg", "Next brush preset");
         {
             let controller = self.controller.clone();
             preset_next.connect_clicked(move |_| controller.borrow_mut().next_brush_preset());
@@ -408,24 +404,22 @@ impl ShellUiState {
 
         let brush_controls_row_one = GtkBox::new(Orientation::Horizontal, 6);
 
-        let radius_down = Button::with_label("Radius -");
-        radius_down.add_css_class("tool-chip");
+        let radius_down = build_tool_chip_icon_button("subtract-line.svg", "Decrease brush radius");
         {
             let controller = self.controller.clone();
             radius_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_radius());
         }
         brush_controls_row_one.append(&radius_down);
 
-        let radius_up = Button::with_label("Radius +");
-        radius_up.add_css_class("tool-chip");
+        let radius_up = build_tool_chip_icon_button("add-line.svg", "Increase brush radius");
         {
             let controller = self.controller.clone();
             radius_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_radius());
         }
         brush_controls_row_one.append(&radius_up);
 
-        let hardness_down = Button::with_label("Hardness -");
-        hardness_down.add_css_class("tool-chip");
+        let hardness_down =
+            build_tool_chip_icon_button("subtract-line.svg", "Decrease brush hardness");
         {
             let controller = self.controller.clone();
             hardness_down
@@ -433,8 +427,8 @@ impl ShellUiState {
         }
         brush_controls_row_one.append(&hardness_down);
 
-        let hardness_up = Button::with_label("Hardness +");
-        hardness_up.add_css_class("tool-chip");
+        let hardness_up =
+            build_tool_chip_icon_button("add-line.svg", "Increase brush hardness");
         {
             let controller = self.controller.clone();
             hardness_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_hardness());
@@ -445,32 +439,30 @@ impl ShellUiState {
 
         let brush_controls_row_two = GtkBox::new(Orientation::Horizontal, 6);
 
-        let spacing_down = Button::with_label("Spacing -");
-        spacing_down.add_css_class("tool-chip");
+        let spacing_down =
+            build_tool_chip_icon_button("subtract-line.svg", "Decrease brush spacing");
         {
             let controller = self.controller.clone();
             spacing_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_spacing());
         }
         brush_controls_row_two.append(&spacing_down);
 
-        let spacing_up = Button::with_label("Spacing +");
-        spacing_up.add_css_class("tool-chip");
+        let spacing_up =
+            build_tool_chip_icon_button("add-line.svg", "Increase brush spacing");
         {
             let controller = self.controller.clone();
             spacing_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_spacing());
         }
         brush_controls_row_two.append(&spacing_up);
 
-        let flow_down = Button::with_label("Flow -");
-        flow_down.add_css_class("tool-chip");
+        let flow_down = build_tool_chip_icon_button("subtract-line.svg", "Decrease brush flow");
         {
             let controller = self.controller.clone();
             flow_down.connect_clicked(move |_| controller.borrow_mut().decrease_brush_flow());
         }
         brush_controls_row_two.append(&flow_down);
 
-        let flow_up = Button::with_label("Flow +");
-        flow_up.add_css_class("tool-chip");
+        let flow_up = build_tool_chip_icon_button("add-line.svg", "Increase brush flow");
         {
             let controller = self.controller.clone();
             flow_up.connect_clicked(move |_| controller.borrow_mut().increase_brush_flow());
@@ -699,17 +691,22 @@ impl ShellUiState {
 
         let actions = GtkBox::new(Orientation::Horizontal, 4);
         actions.add_css_class("layers-toolbar");
-        for (label, action) in [
-            ("+ Layer", LayerAction::Add),
-            ("+ Group", LayerAction::AddGroup),
-            ("Ungroup", LayerAction::Ungroup),
-            ("Duplicate", LayerAction::Duplicate),
-            ("Delete", LayerAction::Delete),
-            ("Edit Text", LayerAction::EditText),
-            ("Into Group", LayerAction::MoveIntoGroup),
-            ("Out Group", LayerAction::MoveOutOfGroup),
-            ("+ Mask", LayerAction::AddMask),
+        for (icon_name, label, action) in [
+            ("add-line.svg", "+ Layer", LayerAction::Add),
+            ("group-line.svg", "+ Group", LayerAction::AddGroup),
+            ("node-tree.svg", "Ungroup", LayerAction::Ungroup),
+            ("file-copy-line.svg", "Duplicate", LayerAction::Duplicate),
+            ("delete-bin-line.svg", "Delete", LayerAction::Delete),
+            ("text.svg", "Edit Text", LayerAction::EditText),
+            ("folder-add-line.svg", "Into Group", LayerAction::MoveIntoGroup),
+            ("folder-reduce-line.svg", "Out Group", LayerAction::MoveOutOfGroup),
+            ("add-line.svg", "+ Mask", LayerAction::AddMask),
             (
+                if snapshot.active_layer_mask_enabled {
+                    "eye-off-line.svg"
+                } else {
+                    "eye-line.svg"
+                },
                 if snapshot.active_layer_mask_enabled {
                     "Mask Off"
                 } else {
@@ -717,19 +714,15 @@ impl ShellUiState {
                 },
                 LayerAction::ToggleMask,
             ),
-            (
-                if snapshot.active_edit_target_name == "Layer Mask" {
+            ("edit-line.svg", if snapshot.active_edit_target_name == "Layer Mask" {
                     "Edit Layer"
                 } else {
                     "Edit Mask"
-                },
-                LayerAction::ToggleMaskTarget,
-            ),
-            ("Up", LayerAction::MoveUp),
-            ("Down", LayerAction::MoveDown),
+                }, LayerAction::ToggleMaskTarget),
+            ("arrow-up-line.svg", "Up", LayerAction::MoveUp),
+            ("arrow-down-line.svg", "Down", LayerAction::MoveDown),
         ] {
-            let button = Button::with_label(label);
-            button.add_css_class("tool-chip");
+            let button = build_tool_chip_icon_button(icon_name, label);
             button.add_css_class("layer-action-chip");
             match action {
                 LayerAction::AddGroup => button.set_sensitive(
@@ -977,8 +970,7 @@ impl ShellUiState {
 
         let actions = GtkBox::new(Orientation::Horizontal, 6);
         actions.add_css_class("history-toolbar");
-        let undo = Button::with_label("Undo");
-        undo.add_css_class("tool-chip");
+        let undo = build_tool_chip_icon_label_button("arrow-go-back-line.svg", "Undo");
         undo.set_sensitive(snapshot.can_undo);
         {
             let controller = self.controller.clone();
@@ -986,8 +978,7 @@ impl ShellUiState {
         }
         actions.append(&undo);
 
-        let redo = Button::with_label("Redo");
-        redo.add_css_class("tool-chip");
+        let redo = build_tool_chip_icon_label_button("arrow-go-forward-line.svg", "Redo");
         redo.set_sensitive(snapshot.can_redo);
         {
             let controller = self.controller.clone();

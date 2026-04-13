@@ -2048,6 +2048,11 @@ popover.menu-dropdown contents {
     padding: 0 8px;
 }
 
+.tool-chip-icon-only {
+    min-width: 24px;
+    padding: 0 6px;
+}
+
 .layer-row,
 .layer-row-active {
     padding: 6px 8px;

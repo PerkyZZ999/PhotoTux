@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui_support::build_contextual_icon_label_button;
 
 pub(super) fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
     let region = GtkBox::new(Orientation::Vertical, 0);
@@ -339,24 +340,21 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     task_bar.set_valign(Align::End);
     task_bar.set_margin_bottom(16);
 
-    let fit_button = Button::with_label("Fit View");
-    fit_button.add_css_class("contextual-task-button");
+    let fit_button = build_contextual_icon_label_button("focus-3-line.svg", "Fit View");
     {
         let canvas_state = shell_state.canvas_state.clone();
         fit_button.connect_clicked(move |_| canvas_state.borrow_mut().fit_to_view());
     }
     task_bar.append(&fit_button);
 
-    let zoom_out_button = Button::with_label("Zoom -");
-    zoom_out_button.add_css_class("contextual-task-button");
+    let zoom_out_button = build_contextual_icon_label_button("zoom-out-line.svg", "Zoom Out");
     {
         let canvas_state = shell_state.canvas_state.clone();
         zoom_out_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_out());
     }
     task_bar.append(&zoom_out_button);
 
-    let zoom_in_button = Button::with_label("Zoom +");
-    zoom_in_button.add_css_class("contextual-task-button");
+    let zoom_in_button = build_contextual_icon_label_button("zoom-in-line.svg", "Zoom In");
     {
         let canvas_state = shell_state.canvas_state.clone();
         zoom_in_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_in());
@@ -367,24 +365,21 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     separator.add_css_class("contextual-task-separator");
     task_bar.append(&separator);
 
-    let clear_selection = Button::with_label("Clear Sel");
-    clear_selection.add_css_class("contextual-task-button");
+    let clear_selection = build_contextual_icon_label_button("close-line.svg", "Clear Selection");
     {
         let controller = shell_state.controller.clone();
         clear_selection.connect_clicked(move |_| controller.borrow_mut().clear_selection());
     }
     task_bar.append(&clear_selection);
 
-    let invert_selection = Button::with_label("Invert Sel");
-    invert_selection.add_css_class("contextual-task-button");
+    let invert_selection = build_contextual_icon_label_button("swap-line.svg", "Invert Selection");
     {
         let controller = shell_state.controller.clone();
         invert_selection.connect_clicked(move |_| controller.borrow_mut().invert_selection());
     }
     task_bar.append(&invert_selection);
 
-    let edit_pixels = Button::with_label("Layer Pixels");
-    edit_pixels.add_css_class("contextual-task-button");
+    let edit_pixels = build_contextual_icon_label_button("edit-line.svg", "Layer Pixels");
     edit_pixels.add_css_class("contextual-task-button-primary");
     {
         let controller = shell_state.controller.clone();
@@ -392,8 +387,7 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     }
     task_bar.append(&edit_pixels);
 
-    let edit_mask = Button::with_label("Layer Mask");
-    edit_mask.add_css_class("contextual-task-button");
+    let edit_mask = build_contextual_icon_label_button("layout-column-line.svg", "Layer Mask");
     {
         let controller = shell_state.controller.clone();
         edit_mask.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_mask());

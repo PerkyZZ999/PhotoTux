@@ -93,7 +93,8 @@ struct CanvasUniforms {
 
 impl OffscreenCanvasRenderer {
     pub async fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -132,7 +133,7 @@ impl OffscreenCanvasRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PhotoTux Canvas Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 

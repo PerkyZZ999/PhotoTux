@@ -58,6 +58,40 @@ pub(super) fn build_icon_label_button(icon_name: &str, label: &str) -> Button {
     build_icon_label_shortcut_button(icon_name, label, None)
 }
 
+pub(super) fn build_compact_icon_label_button(icon_name: &str, label: &str, size: i32) -> Button {
+    let button = Button::new();
+    button.set_has_frame(false);
+    button.set_tooltip_text(Some(label));
+
+    let content = GtkBox::new(Orientation::Horizontal, 4);
+    content.append(&build_remix_icon(icon_name, label, size));
+
+    let text = Label::new(Some(label));
+    text.add_css_class("icon-label-text");
+    content.append(&text);
+
+    button.set_child(Some(&content));
+    button
+}
+
+pub(super) fn build_tool_chip_icon_button(icon_name: &str, label: &str) -> Button {
+    let button = build_icon_only_button(icon_name, label, "tool-chip", 12);
+    button.add_css_class("tool-chip-icon-only");
+    button
+}
+
+pub(super) fn build_tool_chip_icon_label_button(icon_name: &str, label: &str) -> Button {
+    let button = build_compact_icon_label_button(icon_name, label, 12);
+    button.add_css_class("tool-chip");
+    button
+}
+
+pub(super) fn build_contextual_icon_label_button(icon_name: &str, label: &str) -> Button {
+    let button = build_compact_icon_label_button(icon_name, label, 14);
+    button.add_css_class("contextual-task-button");
+    button
+}
+
 pub(super) fn build_icon_label_shortcut_button(
     icon_name: &str,
     label: &str,
