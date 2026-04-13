@@ -221,7 +221,7 @@ Progress notes:
 
 ### PROD12 - Optimize hot paths for fluidity under real workloads
 
-- [ ] Status: in progress
+- [x] Status: done
 - Outcome: brush strokes, viewport interaction, flattening, and file operations stay smooth under representative load
 - Includes:
   - profiling and reducing avoidable work in brush interpolation, tile invalidation, and canvas refresh
@@ -247,10 +247,12 @@ Progress notes:
   - empty raster-layer creation now keeps the cached flattened canvas intact, while duplicate/delete raster-layer actions refresh only the affected layer bounds instead of forcing another full composite.
   - creating a brand-new default group around the active layer now preserves the cached flattened canvas through both the command and its undo/redo history path because that hierarchy wrapper is visually a no-op.
   - ungrouping that same default single-child wrapper now preserves the cached flattened canvas too, while still falling back to full invalidation for groups whose visibility or opacity could change the composite.
+  - live text-layer dragging now mirrors raster-layer move handling by refreshing only the union of the text layer's old and new bounds in the cached flattened canvas instead of dropping the whole composite on each pointer update.
+  - the remaining full invalidations are now concentrated in generic dirty-document paths and correctness-first broad structural changes, rather than in the common interactive paint, move, text, undo/redo, export, or snapshot-refresh hot paths.
 
 ### PROD13 - Add startup splash screen and renderer warm-up path
 
-- [ ] Status: in progress
+- [x] Status: done
 - Outcome: startup feels intentional and the first real canvas interaction pays less one-time initialization cost
 - Includes:
   - a borderless splash window using the official logo
@@ -266,10 +268,11 @@ Progress notes:
   - the canvas host now performs a one-shot offscreen warm-up render before the main window is presented, so the first visible workspace frame arrives with renderer setup and an initial canvas frame already prepared.
   - splash teardown is now tied to the main workspace window actually mapping instead of an immediate close after `present()`, reducing the chance of focus glitches during startup handoff on slower systems.
   - startup logging now emits a single structured `startup_summary` line with shell-init, warm-up, handoff, total, and renderer-warmed fields, and the handoff timing is recorded when the main window actually maps so cold and warm launch validation reflects the real visible transition.
+  - the main-window map callback is now a one-shot handoff path that focuses the canvas and runs the startup teardown/metrics hook exactly once, keeping focus transfer and visible startup completion aligned.
 
 ### PROD14 - Keep large modules from becoming release-risk bottlenecks
 
-- [ ] Status: not started
+- [x] Status: done
 - Outcome: the most critical controller, shell, and persistence code is easier to reason about and less fragile during hardening
 - Includes:
   - split especially large modules along real ownership boundaries
@@ -278,6 +281,18 @@ Progress notes:
 - Depends on: none
 - Done when:
   - future hardening work no longer has to land inside a few oversized catch-all files
+- Progress notes:
+  - extracted the splash, warm-up, and startup-timing orchestration out of `crates/ui_shell/src/lib.rs` into a dedicated `crates/ui_shell/src/startup.rs` module so the new startup path is isolated instead of growing the main shell module further.
+  - extracted the top-level GTK shell/window assembly (`build_ui`, titlebar construction, and workspace body assembly) into `crates/ui_shell/src/layout.rs`, keeping startup orchestration and shell composition out of the same catch-all source file.
+  - extracted the menu-bar builder cluster into `crates/ui_shell/src/menus.rs`, moving the large file/edit/image/layer/select/filter/view/window/help menu construction logic out of `ui_shell/src/lib.rs`.
+  - extracted the open/import/export/save chooser helpers and shared info-dialog path into `crates/ui_shell/src/file_workflow.rs`, so production-critical file workflows no longer live inside the main shell module and remain reusable from both shortcuts and menu actions.
+  - extracted the document-region, workspace/sidebar assembly, document-tab fallback, and shared panel/status shell builders into `crates/ui_shell/src/shell_chrome.rs`, keeping the remaining shell composition code grouped by ownership instead of spread across `ui_shell/src/lib.rs`.
+  - extracted the shared icon/resource loaders, menu widget builders, and tool-icon/shortcut mapping into `crates/ui_shell/src/ui_support.rs`, so the remaining shell modules now depend on a single support layer instead of reaching back into `ui_shell/src/lib.rs` for common chrome helpers.
+  - folded the remaining tool-options bar, tool rail, and swatch-stack builders into `crates/ui_shell/src/shell_chrome.rs`, finishing the move of the shell-assembly widgets out of the main shell module.
+  - extracted the status/notice copy and styling logic into `crates/ui_shell/src/status_presenter.rs`, so status-surface formatting and tests now depend on a presentation-focused module instead of `ui_shell/src/lib.rs`.
+  - extracted the canvas widget wiring, viewport/render host state, and brush-preview geometry into `crates/ui_shell/src/canvas_host.rs`, isolating the renderer-facing interaction loop from the rest of the shell and removing another large ownership cluster from `ui_shell/src/lib.rs`.
+  - extracted the color, properties, layers, and history panel refresh/render cluster into `crates/ui_shell/src/panels.rs`, moving the remaining panel presentation logic out of `ui_shell/src/lib.rs` and leaving the root shell module focused on orchestration instead of widget-specific refresh code.
+  - after the startup, layout, menu, file workflow, shell chrome, support, status, canvas host, and panels splits, new hardening work no longer has to land in a single monolithic `ui_shell` source file, which closes the release-risk bottleneck this item targeted.
 
 ## Suggested Execution Order
 

@@ -4425,11 +4425,19 @@ impl ShellController for PhotoTuxController {
                 let raw_delta_y = canvas_y - start_canvas_y;
                 let (translate_x, translate_y) =
                     self.snapped_translation(snapping_base_bounds, raw_delta_x, raw_delta_y);
+                let old_bounds = self
+                    .document
+                    .text_layer_by_id(layer_id)
+                    .and_then(text_layer_bounds);
                 let _ = self.document.set_text_layer_transform(
                     layer_id,
                     TextTransform::new(start_origin_x + translate_x, start_origin_y + translate_y),
                 );
-                self.cached_canvas_raster = None;
+                let new_bounds = self
+                    .document
+                    .text_layer_by_id(layer_id)
+                    .and_then(text_layer_bounds);
+                self.refresh_cached_canvas_union([old_bounds, new_bounds].into_iter().flatten());
                 self.dirty_since_primary_save = true;
                 self.dirty_since_autosave = true;
                 self.last_change_at = Some(std::time::Instant::now());
@@ -7186,6 +7194,39 @@ mod tests {
         assert!(controller.cached_canvas_raster.is_some());
 
         controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
+    fn text_move_interaction_preserves_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Text);
+        controller.begin_canvas_interaction(18, 22);
+        controller.update_text_session(ui_shell::ShellTextUpdate {
+            content: "PhotoTux".to_string(),
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 24,
+            line_height_percent: 130,
+            letter_spacing: 1,
+            fill_rgba: [244, 232, 176, 255],
+            alignment: ui_shell::ShellTextAlignment::Center,
+        });
+        controller.commit_text_session();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Move);
+        controller.begin_canvas_interaction(18, 22);
+        controller.update_canvas_interaction(48, 52);
+        assert!(controller.cached_canvas_raster.is_some());
+        controller.end_canvas_interaction();
         assert!(controller.cached_canvas_raster.is_some());
     }
 
