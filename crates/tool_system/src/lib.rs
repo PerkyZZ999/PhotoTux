@@ -579,6 +579,30 @@ impl SelectionRecord {
     }
 }
 
+fn apply_selection_shape(
+    document: &mut Document,
+    after: Option<SelectionShape>,
+) -> Option<SelectionRecord> {
+    let before = document.selection_shape().cloned();
+    let before_inverted = document.selection_inverted();
+
+    if before == after && !before_inverted {
+        return None;
+    }
+
+    match after.clone() {
+        Some(selection) => document.set_selection_shape_state(Some(selection), false),
+        None => document.clear_selection(),
+    }
+
+    Some(SelectionRecord {
+        before,
+        before_inverted,
+        after,
+        after_inverted: false,
+    })
+}
+
 impl RectangularMarqueeTool {
     pub fn preview_rect(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Option<CanvasRect> {
         let left = start_x.min(end_x);
@@ -602,26 +626,9 @@ impl RectangularMarqueeTool {
         end_x: i32,
         end_y: i32,
     ) -> Option<SelectionRecord> {
-        let before = document.selection_shape().cloned();
-        let before_inverted = document.selection_inverted();
         let after =
             Self::preview_rect(start_x, start_y, end_x, end_y).map(SelectionShape::Rectangular);
-
-        if before == after && !before_inverted {
-            return None;
-        }
-
-        match after.clone() {
-            Some(selection) => document.set_selection_shape_state(Some(selection), false),
-            None => document.clear_selection(),
-        }
-
-        Some(SelectionRecord {
-            before,
-            before_inverted,
-            after,
-            after_inverted: false,
-        })
+        apply_selection_shape(document, after)
     }
 }
 
@@ -641,25 +648,8 @@ impl LassoTool {
         document: &mut Document,
         points: &[(i32, i32)],
     ) -> Option<SelectionRecord> {
-        let before = document.selection_shape().cloned();
-        let before_inverted = document.selection_inverted();
         let after = Self::preview_selection(points).map(SelectionShape::Freeform);
-
-        if before == after && !before_inverted {
-            return None;
-        }
-
-        match after.clone() {
-            Some(selection) => document.set_selection_shape_state(Some(selection), false),
-            None => document.clear_selection(),
-        }
-
-        Some(SelectionRecord {
-            before,
-            before_inverted,
-            after,
-            after_inverted: false,
-        })
+        apply_selection_shape(document, after)
     }
 }
 
