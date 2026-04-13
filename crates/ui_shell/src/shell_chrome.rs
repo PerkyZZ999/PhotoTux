@@ -1,5 +1,6 @@
 use super::*;
 use crate::ui_support::build_contextual_icon_label_button;
+use crate::ui_templates::{DocumentTabsTemplate, StatusBarTemplate};
 
 pub(super) fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
     let region = GtkBox::new(Orientation::Vertical, 0);
@@ -120,7 +121,8 @@ pub(super) fn build_left_tool_rail(
     let swatch_actions = GtkBox::new(Orientation::Horizontal, 2);
     swatch_actions.add_css_class("swatch-stack-actions");
 
-    let reset_colors = build_icon_only_button("refresh-line.svg", "Default colors", "chrome-button", 10);
+    let reset_colors =
+        build_icon_only_button("refresh-line.svg", "Default colors", "chrome-button", 10);
     reset_colors.add_css_class("swatch-stack-action");
     {
         let controller = controller.clone();
@@ -128,7 +130,12 @@ pub(super) fn build_left_tool_rail(
     }
     swatch_actions.append(&reset_colors);
 
-    let swap_colors = build_icon_only_button("swap-line.svg", "Swap foreground/background", "chrome-button", 10);
+    let swap_colors = build_icon_only_button(
+        "swap-line.svg",
+        "Swap foreground/background",
+        "chrome-button",
+        10,
+    );
     swap_colors.add_css_class("swatch-stack-action");
     {
         let controller = controller.clone();
@@ -143,20 +150,12 @@ pub(super) fn build_left_tool_rail(
 }
 
 pub(super) fn build_document_tabs() -> (GtkBox, Label) {
-    match load_document_tabs_template() {
-        Ok(template) => {
-            template.active_tab_button.set_can_focus(false);
-            template.add_tab_button.set_sensitive(false);
-            template
-                .add_tab_button
-                .set_tooltip_text(Some("Multiple document tabs are not active yet"));
-            (template.root, template.active_tab_label)
-        }
-        Err(error) => {
+    load_document_tabs_template()
+        .map(build_document_tabs_from_template)
+        .unwrap_or_else(|error| {
             tracing::error!(%error, "failed to load document tabs template");
             build_document_tabs_fallback()
-        }
-    }
+        })
 }
 
 pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
@@ -210,20 +209,12 @@ pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
 }
 
 pub(super) fn build_status_bar() -> (GtkBox, Label, Label, Label, Label, Label) {
-    match load_status_bar_template() {
-        Ok(template) => (
-            template.root,
-            template.doc_label,
-            template.zoom_label,
-            template.cursor_label,
-            template.notice_label,
-            template.mode_label,
-        ),
-        Err(error) => {
+    load_status_bar_template()
+        .map(build_status_bar_from_template)
+        .unwrap_or_else(|error| {
             tracing::error!(%error, "failed to load status bar template");
             build_status_bar_fallback()
-        }
-    }
+        })
 }
 
 pub(super) fn build_panel_group(
@@ -290,6 +281,15 @@ fn build_document_tabs_fallback() -> (GtkBox, Label) {
     tabs.append(&plus_tab);
 
     (tabs, active_tab_label)
+}
+
+fn build_document_tabs_from_template(template: DocumentTabsTemplate) -> (GtkBox, Label) {
+    template.active_tab_button.set_can_focus(false);
+    template.add_tab_button.set_sensitive(false);
+    template
+        .add_tab_button
+        .set_tooltip_text(Some("Multiple document tabs are not active yet"));
+    (template.root, template.active_tab_label)
 }
 
 fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
@@ -435,6 +435,19 @@ fn build_status_bar_fallback() -> (GtkBox, Label, Label, Label, Label, Label) {
     (bar, doc, zoom, cursor, notice, mode)
 }
 
+fn build_status_bar_from_template(
+    template: StatusBarTemplate,
+) -> (GtkBox, Label, Label, Label, Label, Label) {
+    (
+        template.root,
+        template.doc_label,
+        template.zoom_label,
+        template.cursor_label,
+        template.notice_label,
+        template.mode_label,
+    )
+}
+
 fn build_status_label(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("status-label");
@@ -458,8 +471,14 @@ pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String);
                 "Hardness".to_string(),
                 format!("{}%", snapshot.brush_hardness_percent),
             ),
-            ("Spacing".to_string(), format!("{} px", snapshot.brush_spacing)),
-            ("Flow".to_string(), format!("{}%", snapshot.brush_flow_percent)),
+            (
+                "Spacing".to_string(),
+                format!("{} px", snapshot.brush_spacing),
+            ),
+            (
+                "Flow".to_string(),
+                format!("{}%", snapshot.brush_flow_percent),
+            ),
             (
                 "Pressure".to_string(),
                 match (
@@ -475,7 +494,10 @@ pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String);
         ],
         ShellToolKind::Text => [
             ("Font".to_string(), snapshot.text.font_family.clone()),
-            ("Size".to_string(), format!("{} px", snapshot.text.font_size_px)),
+            (
+                "Size".to_string(),
+                format!("{} px", snapshot.text.font_size_px),
+            ),
             (
                 "Leading".to_string(),
                 format!("{}%", snapshot.text.line_height_percent),
@@ -520,7 +542,10 @@ pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String);
                 "Rotate".to_string(),
                 format!("{}°", snapshot.transform_rotation_degrees),
             ),
-            ("Target".to_string(), snapshot.active_edit_target_name.clone()),
+            (
+                "Target".to_string(),
+                snapshot.active_edit_target_name.clone(),
+            ),
             (
                 "Snap".to_string(),
                 if snapshot.snapping_enabled {
@@ -535,9 +560,15 @@ pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String);
             ("Layer".to_string(), snapshot.active_layer_name.clone()),
             (
                 "Canvas".to_string(),
-                format!("{}×{}", snapshot.canvas_size.width, snapshot.canvas_size.height),
+                format!(
+                    "{}×{}",
+                    snapshot.canvas_size.width, snapshot.canvas_size.height
+                ),
             ),
-            ("Blend".to_string(), snapshot.active_layer_blend_mode.clone()),
+            (
+                "Blend".to_string(),
+                snapshot.active_layer_blend_mode.clone(),
+            ),
             (
                 "Opacity".to_string(),
                 format!("{}%", snapshot.active_layer_opacity_percent),
@@ -567,7 +598,9 @@ pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String);
     }
 }
 
-fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
+fn build_tool_options_bar_fallback(
+    snapshot: ShellSnapshot,
+) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
     let bar = GtkBox::new(Orientation::Horizontal, 0);
     bar.add_css_class("tool-options-bar");
     let tool_icon = build_remix_icon(

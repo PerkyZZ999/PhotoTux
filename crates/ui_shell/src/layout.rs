@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui_templates::TitlebarTemplate;
 
 pub(super) fn build_ui(
     application: &Application,
@@ -28,21 +29,7 @@ pub(super) fn build_ui(
     shell_state.attach_window(window.clone());
     wire_window_shortcuts(&window, shell_state.clone());
     wire_window_close_request(&window, shell_state.clone());
-    if on_map.is_some() {
-        let on_map = Rc::new(RefCell::new(on_map));
-        let shell_state = shell_state.clone();
-        window.connect_map(move |window| {
-            shell_state.focus_canvas();
-            if let Some(on_map) = on_map.borrow_mut().take() {
-                on_map(window);
-            }
-        });
-    } else {
-        let shell_state = shell_state.clone();
-        window.connect_map(move |_| {
-            shell_state.focus_canvas();
-        });
-    }
+    wire_window_map(&window, shell_state.clone(), on_map);
     window.present();
 
     shell_state.refresh();
@@ -53,42 +40,61 @@ pub(super) fn build_ui(
 }
 
 fn build_header_bar() -> HeaderBar {
-    match load_titlebar_template() {
-        Ok(template) => {
-            let spacer = GtkBox::new(Orientation::Horizontal, 0);
-            spacer.set_hexpand(true);
-            template.root.set_title_widget(Some(&spacer));
-            template.app_name_label.set_visible(true);
-            template.workspace_button.set_visible(false);
-            set_image_resource_or_fallback(
-                &template.logo_image,
-                logo_icon_resource_path(true),
-                APP_NAME,
-                16,
-            );
-            template.search_icon.add_css_class("remix-icon");
-            set_image_resource_or_fallback(
-                &template.search_icon,
-                &remix_icon_resource_path("search-line.svg"),
-                "Search",
-                12,
-            );
-            template.search_button.set_tooltip_text(Some("Search"));
-            template.root
-        }
-        Err(error) => {
+    load_titlebar_template()
+        .map(build_header_bar_from_template)
+        .unwrap_or_else(|error| {
             tracing::error!(%error, "failed to load titlebar template");
             build_header_bar_fallback()
+        })
+}
+
+fn build_header_bar_from_template(template: TitlebarTemplate) -> HeaderBar {
+    let spacer = build_header_bar_spacer();
+    template.root.set_title_widget(Some(&spacer));
+    template.app_name_label.set_visible(true);
+    template.workspace_button.set_visible(false);
+    set_image_resource_or_fallback(
+        &template.logo_image,
+        logo_icon_resource_path(true),
+        APP_NAME,
+        16,
+    );
+    template.search_icon.add_css_class("remix-icon");
+    set_image_resource_or_fallback(
+        &template.search_icon,
+        &remix_icon_resource_path("search-line.svg"),
+        "Search",
+        12,
+    );
+    template.search_button.set_tooltip_text(Some("Search"));
+    template.root
+}
+
+fn build_header_bar_spacer() -> GtkBox {
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    spacer
+}
+
+fn wire_window_map(
+    window: &ApplicationWindow,
+    shell_state: Rc<ShellUiState>,
+    on_map: Option<StartupWindowHook>,
+) {
+    let on_map = Rc::new(RefCell::new(on_map));
+    window.connect_map(move |window| {
+        shell_state.focus_canvas();
+        if let Some(on_map) = on_map.borrow_mut().take() {
+            on_map(window);
         }
-    }
+    });
 }
 
 fn build_header_bar_fallback() -> HeaderBar {
     let header = HeaderBar::new();
     header.add_css_class("titlebar");
     header.set_show_title_buttons(true);
-    let spacer = GtkBox::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
+    let spacer = build_header_bar_spacer();
     header.set_title_widget(Some(&spacer));
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);

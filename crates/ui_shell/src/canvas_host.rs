@@ -530,22 +530,21 @@ impl CanvasHostState {
         self.tick();
     }
 
-    pub(super) fn zoom_in(&mut self) {
+    fn zoom_at_center(&mut self, factor: f32) {
         let width = self.picture.width().max(1) as f32;
         let height = self.picture.height().max(1) as f32;
         self.viewport_state
-            .zoom_towards(1.1, width * 0.5, height * 0.5);
+            .zoom_towards(factor, width * 0.5, height * 0.5);
         self.dirty = true;
         self.tick();
     }
 
+    pub(super) fn zoom_in(&mut self) {
+        self.zoom_at_center(1.1);
+    }
+
     pub(super) fn zoom_out(&mut self) {
-        let width = self.picture.width().max(1) as f32;
-        let height = self.picture.height().max(1) as f32;
-        self.viewport_state
-            .zoom_towards(1.0 / 1.1, width * 0.5, height * 0.5);
-        self.dirty = true;
-        self.tick();
+        self.zoom_at_center(1.0 / 1.1);
     }
 
     pub(super) fn fit_to_view(&mut self) {
@@ -702,7 +701,6 @@ fn brush_preview_circle_points(center: (i32, i32), radius: f32, zoom: f32) -> Ve
 
 fn brush_preview_outer_color(tool: ShellToolKind) -> [u8; 4] {
     match tool {
-        ShellToolKind::Brush => [245, 247, 250, 228],
         ShellToolKind::Eraser => [255, 212, 160, 228],
         _ => [245, 247, 250, 228],
     }
@@ -710,7 +708,6 @@ fn brush_preview_outer_color(tool: ShellToolKind) -> [u8; 4] {
 
 fn brush_preview_detail_color(tool: ShellToolKind) -> [u8; 4] {
     match tool {
-        ShellToolKind::Brush => [116, 167, 255, 196],
         ShellToolKind::Eraser => [255, 150, 92, 196],
         _ => [116, 167, 255, 196],
     }
@@ -718,7 +715,6 @@ fn brush_preview_detail_color(tool: ShellToolKind) -> [u8; 4] {
 
 fn brush_preview_spacing_color(tool: ShellToolKind) -> [u8; 4] {
     match tool {
-        ShellToolKind::Brush => [136, 203, 255, 170],
         ShellToolKind::Eraser => [255, 186, 120, 170],
         _ => [136, 203, 255, 170],
     }

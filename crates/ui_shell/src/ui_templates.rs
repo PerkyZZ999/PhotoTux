@@ -106,118 +106,100 @@ fn required_object<T: IsA<Object>>(builder: &Builder, template: UiTemplate, id: 
     })
 }
 
-pub(crate) fn load_info_dialog_template() -> Result<InfoDialogTemplate> {
-    let builder = load_builder(UiTemplate::InfoDialog);
+/// Convenience wrapper that pairs a `Builder` with its `UiTemplate` so each
+/// `required_object` call doesn't need to repeat the template argument.
+struct TemplateBuilder {
+    builder: Builder,
+    template: UiTemplate,
+}
 
+impl TemplateBuilder {
+    fn new(template: UiTemplate) -> Self {
+        Self {
+            builder: load_builder(template),
+            template,
+        }
+    }
+
+    fn get<T: IsA<Object>>(&self, id: &str) -> Result<T> {
+        required_object(&self.builder, self.template, id)
+    }
+}
+
+pub(crate) fn load_info_dialog_template() -> Result<InfoDialogTemplate> {
+    let b = TemplateBuilder::new(UiTemplate::InfoDialog);
     Ok(InfoDialogTemplate {
-        root: required_object(&builder, UiTemplate::InfoDialog, "info_dialog_content")?,
-        title_label: required_object(&builder, UiTemplate::InfoDialog, "info_dialog_title_label")?,
-        body_label: required_object(&builder, UiTemplate::InfoDialog, "info_dialog_body_label")?,
-        secondary_label: required_object(
-            &builder,
-            UiTemplate::InfoDialog,
-            "info_dialog_secondary_label",
-        )?,
-        close_button: required_object(
-            &builder,
-            UiTemplate::InfoDialog,
-            "info_dialog_close_button",
-        )?,
+        root: b.get("info_dialog_content")?,
+        title_label: b.get("info_dialog_title_label")?,
+        body_label: b.get("info_dialog_body_label")?,
+        secondary_label: b.get("info_dialog_secondary_label")?,
+        close_button: b.get("info_dialog_close_button")?,
     })
 }
 
 pub(crate) fn load_panel_group_template() -> Result<PanelGroupTemplate> {
-    let builder = load_builder(UiTemplate::PanelGroup);
-
+    let b = TemplateBuilder::new(UiTemplate::PanelGroup);
     Ok(PanelGroupTemplate {
-        root: required_object(&builder, UiTemplate::PanelGroup, "panel_group_root")?,
-        header: required_object(&builder, UiTemplate::PanelGroup, "panel_group_header")?,
-        body: required_object(&builder, UiTemplate::PanelGroup, "panel_group_body")?,
+        root: b.get("panel_group_root")?,
+        header: b.get("panel_group_header")?,
+        body: b.get("panel_group_body")?,
         tab_buttons: [
-            required_object(&builder, UiTemplate::PanelGroup, "panel_group_tab_1")?,
-            required_object(&builder, UiTemplate::PanelGroup, "panel_group_tab_2")?,
-            required_object(&builder, UiTemplate::PanelGroup, "panel_group_tab_3")?,
+            b.get("panel_group_tab_1")?,
+            b.get("panel_group_tab_2")?,
+            b.get("panel_group_tab_3")?,
         ],
     })
 }
 
 pub(crate) fn load_titlebar_template() -> Result<TitlebarTemplate> {
-    let builder = load_builder(UiTemplate::Titlebar);
-
+    let b = TemplateBuilder::new(UiTemplate::Titlebar);
     Ok(TitlebarTemplate {
-        root: required_object(&builder, UiTemplate::Titlebar, "shell_titlebar_root")?,
-        logo_image: required_object(&builder, UiTemplate::Titlebar, "shell_titlebar_logo")?,
-        app_name_label: required_object(&builder, UiTemplate::Titlebar, "shell_titlebar_app_name")?,
-        workspace_button: required_object(
-            &builder,
-            UiTemplate::Titlebar,
-            "shell_titlebar_workspace_button",
-        )?,
-        search_button: required_object(
-            &builder,
-            UiTemplate::Titlebar,
-            "shell_titlebar_search_button",
-        )?,
-        search_icon: required_object(&builder, UiTemplate::Titlebar, "shell_titlebar_search_icon")?,
+        root: b.get("shell_titlebar_root")?,
+        logo_image: b.get("shell_titlebar_logo")?,
+        app_name_label: b.get("shell_titlebar_app_name")?,
+        workspace_button: b.get("shell_titlebar_workspace_button")?,
+        search_button: b.get("shell_titlebar_search_button")?,
+        search_icon: b.get("shell_titlebar_search_icon")?,
     })
 }
 
 #[allow(dead_code)]
 pub(crate) fn load_tool_options_bar_template() -> Result<ToolOptionsBarTemplate> {
-    let builder = load_builder(UiTemplate::ToolOptionsBar);
-
+    let b = TemplateBuilder::new(UiTemplate::ToolOptionsBar);
     Ok(ToolOptionsBarTemplate {
-        root: required_object(
-            &builder,
-            UiTemplate::ToolOptionsBar,
-            "tool_options_bar_root",
-        )?,
-        tool_icon: required_object(&builder, UiTemplate::ToolOptionsBar, "tool_options_icon")?,
-        tool_label: required_object(&builder, UiTemplate::ToolOptionsBar, "tool_options_label")?,
+        root: b.get("tool_options_bar_root")?,
+        tool_icon: b.get("tool_options_icon")?,
+        tool_label: b.get("tool_options_label")?,
         option_chips: [
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_1")?,
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_2")?,
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_3")?,
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_4")?,
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_5")?,
-            required_object(&builder, UiTemplate::ToolOptionsBar, "tool_option_chip_6")?,
+            b.get("tool_option_chip_1")?,
+            b.get("tool_option_chip_2")?,
+            b.get("tool_option_chip_3")?,
+            b.get("tool_option_chip_4")?,
+            b.get("tool_option_chip_5")?,
+            b.get("tool_option_chip_6")?,
         ],
     })
 }
 
 pub(crate) fn load_document_tabs_template() -> Result<DocumentTabsTemplate> {
-    let builder = load_builder(UiTemplate::DocumentTabs);
-
+    let b = TemplateBuilder::new(UiTemplate::DocumentTabs);
     Ok(DocumentTabsTemplate {
-        root: required_object(&builder, UiTemplate::DocumentTabs, "document_tabs_root")?,
-        active_tab_button: required_object(
-            &builder,
-            UiTemplate::DocumentTabs,
-            "document_tab_active_button",
-        )?,
-        active_tab_label: required_object(
-            &builder,
-            UiTemplate::DocumentTabs,
-            "document_tab_title",
-        )?,
-        add_tab_button: required_object(
-            &builder,
-            UiTemplate::DocumentTabs,
-            "document_tab_add_button",
-        )?,
+        root: b.get("document_tabs_root")?,
+        active_tab_button: b.get("document_tab_active_button")?,
+        active_tab_label: b.get("document_tab_title")?,
+        add_tab_button: b.get("document_tab_add_button")?,
     })
 }
 
 pub(crate) fn load_status_bar_template() -> Result<StatusBarTemplate> {
-    let builder = load_builder(UiTemplate::StatusBar);
-
+    let b = TemplateBuilder::new(UiTemplate::StatusBar);
     Ok(StatusBarTemplate {
-        root: required_object(&builder, UiTemplate::StatusBar, "status_bar_root")?,
-        doc_label: required_object(&builder, UiTemplate::StatusBar, "status_doc_label")?,
-        zoom_label: required_object(&builder, UiTemplate::StatusBar, "status_zoom_label")?,
-        cursor_label: required_object(&builder, UiTemplate::StatusBar, "status_cursor_label")?,
-        notice_label: required_object(&builder, UiTemplate::StatusBar, "status_notice_label")?,
-        mode_label: required_object(&builder, UiTemplate::StatusBar, "status_mode_label")?,
+        root: b.get("status_bar_root")?,
+        doc_label: b.get("status_doc_label")?,
+        zoom_label: b.get("status_zoom_label")?,
+        cursor_label: b.get("status_cursor_label")?,
+        notice_label: b.get("status_notice_label")?,
+        mode_label: b.get("status_mode_label")?,
     })
 }
 

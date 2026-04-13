@@ -27,27 +27,27 @@ use ui_templates::{
     load_status_bar_template, load_titlebar_template,
 };
 
+mod canvas_host;
+mod file_workflow;
 mod layout;
 mod menus;
-mod file_workflow;
+mod panels;
 mod shell_chrome;
 mod startup;
-mod canvas_host;
-mod panels;
 mod status_presenter;
 mod ui_support;
 mod ui_templates;
 
 use canvas_host::{CanvasHostState, build_canvas_host};
+use status_presenter::{
+    apply_status_notice_style, format_import_report_details, format_shell_alert_secondary_text,
+    shell_notice_text, shell_status_hint,
+};
 use ui_support::{
     build_icon_label_button, build_icon_label_shortcut_button, build_icon_only_button,
     build_logo_icon, build_remix_icon, create_menu_popover, logo_icon_resource_path,
     remix_icon_resource_path, set_image_resource_or_fallback, set_menu_button_label,
     shell_tool_icon, shell_tool_shortcut,
-};
-use status_presenter::{
-    apply_status_notice_style, format_import_report_details, format_shell_alert_secondary_text,
-    shell_notice_text, shell_status_hint,
 };
 
 const UI_RESOURCE_PREFIX: &str = "/com/phototux";
@@ -366,8 +366,6 @@ fn ensure_ui_resources_registered() -> Result<()> {
     }
 }
 
-
-
 fn build_color_chip(label_text: &str, css_class: &str) -> Button {
     let button = Button::with_label(label_text);
     button.add_css_class("color-chip");
@@ -493,8 +491,7 @@ impl ShellUiState {
             tool_options_label,
             tool_option_keys,
             tool_option_values,
-        ) =
-            shell_chrome::build_tool_options_bar(controller.clone());
+        ) = shell_chrome::build_tool_options_bar(controller.clone());
         let (tool_rail, tool_buttons) = shell_chrome::build_left_tool_rail(controller.clone());
         let (document_tabs, document_tab_label) = shell_chrome::build_document_tabs();
         let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
@@ -590,164 +587,186 @@ impl ShellUiState {
             .to_unicode()
             .map(|character| character.to_ascii_lowercase());
 
-        if self.automation_shortcuts_enabled && is_control && is_shift {
-            if matches!(key, gdk::Key::F1) {
-                self.controller.borrow_mut().add_layer();
-                return true;
-            }
-            if matches!(key, gdk::Key::F2) {
-                self.controller.borrow_mut().duplicate_active_layer();
-                return true;
-            }
-            if matches!(key, gdk::Key::F3) {
-                self.controller.borrow_mut().delete_active_layer();
-                return true;
-            }
-            if matches!(key, gdk::Key::F4)
-                && let Some(layer_id) = self.selected_layer_id()
-            {
-                self.controller
-                    .borrow_mut()
-                    .toggle_layer_visibility(layer_id);
-                return true;
-            }
-            if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
-                self.controller
-                    .borrow_mut()
-                    .previous_active_layer_blend_mode();
-                return true;
-            }
-            if matches!(key, gdk::Key::F6 | gdk::Key::bracketright) {
-                self.controller.borrow_mut().next_active_layer_blend_mode();
-                return true;
-            }
-            if matches!(key, gdk::Key::F7 | gdk::Key::minus | gdk::Key::KP_Subtract) {
-                self.controller.borrow_mut().decrease_active_layer_opacity();
-                return true;
-            }
-            if matches!(
-                key,
-                gdk::Key::F8 | gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add
-            ) {
-                self.controller.borrow_mut().increase_active_layer_opacity();
-                return true;
-            }
-            if matches!(key, gdk::Key::F9 | gdk::Key::Up) {
-                self.controller.borrow_mut().move_active_layer_up();
-                return true;
-            }
-            if matches!(key, gdk::Key::F10 | gdk::Key::Down) {
-                self.controller.borrow_mut().move_active_layer_down();
-                return true;
-            }
-            if matches!(key, gdk::Key::F11) {
-                self.controller.borrow_mut().begin_transform();
-                return true;
-            }
-            if matches!(key, gdk::Key::Page_Up | gdk::Key::KP_Page_Up) {
-                self.controller.borrow_mut().scale_transform_up();
-                return true;
-            }
-            if matches!(key, gdk::Key::Page_Down | gdk::Key::KP_Page_Down) {
-                self.controller.borrow_mut().scale_transform_down();
-                return true;
-            }
-            if matches!(key, gdk::Key::bracketleft) {
-                self.controller.borrow_mut().rotate_transform_left();
-                return true;
-            }
-            if matches!(key, gdk::Key::bracketright) {
-                self.controller.borrow_mut().rotate_transform_right();
-                return true;
-            }
-            if matches!(key, gdk::Key::F12) {
-                self.controller.borrow_mut().scale_transform_x_up();
-                return true;
-            }
-            if matches!(key, gdk::Key::F13) {
-                self.controller.borrow_mut().scale_transform_y_up();
-                return true;
-            }
-
-            match key_char {
-                Some('x') => {
-                    self.controller.borrow_mut().swap_colors();
-                    return true;
-                }
-                Some('r') => {
-                    self.controller.borrow_mut().reset_colors();
-                    return true;
-                }
-                Some(digit @ '1'..='9') => {
-                    let layer_index = (digit as u8 - b'1') as usize;
-                    if let Some(layer_id) = self.nth_layer_id(layer_index) {
-                        self.controller.borrow_mut().select_layer(layer_id);
-                        return true;
-                    }
-                }
-                _ => {}
-            }
+        if self.automation_shortcuts_enabled
+            && is_control
+            && is_shift
+            && self.handle_automation_shortcut(key, key_char)
+        {
+            return true;
         }
+        if is_control && self.handle_ctrl_shortcut(key, key_char, is_shift) {
+            return true;
+        }
+        if self.handle_mode_exit_key(key) {
+            return true;
+        }
+        self.handle_tool_select_shortcut(key_char)
+    }
 
-        if is_control {
-            if matches!(key, gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add) {
+    fn handle_automation_shortcut(self: &Rc<Self>, key: gdk::Key, key_char: Option<char>) -> bool {
+        if matches!(key, gdk::Key::F1) {
+            self.controller.borrow_mut().add_layer();
+            return true;
+        }
+        if matches!(key, gdk::Key::F2) {
+            self.controller.borrow_mut().duplicate_active_layer();
+            return true;
+        }
+        if matches!(key, gdk::Key::F3) {
+            self.controller.borrow_mut().delete_active_layer();
+            return true;
+        }
+        if matches!(key, gdk::Key::F4)
+            && let Some(layer_id) = self.selected_layer_id()
+        {
+            self.controller
+                .borrow_mut()
+                .toggle_layer_visibility(layer_id);
+            return true;
+        }
+        if matches!(key, gdk::Key::F5 | gdk::Key::bracketleft) {
+            self.controller
+                .borrow_mut()
+                .previous_active_layer_blend_mode();
+            return true;
+        }
+        if matches!(key, gdk::Key::F6 | gdk::Key::bracketright) {
+            self.controller.borrow_mut().next_active_layer_blend_mode();
+            return true;
+        }
+        if matches!(key, gdk::Key::F7 | gdk::Key::minus | gdk::Key::KP_Subtract) {
+            self.controller.borrow_mut().decrease_active_layer_opacity();
+            return true;
+        }
+        if matches!(
+            key,
+            gdk::Key::F8 | gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add
+        ) {
+            self.controller.borrow_mut().increase_active_layer_opacity();
+            return true;
+        }
+        if matches!(key, gdk::Key::F9 | gdk::Key::Up) {
+            self.controller.borrow_mut().move_active_layer_up();
+            return true;
+        }
+        if matches!(key, gdk::Key::F10 | gdk::Key::Down) {
+            self.controller.borrow_mut().move_active_layer_down();
+            return true;
+        }
+        if matches!(key, gdk::Key::F11) {
+            self.controller.borrow_mut().begin_transform();
+            return true;
+        }
+        if matches!(key, gdk::Key::Page_Up | gdk::Key::KP_Page_Up) {
+            self.controller.borrow_mut().scale_transform_up();
+            return true;
+        }
+        if matches!(key, gdk::Key::Page_Down | gdk::Key::KP_Page_Down) {
+            self.controller.borrow_mut().scale_transform_down();
+            return true;
+        }
+        if matches!(key, gdk::Key::bracketleft) {
+            self.controller.borrow_mut().rotate_transform_left();
+            return true;
+        }
+        if matches!(key, gdk::Key::bracketright) {
+            self.controller.borrow_mut().rotate_transform_right();
+            return true;
+        }
+        if matches!(key, gdk::Key::F12) {
+            self.controller.borrow_mut().scale_transform_x_up();
+            return true;
+        }
+        if matches!(key, gdk::Key::F13) {
+            self.controller.borrow_mut().scale_transform_y_up();
+            return true;
+        }
+        match key_char {
+            Some('x') => {
+                self.controller.borrow_mut().swap_colors();
+                true
+            }
+            Some('r') => {
+                self.controller.borrow_mut().reset_colors();
+                true
+            }
+            Some(digit @ '1'..='9') => {
+                let layer_index = (digit as u8 - b'1') as usize;
+                if let Some(layer_id) = self.nth_layer_id(layer_index) {
+                    self.controller.borrow_mut().select_layer(layer_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_ctrl_shortcut(
+        self: &Rc<Self>,
+        key: gdk::Key,
+        key_char: Option<char>,
+        is_shift: bool,
+    ) -> bool {
+        if matches!(key, gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add) {
+            self.canvas_state.borrow_mut().zoom_in();
+            return true;
+        }
+        if matches!(key, gdk::Key::minus | gdk::Key::KP_Subtract) {
+            self.canvas_state.borrow_mut().zoom_out();
+            return true;
+        }
+        match key_char {
+            Some('z') if is_shift => {
+                self.controller.borrow_mut().redo();
+                true
+            }
+            Some('s') if is_shift => {
+                self.request_project_save_as();
+                true
+            }
+            Some('z') => {
+                self.controller.borrow_mut().undo();
+                true
+            }
+            Some('y') => {
+                self.controller.borrow_mut().redo();
+                true
+            }
+            Some('o') => {
+                self.request_open_project();
+                true
+            }
+            Some('s') => {
+                self.request_project_save();
+                true
+            }
+            Some('d') => {
+                self.controller.borrow_mut().clear_selection();
+                true
+            }
+            Some('i') => {
+                self.controller.borrow_mut().invert_selection();
+                true
+            }
+            Some('=') | Some('+') => {
                 self.canvas_state.borrow_mut().zoom_in();
-                return true;
+                true
             }
-            if matches!(key, gdk::Key::minus | gdk::Key::KP_Subtract) {
+            Some('-') => {
                 self.canvas_state.borrow_mut().zoom_out();
-                return true;
+                true
             }
-
-            match key_char {
-                Some('z') if is_shift => {
-                    self.controller.borrow_mut().redo();
-                    return true;
-                }
-                Some('s') if is_shift => {
-                    self.request_project_save_as();
-                    return true;
-                }
-                Some('z') => {
-                    self.controller.borrow_mut().undo();
-                    return true;
-                }
-                Some('y') => {
-                    self.controller.borrow_mut().redo();
-                    return true;
-                }
-                Some('o') => {
-                    self.request_open_project();
-                    return true;
-                }
-                Some('s') => {
-                    self.request_project_save();
-                    return true;
-                }
-                Some('d') => {
-                    self.controller.borrow_mut().clear_selection();
-                    return true;
-                }
-                Some('i') => {
-                    self.controller.borrow_mut().invert_selection();
-                    return true;
-                }
-                Some('=') | Some('+') => {
-                    self.canvas_state.borrow_mut().zoom_in();
-                    return true;
-                }
-                Some('-') => {
-                    self.canvas_state.borrow_mut().zoom_out();
-                    return true;
-                }
-                Some('0') => {
-                    self.canvas_state.borrow_mut().fit_to_view();
-                    return true;
-                }
-                _ => {}
+            Some('0') => {
+                self.canvas_state.borrow_mut().fit_to_view();
+                true
             }
+            _ => false,
         }
+    }
 
+    fn handle_mode_exit_key(&self, key: gdk::Key) -> bool {
         match key {
             gdk::Key::Return | gdk::Key::KP_Enter => {
                 let snapshot = self.controller.borrow().snapshot();
@@ -759,6 +778,7 @@ impl ShellUiState {
                     self.controller.borrow_mut().commit_transform();
                     return true;
                 }
+                false
             }
             gdk::Key::Escape => {
                 let snapshot = self.controller.borrow().snapshot();
@@ -774,51 +794,41 @@ impl ShellUiState {
                     self.controller.borrow_mut().clear_selection();
                     return true;
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
+    }
 
-        match key_char {
-            Some('v') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Move),
-            Some('m') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::RectangularMarquee),
-            Some('l') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Lasso),
-            Some('i') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Text),
-            Some('t') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Transform),
-            Some('b') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Brush),
-            Some('e') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Eraser),
-            Some('h') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Hand),
-            Some('z') => self
-                .controller
-                .borrow_mut()
-                .select_tool(ShellToolKind::Zoom),
+    fn handle_tool_select_shortcut(&self, key_char: Option<char>) -> bool {
+        let tool = match key_char {
+            Some('v') => ShellToolKind::Move,
+            Some('m') => ShellToolKind::RectangularMarquee,
+            Some('l') => ShellToolKind::Lasso,
+            Some('i') => ShellToolKind::Text,
+            Some('t') => ShellToolKind::Transform,
+            Some('b') => ShellToolKind::Brush,
+            Some('e') => ShellToolKind::Eraser,
+            Some('h') => ShellToolKind::Hand,
+            Some('z') => ShellToolKind::Zoom,
             _ => return false,
-        }
-
+        };
+        self.controller.borrow_mut().select_tool(tool);
         true
+    }
+
+    fn update_tool_option_labels(&self, snapshot: &ShellSnapshot) {
+        for ((key, value), (key_label, value_label)) in
+            shell_chrome::tool_option_groups(snapshot).into_iter().zip(
+                self.tool_option_keys
+                    .iter()
+                    .zip(self.tool_option_values.iter()),
+            )
+        {
+            key_label.set_label(&key);
+            value_label.set_label(&value);
+            value_label.set_tooltip_text(Some(&format!("{key}: {value}")));
+        }
     }
 
     fn selected_layer_id(&self) -> Option<LayerId> {
@@ -1312,7 +1322,10 @@ impl ShellUiState {
     fn request_open_project(self: &Rc<Self>) {
         let snapshot = self.controller.borrow().snapshot();
         if snapshot.dirty {
-            self.present_document_replacement_prompt(&snapshot, PendingDocumentAction::ChooseOpenProject);
+            self.present_document_replacement_prompt(
+                &snapshot,
+                PendingDocumentAction::ChooseOpenProject,
+            );
         } else if let Some(window) = self.window.borrow().as_ref() {
             file_workflow::choose_open_project(window, self.clone());
         }
@@ -1321,7 +1334,10 @@ impl ShellUiState {
     fn request_import_image(self: &Rc<Self>) {
         let snapshot = self.controller.borrow().snapshot();
         if snapshot.dirty {
-            self.present_document_replacement_prompt(&snapshot, PendingDocumentAction::ChooseImportImage);
+            self.present_document_replacement_prompt(
+                &snapshot,
+                PendingDocumentAction::ChooseImportImage,
+            );
         } else if let Some(window) = self.window.borrow().as_ref() {
             file_workflow::choose_import_image(window, self.clone());
         }
@@ -1430,16 +1446,7 @@ impl ShellUiState {
                 &snapshot.active_tool_name,
                 18,
             );
-            let tool_options = shell_chrome::tool_option_groups(&snapshot);
-            for ((key, value), (key_label, value_label)) in tool_options.into_iter().zip(
-                self.tool_option_keys
-                    .iter()
-                    .zip(self.tool_option_values.iter()),
-            ) {
-                key_label.set_label(&key);
-                value_label.set_label(&value);
-                value_label.set_tooltip_text(Some(&format!("{key}: {value}")));
-            }
+            self.update_tool_option_labels(&snapshot);
             self.refresh_tool_buttons(&snapshot);
             self.refresh_color_panel(&snapshot);
             self.refresh_properties_panel(&snapshot);
@@ -1510,7 +1517,6 @@ impl ShellUiState {
 
         self.last_zoom_percent.replace(zoom_percent);
     }
-
 }
 
 fn install_theme() {
@@ -2842,5 +2848,4 @@ mod tests {
             "status-notice-busy"
         );
     }
-
 }
