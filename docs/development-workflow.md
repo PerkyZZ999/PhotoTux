@@ -82,7 +82,7 @@ A development task is done when:
 
 Recommended loop:
 
-1. choose one task from `pre-mvp/tasks-list.md`
+1. choose one active task from `roadmap.md`, `production-readiness-checklist.md`, or the relevant focused checklist under `docs/tests/`
 2. restate acceptance criteria
 3. implement the model and logic first
 4. add or update tests
@@ -161,7 +161,7 @@ At minimum, review these after each milestone-sized change:
 - `technical-specifications.md`
 - `architecture-overview.md`
 - `roadmap.md`
-- `pre-mvp/tasks-list.md`
+- `production-readiness-checklist.md`
 
 ## What Not To Do Early
 

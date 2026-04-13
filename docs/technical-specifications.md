@@ -99,8 +99,9 @@ The following decisions are locked for the first implementation phase.
 - Full dockable panels are deferred until the editing core is stable.
 
 ### Layer Boundary
-- MVP supports raster layers only.
-- Groups, masks, adjustment layers, and text layers are later additions.
+- MVP started with raster layers only.
+- The current codebase now includes raster layers, embedded per-layer masks, hierarchical groups, and document-owned text layers.
+- Adjustment layers remain deferred.
 
 ### Scope Boundary
 - Do not implement Camera RAW, photographic development tools, or library-management features.
@@ -149,7 +150,10 @@ phototux/
 #### `doc_model`
 - document data model
 - raster layers
+- embedded masks and layer hierarchy
+- document-owned text layers
 - selection state
+- guides
 - transforms
 - metadata
 - stable IDs
@@ -166,7 +170,9 @@ phototux/
 - brush tool
 - eraser tool
 - move tool
-- rectangular selection tool
+- rectangular and lasso selection tools
+- pressure-aware brush sampling
+- text placement and text-move interaction
 - transform preview logic
 
 #### `history_engine`
@@ -180,13 +186,13 @@ phototux/
 - export pipeline
 - native project format read and write
 - autosave and recovery files
-- PSD compatibility adapters later
+- limited sidecar-backed PSD import and diagnostics
 
 #### `image_ops`
 - CPU raster operations
 - tile copy and blend helpers
 - selection raster operations
-- destructive filters in later milestones
+- initial destructive filters
 
 #### `color_math`
 - color conversion helpers

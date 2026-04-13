@@ -10,7 +10,8 @@ Current status:
 
 - Milestones 0 through 5 are now implemented at the task-list level
 - MVP stabilization coverage now includes representative compositing scenes, repeated persistence checks, large sparse document validation, autosave and recovery regression coverage, and viewport-versus-export parity checks
-- next planning can move beyond the current MVP task list into post-MVP prioritization
+- the current codebase also includes major post-MVP expansions: masks, layer groups, lasso selection, guides and snapping, pressure-aware painting, destructive filters, text layers, and limited PSD import
+- next planning should focus on production hardening, startup smoothness, and performance trust rather than reopening already-completed post-MVP feature tracks
 
 ## Guiding Rules
 
@@ -135,22 +136,33 @@ Exit criteria:
 
 - the product is trustworthy for repeated personal use on target Linux systems
 
-## Post-MVP Direction
+## Completed Post-MVP Expansions
 
-Likely next investments:
+The current repository already includes these major post-MVP feature tracks:
 
 - masks
 - layer groups
 - lasso selection
+- transform upgrades
 - guides and snapping
-- tablet-pressure support
-- limited PSD import
+- pressure-aware painting controls
 - destructive filters
-- text layers later
+- text layers
+- limited PSD import
 
-## Roadmap Anti-Goals
+## Recommended Next Focus
 
-Do not allow these to displace MVP completion:
+The next major investments should center on production readiness:
+
+- close remaining data-loss and workflow-safety gaps
+- tighten startup behavior and startup latency
+- improve runtime performance, fluidity, and frame-to-frame responsiveness
+- harden install-safe resource loading, recovery paths, and corruption handling
+- continue shell usability polish without expanding scope into docking or cross-platform work
+
+## Current Anti-Goals
+
+Do not allow these to displace the current production-hardening focus:
 
 - docking system work
 - elaborate workspace persistence

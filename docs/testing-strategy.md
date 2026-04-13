@@ -105,6 +105,8 @@ Current implemented fixture set:
 - single-text-layer editing scene in `app_core` tests
 - mixed raster-plus-text design scene in `app_core` tests
 - text export-versus-viewport parity scene in `app_core` tests
+- representative destructive-filter scene plus stale-result discard coverage in `app_core` tests
+- PSD import interoperability fixtures in `tests/fixtures/psd/` plus sidecar-backed fixture validation in `tools/psd_import_sidecar/test_fixture_sidecar.py`
 
 Current manual validation companion docs:
 
@@ -181,6 +183,7 @@ Minimum checks:
 - pan and zoom on a medium layered document
 - autosave during a normal editing session
 - large import and export behavior
+- cold-start and warm-start launch behavior for any startup preload, shader warm-up, or splash-screen path
 
 ## Regression Policy
 

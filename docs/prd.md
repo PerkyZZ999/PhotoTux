@@ -179,7 +179,7 @@ Success condition:
 - painting and navigation feel fast enough to justify continued development
 
 ### MVP
-The MVP exists to complete real layered design tasks.
+The MVP existed to complete real layered design tasks.
 
 Included:
 - multi-layer raster document
@@ -210,7 +210,7 @@ Explicitly excluded from MVP:
 ### Post-MVP
 The first expansion phase adds higher-leverage workflow features.
 
-Candidates:
+Implemented in the current codebase:
 - masks
 - layer groups
 - lasso selection
@@ -219,8 +219,12 @@ Candidates:
 - text layers
 - destructive filters
 - tablet pressure support
-- limited PSD import
-- limited PSD export
+- limited PSD import through a sidecar-backed subset
+
+Still pending after those expansions:
+- broader PSD coverage and any PSD export story
+- production hardening for data safety, startup, performance, and install-safe resource handling
+- release and distribution automation
 
 ---
 
@@ -235,7 +239,7 @@ Candidates:
 - Users must be able to create, duplicate, delete, rename, and reorder raster layers.
 - Users must be able to control layer visibility and opacity.
 - Users must be able to apply a defined initial blend mode set.
-- Layer groups are deferred until after MVP.
+- Layer groups were deferred until after MVP and are now implemented as part of the current post-MVP codebase.
 
 ### Canvas Interaction
 - The canvas must support smooth zooming and panning.
@@ -246,7 +250,7 @@ Candidates:
 - Users must be able to paint and erase on raster layers.
 - Brush size, hardness, opacity, flow, and spacing must be adjustable.
 - Brush input latency must feel immediate during normal use.
-- Pressure support is a later milestone, but the architecture must not block it.
+- Pressure support began as a later milestone and now exists as an implemented initial mapping path in the current codebase.
 
 ### Selection and Transform
 - MVP must support rectangular selection.
@@ -262,8 +266,8 @@ Candidates:
 - Early import must support PNG, JPEG, and WebP.
 - Export must match the visible flattened composite.
 - The native project format must preserve layered state, metadata, and version information.
-- PSD interoperability is required after MVP, but only as a defined supported subset.
-- PSD import should be prioritized before PSD export.
+- PSD interoperability remains a post-MVP concern and currently exists only as a defined sidecar-backed import subset.
+- PSD import remains prioritized before any PSD export work.
 - Unsupported PSD features must fail clearly rather than importing silently with incorrect results.
 
 ---

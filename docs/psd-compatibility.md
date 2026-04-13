@@ -10,6 +10,8 @@ The native `.ptx` format remains the authoritative layered working format for Ph
 
 PhotoTux currently supports PSD import through a repo-managed `psd-tools` sidecar.
 
+In the current source-build workflow, that sidecar is expected through `PHOTOTUX_PSD_IMPORT_SIDECAR` and optional `PHOTOTUX_PSD_IMPORT_SIDECAR_ARGS` environment variables.
+
 The PSD importer normalizes supported content into PhotoTux's native document model and reports unsupported structure explicitly.
 
 PhotoTux does not currently promise PSD export.
@@ -64,6 +66,8 @@ Current diagnostic categories include:
 - unsupported layer features
 - unsupported blend mode
 - flattened fallback used
+
+Fixture coverage for the current supported subset and fallback rules lives in `tests/fixtures/psd/`, with sidecar validation exercised by `tools/psd_import_sidecar/test_fixture_sidecar.py`.
 
 ## Shell Workflow Expectations
 

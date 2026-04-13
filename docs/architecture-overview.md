@@ -98,7 +98,7 @@ Owned by `tool_system`.
 Responsibilities:
 
 - translate input events into editing intent
-- run brush, eraser, move, marquee, and transform interactions
+- run brush, eraser, move, marquee, lasso, text-placement, and transform interactions
 - support low-latency preview behavior during direct manipulation
 
 The tool engine should own interaction logic, not document persistence or panel UI behavior.
@@ -113,7 +113,7 @@ Responsibilities:
 - import and export for PNG, JPEG, and WebP
 - autosave files and recovery discovery
 - versioned manifest and payload handling
-- future PSD adapters
+- limited sidecar-backed PSD import and diagnostics
 
 Hard rule:
 
@@ -159,7 +159,7 @@ Handles:
 - import and export
 - thumbnail generation
 - heavy resampling
-- future destructive filters
+- destructive filters
 
 Worker-job results are applied through the application layer, never directly into widget-owned state.
 
@@ -196,7 +196,7 @@ Typical save flow:
 - `color_math`: color and blend utilities
 - `common`: shared geometry, IDs, traits, constants, and errors
 
-## Early Architecture Constraints
+## MVP-Phase Architecture Constraints
 
 - fixed layout before any docking system
 - raster layers only in MVP
@@ -204,6 +204,8 @@ Typical save flow:
 - no text layers in MVP
 - no PSD import or export in MVP
 - no raw Vulkan or second rendering stack unless a proven bottleneck forces it
+
+Those constraints described the MVP boundary, not the current codebase. The repository has since added masks, groups, lasso selection, guides and snapping, pressure-aware painting, destructive filters, text layers, and limited PSD import without changing the core ownership rules above.
 
 ## Architecture Checklist For New Work
 
