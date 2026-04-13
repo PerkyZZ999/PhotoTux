@@ -581,10 +581,7 @@ enum JobResult {
 }
 
 fn project_file_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case(PROJECT_FILE_EXTENSION))
-        .unwrap_or(false)
+    path_has_extension(path, PROJECT_FILE_EXTENSION)
 }
 
 fn raster_format_from_path(path: &Path) -> Option<RasterFileFormat> {
@@ -598,9 +595,13 @@ fn raster_format_from_path(path: &Path) -> Option<RasterFileFormat> {
 }
 
 fn psd_file_path(path: &Path) -> bool {
+    path_has_extension(path, "psd")
+}
+
+fn path_has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("psd"))
+        .and_then(|path_extension| path_extension.to_str())
+        .map(|path_extension| path_extension.eq_ignore_ascii_case(extension))
         .unwrap_or(false)
 }
 
