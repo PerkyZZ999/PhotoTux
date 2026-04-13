@@ -1726,16 +1726,24 @@ fn build_target_chip(label: &str, tooltip: &str, active: bool, enabled: bool) ->
     chip
 }
 
+fn wire_button_to_controller_action(
+    button: &Button,
+    controller: &Rc<RefCell<dyn ShellController>>,
+    action: ControllerAction,
+) {
+    let controller = controller.clone();
+    button.connect_clicked(move |_| action(&mut *controller.borrow_mut()));
+}
+
 /// Build an icon-only tool-chip button and wire a controller action to it.
 fn wired_icon_chip(
     controller: &Rc<RefCell<dyn ShellController>>,
     icon: &str,
     tooltip: &str,
-    action: fn(&mut dyn ShellController),
+    action: ControllerAction,
 ) -> Button {
     let button = build_tool_chip_icon_button(icon, tooltip);
-    let ctrl = controller.clone();
-    button.connect_clicked(move |_| action(&mut *ctrl.borrow_mut()));
+    wire_button_to_controller_action(&button, controller, action);
     button
 }
 
@@ -1745,14 +1753,13 @@ fn wired_label_chip(
     sensitive: bool,
     tooltip: Option<&str>,
     controller: &Rc<RefCell<dyn ShellController>>,
-    action: fn(&mut dyn ShellController),
+    action: ControllerAction,
 ) -> Button {
     let button = Button::with_label(label);
     button.add_css_class("tool-chip");
     button.set_sensitive(sensitive);
     button.set_tooltip_text(tooltip);
-    let ctrl = controller.clone();
-    button.connect_clicked(move |_| action(&mut *ctrl.borrow_mut()));
+    wire_button_to_controller_action(&button, controller, action);
     button
 }
 
@@ -1763,7 +1770,7 @@ fn wired_toggle_label_chip(
     enabled: bool,
     tooltip: Option<&str>,
     controller: &Rc<RefCell<dyn ShellController>>,
-    action: fn(&mut dyn ShellController),
+    action: ControllerAction,
 ) -> Button {
     wired_label_chip(
         if enabled {
