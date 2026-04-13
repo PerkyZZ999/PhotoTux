@@ -230,6 +230,7 @@ struct LayerHierarchyRecord {
     after_active_layer_id: common::LayerId,
     before_selected_target: LayerHierarchyNodeRef,
     after_selected_target: LayerHierarchyNodeRef,
+    preserve_cached_raster: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +343,16 @@ impl TextLayerRecord {
         }
         controller.selected_structure_target = selected_target;
     }
+
+    fn visual_bounds(&self) -> Option<CanvasRect> {
+        PhotoTuxController::union_canvas_rects(
+            self.before
+                .as_ref()
+                .and_then(text_layer_bounds)
+                .into_iter()
+                .chain(self.after.as_ref().and_then(text_layer_bounds)),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +399,10 @@ impl LayerHierarchyRecord {
         }
         controller.selected_structure_target = selected_target;
     }
+}
+
+fn preserves_visual_composite_when_removed(group: &doc_model::LayerGroup) -> bool {
+    group.visible && group.opacity_percent == 100 && group.children.len() == 1
 }
 
 impl GuideStateRecord {
@@ -1258,8 +1273,6 @@ impl PhotoTuxController {
         self.selected_structure_target = LayerHierarchyNodeRef::Layer(after_layer.id);
         self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
-
         let record = TextLayerRecord {
             layer_id: after_layer.id,
             before,
@@ -1271,6 +1284,7 @@ impl PhotoTuxController {
             before_selected_target,
             after_selected_target: self.selected_structure_target,
         };
+        self.mark_visual_region_dirty(record.visual_bounds());
 
         let label = if session.is_new_layer() {
             format!("Add Text {}", after_layer.name)
@@ -1524,6 +1538,7 @@ impl PhotoTuxController {
         label: impl Into<String>,
         before: LayerHierarchySnapshot,
         after: LayerHierarchySnapshot,
+        preserve_cached_raster: bool,
     ) {
         self.push_operation(
             label,
@@ -1534,6 +1549,7 @@ impl PhotoTuxController {
                 after_active_layer_id: after.active_layer_id,
                 before_selected_target: before.selected_target,
                 after_selected_target: after.selected_target,
+                preserve_cached_raster,
             }),
         );
     }
@@ -1665,6 +1681,38 @@ impl PhotoTuxController {
         let min_y = snapshot.offset_y as i64 + min_tile_y * tile_size;
         let max_x = snapshot.offset_x as i64 + (max_tile_x + 1) * tile_size;
         let max_y = snapshot.offset_y as i64 + (max_tile_y + 1) * tile_size;
+
+        Some(CanvasRect::new(
+            min_x as i32,
+            min_y as i32,
+            max_x.saturating_sub(min_x) as u32,
+            max_y.saturating_sub(min_y) as u32,
+        ))
+    }
+
+    fn visual_bounds_for_brush_record(&self, record: &BrushStrokeRecord) -> Option<CanvasRect> {
+        let tile_size = self.document.tile_size as i64;
+        let layer_index = self.document.layer_index_by_id(record.layer_id)?;
+        let (offset_x, offset_y) = self.document.layer_offset(layer_index)?;
+
+        let mut coords = record.changes.iter().map(BrushChange::coord);
+        let first = coords.next()?;
+        let mut min_tile_x = first.x as i64;
+        let mut min_tile_y = first.y as i64;
+        let mut max_tile_x = first.x as i64;
+        let mut max_tile_y = first.y as i64;
+
+        for coord in coords {
+            min_tile_x = min_tile_x.min(coord.x as i64);
+            min_tile_y = min_tile_y.min(coord.y as i64);
+            max_tile_x = max_tile_x.max(coord.x as i64);
+            max_tile_y = max_tile_y.max(coord.y as i64);
+        }
+
+        let min_x = offset_x as i64 + min_tile_x * tile_size;
+        let min_y = offset_y as i64 + min_tile_y * tile_size;
+        let max_x = offset_x as i64 + (max_tile_x + 1) * tile_size;
+        let max_y = offset_y as i64 + (max_tile_y + 1) * tile_size;
 
         Some(CanvasRect::new(
             min_x as i32,
@@ -2014,7 +2062,7 @@ impl PhotoTuxController {
         self.selected_structure_target = LayerHierarchyNodeRef::Group(group_id);
         self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_document_dirty_without_raster_invalidation();
         self.push_layer_hierarchy_operation(
             format!("Group {}", active_layer_name),
             LayerHierarchySnapshot {
@@ -2027,6 +2075,7 @@ impl PhotoTuxController {
                 active_layer_id: self.active_layer_id(),
                 selected_target: self.selected_structure_target,
             },
+            true,
         );
         self.status_message = format!("Grouped {}", active_layer_name);
     }
@@ -2035,6 +2084,10 @@ impl PhotoTuxController {
         let Some(group_id) = self.selected_group_id() else {
             return;
         };
+        let preserve_cached_raster = self
+            .document
+            .group(group_id)
+            .is_some_and(preserves_visual_composite_when_removed);
         let group_name = self
             .document
             .group(group_id)
@@ -2048,7 +2101,11 @@ impl PhotoTuxController {
         }
         self.reset_selected_structure_target_to_active_layer();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        if preserve_cached_raster {
+            self.mark_document_dirty_without_raster_invalidation();
+        } else {
+            self.mark_document_dirty();
+        }
         self.push_layer_hierarchy_operation(
             format!("Ungroup {}", group_name),
             LayerHierarchySnapshot {
@@ -2061,6 +2118,7 @@ impl PhotoTuxController {
                 active_layer_id: self.active_layer_id(),
                 selected_target: self.selected_structure_target,
             },
+            preserve_cached_raster,
         );
         self.status_message = format!("Ungrouped {}", group_name);
     }
@@ -2099,6 +2157,7 @@ impl PhotoTuxController {
                 active_layer_id: self.active_layer_id(),
                 selected_target: self.selected_structure_target,
             },
+            false,
         );
         self.status_message = format!("Moved {} into {}", active_layer_name, group_name);
     }
@@ -2138,6 +2197,7 @@ impl PhotoTuxController {
                 active_layer_id: self.active_layer_id(),
                 selected_target: self.selected_structure_target,
             },
+            false,
         );
         self.status_message = format!("Moved {} out of {}", active_layer_name, group_name);
     }
@@ -2633,7 +2693,12 @@ impl PhotoTuxController {
                         .apply_layer_state_snapshot(layer_id, after.clone())
                     {
                         self.bump_canvas_revision();
-                        self.mark_document_dirty();
+                        self.mark_visual_region_dirty(Self::union_canvas_rects([
+                            Self::visual_bounds_for_layer_state_snapshot(&before, self.document.tile_size),
+                            Self::visual_bounds_for_layer_state_snapshot(&after, self.document.tile_size),
+                        ]
+                        .into_iter()
+                        .flatten()));
                         self.push_operation(
                             format!("Filter {}", filter.label()),
                             EditorOperation::DestructiveFilter(DestructiveFilterRecord {
@@ -2841,6 +2906,29 @@ impl PhotoTuxController {
         )
     }
 
+    fn preview_update_region(&self) -> Option<CanvasRect> {
+        let text_region = self.text_session.as_ref().and_then(|session| {
+            Self::union_canvas_rects(
+                session
+                    .before
+                    .as_ref()
+                    .and_then(text_layer_bounds)
+                    .into_iter()
+                    .chain(text_layer_bounds(&session.draft)),
+            )
+        });
+
+        let transform_region = self.transform_session.as_ref().and_then(|session| {
+            let current_bounds = self
+                .document
+                .layer_index_by_id(session.layer_id)
+                .and_then(|layer_index| self.document.layer_canvas_bounds(layer_index));
+            Self::union_canvas_rects(current_bounds.into_iter().chain(self.transform_preview_rect()))
+        });
+
+        Self::union_canvas_rects(text_region.into_iter().chain(transform_region))
+    }
+
     fn preview_canvas_raster(&self) -> CanvasRaster {
         let mut preview_document = self.document.clone();
         if let Some(session) = &self.text_session {
@@ -2870,6 +2958,18 @@ impl PhotoTuxController {
                 session.translate_x,
                 session.translate_y,
             );
+        }
+
+        if let Some(region) = self.preview_update_region() {
+            let mut pixels = self
+                .cached_canvas_raster
+                .clone()
+                .unwrap_or_else(|| flatten_document_rgba(&self.document));
+            file_io::update_flattened_region_rgba(&preview_document, &mut pixels, region);
+            return CanvasRaster {
+                size: preview_document.canvas_size,
+                pixels,
+            };
         }
 
         CanvasRaster {
@@ -3032,17 +3132,17 @@ impl ShellController for PhotoTuxController {
         self.document.add_layer(layer_name.clone());
         self.invalidate_layer_items_cache();
         self.bump_canvas_revision();
-        self.mark_document_dirty();
+        self.mark_document_dirty_without_raster_invalidation();
         self.push_history(format!("Add Layer {}", layer_name));
     }
 
     fn duplicate_active_layer(&mut self) {
         let active_index = self.document.active_layer_index();
         let active_name = self.active_layer_name();
-        if self.document.duplicate_layer(active_index).is_some() {
+        if let Some(layer_id) = self.document.duplicate_layer(active_index) {
             self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
-            self.mark_document_dirty();
+            self.mark_visual_region_dirty(self.visual_bounds_for_layer_id(layer_id));
             self.push_history(format!("Duplicate Layer {}", active_name));
         }
     }
@@ -3057,31 +3157,30 @@ impl ShellController for PhotoTuxController {
             }
             self.reset_selected_structure_target_to_active_layer();
             self.bump_canvas_revision();
-            self.mark_document_dirty();
-            self.push_operation(
-                format!("Delete Text {}", layer.name),
-                EditorOperation::TextLayer(TextLayerRecord {
-                    layer_id: layer.id,
-                    before: Some(layer.clone()),
-                    after: None,
-                    before_hierarchy,
-                    after_hierarchy: self.document.layer_hierarchy().to_vec(),
-                    before_active_layer_id,
-                    after_active_layer_id: self.active_layer_id(),
-                    before_selected_target,
-                    after_selected_target: self.selected_structure_target,
-                }),
-            );
+            let record = TextLayerRecord {
+                layer_id: layer.id,
+                before: Some(layer.clone()),
+                after: None,
+                before_hierarchy,
+                after_hierarchy: self.document.layer_hierarchy().to_vec(),
+                before_active_layer_id,
+                after_active_layer_id: self.active_layer_id(),
+                before_selected_target,
+                after_selected_target: self.selected_structure_target,
+            };
+            self.mark_visual_region_dirty(record.visual_bounds());
+            self.push_operation(format!("Delete Text {}", layer.name), EditorOperation::TextLayer(record));
             self.status_message = format!("Deleted {}", layer.name);
             return;
         }
 
         let active_index = self.document.active_layer_index();
         let active_name = self.active_layer_name();
+        let before_bounds = self.visual_bounds_for_layer_id(self.active_layer_id());
         if self.document.delete_layer(active_index) {
             self.invalidate_layer_items_cache();
             self.bump_canvas_revision();
-            self.mark_document_dirty();
+            self.mark_visual_region_dirty(before_bounds);
             self.push_history(format!("Delete Layer {}", active_name));
         }
     }
@@ -3671,7 +3770,7 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::BrushStroke(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_brush_record(&record));
                 }
                 EditorOperation::TransformLayer(record) => {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
@@ -3696,7 +3795,7 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::TextLayer(record) => {
                     record.undo(self);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(record.visual_bounds());
                 }
                 EditorOperation::Selection(record) => {
                     record.undo(&mut self.document);
@@ -3714,12 +3813,16 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::LayerHierarchy(record) => {
                     record.undo(self);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    if record.preserve_cached_raster {
+                        self.mark_document_dirty_without_raster_invalidation();
+                    } else {
+                        self.mark_document_dirty();
+                    }
                 }
                 EditorOperation::DestructiveFilter(record) => {
                     record.undo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_layer_id(record.layer_id));
                 }
             }
         }
@@ -3736,7 +3839,7 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::BrushStroke(record) => {
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_brush_record(&record));
                 }
                 EditorOperation::TransformLayer(record) => {
                     let before_bounds = self.visual_bounds_for_layer_id(record.layer_id);
@@ -3761,7 +3864,7 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::TextLayer(record) => {
                     record.redo(self);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(record.visual_bounds());
                 }
                 EditorOperation::Selection(record) => {
                     record.redo(&mut self.document);
@@ -3779,12 +3882,16 @@ impl ShellController for PhotoTuxController {
                 EditorOperation::LayerHierarchy(record) => {
                     record.redo(self);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    if record.preserve_cached_raster {
+                        self.mark_document_dirty_without_raster_invalidation();
+                    } else {
+                        self.mark_document_dirty();
+                    }
                 }
                 EditorOperation::DestructiveFilter(record) => {
                     record.redo(&mut self.document);
                     self.bump_canvas_revision();
-                    self.mark_document_dirty();
+                    self.mark_visual_region_dirty(self.visual_bounds_for_layer_id(record.layer_id));
                 }
             }
         }
@@ -6746,6 +6853,62 @@ mod tests {
     }
 
     #[test]
+    fn create_group_history_preserves_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        let before = controller.canvas_raster();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.create_group_from_active_layer();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
+    fn default_single_child_ungroup_preserves_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        let before = controller.canvas_raster();
+
+        controller.create_group_from_active_layer();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.ungroup_selected_group();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert_eq!(controller.canvas_raster().pixels, before.pixels);
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
     fn mask_brush_interaction_updates_canvas_and_undo_redo() {
         let mut controller = PhotoTuxController::new();
         controller.document = build_masked_controller_document();
@@ -6959,6 +7122,97 @@ mod tests {
     }
 
     #[test]
+    fn brush_and_filter_history_preserve_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Brush);
+        controller.begin_canvas_interaction(120, 120);
+        controller.update_canvas_interaction(144, 132);
+        controller.end_canvas_interaction();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.apply_destructive_filter(DestructiveFilterKind::InvertColors);
+        wait_for_background_jobs(&mut controller);
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
+    fn text_commit_and_history_preserve_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.select_tool(ShellToolKind::Text);
+        controller.begin_canvas_interaction(18, 22);
+        controller.update_text_session(ui_shell::ShellTextUpdate {
+            content: "PhotoTux".to_string(),
+            font_family: "Bitmap Sans".to_string(),
+            font_size_px: 24,
+            line_height_percent: 130,
+            letter_spacing: 1,
+            fill_rgba: [244, 232, 176, 255],
+            alignment: ui_shell::ShellTextAlignment::Center,
+        });
+        controller.commit_text_session();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.undo();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.redo();
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
+    fn raster_layer_lifecycle_preserves_cached_canvas_raster() {
+        let mut controller = PhotoTuxController::new();
+        controller.document = build_representative_controller_document();
+        controller.reset_selected_structure_target_to_active_layer();
+        controller.refresh_cached_canvas_region(CanvasRect::new(
+            0,
+            0,
+            controller.document.canvas_size.width,
+            controller.document.canvas_size.height,
+        ));
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.add_layer();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.delete_active_layer();
+        assert!(controller.cached_canvas_raster.is_some());
+
+        controller.duplicate_active_layer();
+        assert!(controller.cached_canvas_raster.is_some());
+    }
+
+    #[test]
     fn transform_preview_and_commit_update_canvas_and_history() {
         let mut controller = PhotoTuxController::new();
         let before = controller.canvas_raster();
@@ -6976,6 +7230,7 @@ mod tests {
         assert!(controller.snapshot().transform_preview_rect.is_some());
 
         controller.commit_transform();
+        assert_eq!(preview.pixels, controller.canvas_raster().pixels);
         assert!(!controller.snapshot().transform_active);
         assert!(
             controller

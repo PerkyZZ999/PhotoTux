@@ -241,10 +241,16 @@ Progress notes:
   - completing rectangular or freeform selection interactions now preserves the flattened raster cache too, so selection-only edits no longer trigger a useless full recomposite at mouse-up.
   - group visibility toggles and layer-mask add/remove/enable state changes now reuse bounded cached refreshes as well, and the same behavior now holds when those mask-state edits are replayed through undo/redo.
   - move and transform commit/history paths now union the layer's old and new bounds and refresh only that region in the cached flattened canvas, eliminating another full-composite invalidation path during common iteration and undo/redo flows.
+  - brush undo/redo and destructive-filter undo/redo now also preserve the cached flattened canvas by refreshing only the touched layer region instead of invalidating the entire composite during history replay.
+  - text layer commit, delete, and text history replay now refresh only the union of the text layer's before/after bounds in the cached flattened canvas, removing another full invalidation path from common text-edit workflows.
+  - live text and transform previews now start from the committed flattened canvas and recomposite only the affected preview region against a temporary preview document, avoiding full-canvas flatten work while those interactive sessions are active.
+  - empty raster-layer creation now keeps the cached flattened canvas intact, while duplicate/delete raster-layer actions refresh only the affected layer bounds instead of forcing another full composite.
+  - creating a brand-new default group around the active layer now preserves the cached flattened canvas through both the command and its undo/redo history path because that hierarchy wrapper is visually a no-op.
+  - ungrouping that same default single-child wrapper now preserves the cached flattened canvas too, while still falling back to full invalidation for groups whose visibility or opacity could change the composite.
 
 ### PROD13 - Add startup splash screen and renderer warm-up path
 
-- [ ] Status: not started
+- [ ] Status: in progress
 - Outcome: startup feels intentional and the first real canvas interaction pays less one-time initialization cost
 - Includes:
   - a borderless splash window using the official logo
@@ -255,6 +261,11 @@ Progress notes:
 - Depends on: PROD03, PROD11
 - Done when:
   - the app can show a polished startup splash while safely preloading startup-critical rendering work and avoiding a jarring first-use hitch
+- Progress notes:
+  - startup now defers shell construction by one GTK idle turn so a borderless logo splash can paint first, then steps through real startup phases while the shell and canvas host initialize.
+  - the canvas host now performs a one-shot offscreen warm-up render before the main window is presented, so the first visible workspace frame arrives with renderer setup and an initial canvas frame already prepared.
+  - splash teardown is now tied to the main workspace window actually mapping instead of an immediate close after `present()`, reducing the chance of focus glitches during startup handoff on slower systems.
+  - startup logging now emits a single structured `startup_summary` line with shell-init, warm-up, handoff, total, and renderer-warmed fields, and the handoff timing is recorded when the main window actually maps so cold and warm launch validation reflects the real visible transition.
 
 ### PROD14 - Keep large modules from becoming release-risk bottlenecks
 

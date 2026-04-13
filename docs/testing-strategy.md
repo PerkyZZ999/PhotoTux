@@ -199,6 +199,8 @@ Current automated headless baseline budgets:
 
 These budgets are deliberately conservative release-safety gates, not marketing numbers. Tighten them only after measuring the same paths repeatedly on representative Linux hardware.
 
+For PROD13 startup validation, capture the structured `startup_summary` log emitted by `crates/ui_shell` on launch. Record at least one cold launch and one immediately repeated warm launch from the same Linux environment, then compare the reported `shell_init`, `warmup`, `handoff`, `total`, and `renderer_warmed` fields instead of relying on subjective feel alone.
+
 ## Regression Policy
 
 Any bug in these categories should produce a new test when practical:

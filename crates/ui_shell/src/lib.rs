@@ -9,7 +9,7 @@ use gtk4::{
     CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
     EventControllerScrollFlags, FileChooserAction, FileChooserNative, FileFilter, GestureDrag,
     GestureStylus, HeaderBar, Image, Label, MenuButton, MessageDialog, MessageType, Orientation,
-    Paned, Picture, Popover, ResponseType, Separator, SpinButton, gdk,
+    Paned, Picture, Popover, ResponseType, Separator, SpinButton, Spinner, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -21,7 +21,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ui_templates::{
     build_panel_group_shell, load_document_tabs_template, load_info_dialog_template,
     load_status_bar_template, load_titlebar_template, load_tool_options_bar_template,
@@ -31,6 +31,130 @@ mod ui_templates;
 
 const UI_RESOURCE_PREFIX: &str = "/com/phototux";
 const OPTIONAL_ICON_FALLBACK_NAME: &str = "image-missing";
+const MAIN_WINDOW_DEFAULT_WIDTH: i32 = 1600;
+const MAIN_WINDOW_DEFAULT_HEIGHT: i32 = 900;
+const STARTUP_WARMUP_WIDTH: u32 = 1280;
+const STARTUP_WARMUP_HEIGHT: u32 = 720;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupPhase {
+    Launching,
+    LoadingShell,
+    WarmingCanvas,
+    OpeningWorkspace,
+}
+
+impl StartupPhase {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Launching => "Launching PhotoTux",
+            Self::LoadingShell => "Loading shell",
+            Self::WarmingCanvas => "Warming renderer",
+            Self::OpeningWorkspace => "Opening workspace",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Launching => "Preparing startup surfaces.",
+            Self::LoadingShell => "Building the GTK shell and document session.",
+            Self::WarmingCanvas => "Compiling the first canvas frame before handoff.",
+            Self::OpeningWorkspace => "Presenting the workspace and transferring focus.",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StartupSplash {
+    window: ApplicationWindow,
+    phase_label: Label,
+    detail_label: Label,
+}
+
+type StartupWindowHook = Box<dyn FnOnce(&ApplicationWindow)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupTimingSummary {
+    shell_init_ms: u128,
+    warmup_ms: u128,
+    handoff_ms: u128,
+    total_ms: u128,
+    renderer_warmed: bool,
+}
+
+impl StartupTimingSummary {
+    fn format_log_line(self) -> String {
+        format!(
+            "shell_init={}ms warmup={}ms handoff={}ms total={}ms renderer_warmed={}",
+            self.shell_init_ms,
+            self.warmup_ms,
+            self.handoff_ms,
+            self.total_ms,
+            self.renderer_warmed
+        )
+    }
+}
+
+impl StartupSplash {
+    fn new(application: &Application) -> Self {
+        let window = ApplicationWindow::builder()
+            .application(application)
+            .title(APP_NAME)
+            .default_width(420)
+            .default_height(280)
+            .resizable(false)
+            .decorated(false)
+            .build();
+        window.add_css_class("startup-splash");
+
+        let content = GtkBox::new(Orientation::Vertical, 12);
+        content.add_css_class("startup-splash-content");
+        content.set_valign(Align::Center);
+        content.set_halign(Align::Center);
+        content.set_margin_top(28);
+        content.set_margin_bottom(28);
+        content.set_margin_start(28);
+        content.set_margin_end(28);
+
+        let logo = build_logo_icon(APP_NAME, 72);
+        logo.add_css_class("startup-splash-logo");
+        content.append(&logo);
+
+        let title = Label::new(Some(APP_NAME));
+        title.add_css_class("startup-splash-title");
+        content.append(&title);
+
+        let phase_label = Label::new(None);
+        phase_label.add_css_class("startup-splash-phase");
+        content.append(&phase_label);
+
+        let detail_label = Label::new(None);
+        detail_label.add_css_class("startup-splash-detail");
+        detail_label.set_wrap(true);
+        detail_label.set_justify(gtk4::Justification::Center);
+        content.append(&detail_label);
+
+        let spinner = Spinner::new();
+        spinner.add_css_class("startup-splash-spinner");
+        spinner.start();
+        content.append(&spinner);
+
+        window.set_child(Some(&content));
+
+        let splash = Self {
+            window,
+            phase_label,
+            detail_label,
+        };
+        splash.update_phase(StartupPhase::Launching);
+        splash
+    }
+
+    fn update_phase(&self, phase: StartupPhase) {
+        self.phase_label.set_label(phase.title());
+        self.detail_label.set_label(phase.detail());
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
@@ -319,23 +443,100 @@ pub fn run(controller: Rc<RefCell<dyn ShellController>>) -> Result<()> {
         .application_id("com.phototux.app")
         .build();
 
-    application.connect_activate(move |application| build_ui(application, controller.clone()));
+    application.connect_activate(move |application| begin_startup(application, controller.clone()));
     let _exit_code = application.run();
 
     Ok(())
 }
 
-fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellController>>) {
+fn begin_startup(application: &Application, controller: Rc<RefCell<dyn ShellController>>) {
     install_theme();
+    let splash = StartupSplash::new(application);
+    splash.update_phase(StartupPhase::LoadingShell);
+    splash.window.present();
 
-    let shell_state = ShellUiState::new(controller.clone());
+    let application = application.clone();
+    let shell_state = Rc::new(RefCell::new(None::<Rc<ShellUiState>>));
+    let startup_started_at = Instant::now();
+    glib::idle_add_local_once(move || {
+        let shell_started_at = Instant::now();
+        let built_shell_state = ShellUiState::new(controller.clone());
+        let shell_init_ms = shell_started_at.elapsed().as_millis();
+        tracing::info!(
+            shell_init_ms,
+            "startup shell initialized"
+        );
+        *shell_state.borrow_mut() = Some(built_shell_state);
+        splash.update_phase(StartupPhase::WarmingCanvas);
+
+        let application = application.clone();
+        let shell_state = shell_state.clone();
+        let splash = splash.clone();
+        let startup_started_at = startup_started_at;
+        glib::idle_add_local_once(move || {
+            let warmup_started_at = Instant::now();
+            let mut renderer_warmed = false;
+            if let Some(shell_state) = shell_state.borrow().as_ref() {
+                renderer_warmed = shell_state
+                    .canvas_state
+                    .borrow_mut()
+                    .warm_up_startup(STARTUP_WARMUP_WIDTH, STARTUP_WARMUP_HEIGHT);
+            }
+            let warmup_ms = warmup_started_at.elapsed().as_millis();
+            tracing::info!(
+                warmup_ms,
+                renderer_warmed,
+                "startup canvas warm-up complete"
+            );
+            splash.update_phase(StartupPhase::OpeningWorkspace);
+
+            let application = application.clone();
+            let shell_state = shell_state.clone();
+            let splash = splash.clone();
+            glib::idle_add_local_once(move || {
+                let handoff_started_at = Instant::now();
+                if let Some(shell_state) = shell_state.borrow_mut().take() {
+                    let splash_window = splash.window.clone();
+                    let startup_started_at = startup_started_at;
+                    build_ui(&application, shell_state, Some(Box::new(move |window| {
+                        let splash_window = splash_window.clone();
+                        let handoff_started_at = handoff_started_at;
+                        window.connect_map(move |_| {
+                            let summary = StartupTimingSummary {
+                                shell_init_ms,
+                                warmup_ms,
+                                handoff_ms: handoff_started_at.elapsed().as_millis(),
+                                total_ms: startup_started_at.elapsed().as_millis(),
+                                renderer_warmed,
+                            };
+                            tracing::info!(
+                                handoff_ms = summary.handoff_ms,
+                                startup_total_ms = summary.total_ms,
+                                renderer_warmed = summary.renderer_warmed,
+                                startup_summary = %summary.format_log_line(),
+                                "startup handoff complete"
+                            );
+                            splash_window.close();
+                        });
+                    })));
+                }
+            });
+        });
+    });
+}
+
+fn build_ui(
+    application: &Application,
+    shell_state: Rc<ShellUiState>,
+    before_present: Option<StartupWindowHook>,
+) {
     let header_bar = build_header_bar();
 
     let window = ApplicationWindow::builder()
         .application(application)
         .title(APP_NAME)
-        .default_width(1600)
-        .default_height(900)
+        .default_width(MAIN_WINDOW_DEFAULT_WIDTH)
+        .default_height(MAIN_WINDOW_DEFAULT_HEIGHT)
         .build();
     window.add_css_class("app-window");
     window.set_titlebar(Some(&header_bar));
@@ -352,6 +553,9 @@ fn build_ui(application: &Application, controller: Rc<RefCell<dyn ShellControlle
     shell_state.attach_window(window.clone());
     wire_window_shortcuts(&window, shell_state.clone());
     wire_window_close_request(&window, shell_state.clone());
+    if let Some(before_present) = before_present {
+        before_present(&window);
+    }
     window.present();
     shell_state.focus_canvas();
 
@@ -4894,8 +5098,39 @@ impl CanvasHostState {
             return;
         }
 
+        let _ = self.render_snapshot(&snapshot, logical_width, logical_height);
+    }
+
+    fn warm_up_startup(&mut self, logical_width: u32, logical_height: u32) -> bool {
+        let snapshot = self.controller.borrow().snapshot();
+        self.canvas_size = snapshot.canvas_size;
+        self.canvas_raster = Some(self.controller.borrow().canvas_raster());
+        self.viewport_state = ViewportState::fit_canvas(
+            self.canvas_size,
+            ViewportSize::new(logical_width as f32, logical_height as f32),
+        );
+        self.viewport_fitted = true;
+        self.last_logical_size = (logical_width, logical_height);
+        self.last_canvas_revision = Some(snapshot.canvas_revision);
+        self.last_brush_preview_signature = brush_preview_signature(&snapshot);
+        self.last_active_layer_bounds = snapshot.active_layer_bounds;
+        self.last_selection_rect = snapshot.selection_rect;
+        self.last_selection_path = snapshot.selection_path.clone();
+        self.last_selection_preview_path = snapshot.selection_preview_path.clone();
+        self.last_guides_visible = snapshot.guides_visible;
+        self.last_guides = snapshot.guides.clone();
+        self.last_selection_inverted = snapshot.selection_inverted;
+        self.render_snapshot(&snapshot, logical_width, logical_height)
+    }
+
+    fn render_snapshot(
+        &mut self,
+        snapshot: &ShellSnapshot,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> bool {
         let Some(renderer) = &self.renderer else {
-            return;
+            return false;
         };
 
         let scale_factor = self.picture.scale_factor() as f64;
@@ -4950,7 +5185,7 @@ impl CanvasHostState {
                 fill_rgba: Some([79, 140, 255, 36]),
             });
         }
-        overlay_paths.extend(self.build_active_brush_preview_paths(&snapshot));
+        overlay_paths.extend(self.build_active_brush_preview_paths(snapshot));
         match renderer.render(
             self.canvas_size,
             self.viewport_state,
@@ -4974,9 +5209,11 @@ impl CanvasHostState {
                 );
                 self.picture.set_paintable(Some(&texture));
                 self.dirty = false;
+                true
             }
             Err(error) => {
                 tracing::error!(%error, "failed to render offscreen canvas frame");
+                false
             }
         }
     }
@@ -6030,6 +6267,42 @@ popover.menu-dropdown contents {
     color: #e0e0e0;
 }
 
+.startup-splash {
+    background: linear-gradient(180deg, #111111 0%, #0b0b0b 100%);
+}
+
+.startup-splash-content {
+    min-width: 320px;
+}
+
+.startup-splash-logo {
+    margin-bottom: 4px;
+}
+
+.startup-splash-title {
+    color: #f0f0f0;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+}
+
+.startup-splash-phase {
+    color: #d8d8d8;
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 10px;
+}
+
+.startup-splash-detail {
+    color: #969696;
+    font-size: 11px;
+}
+
+.startup-splash-spinner {
+    color: #cdb678;
+    margin-top: 6px;
+}
+
 .status-bar {
     min-height: 22px;
     padding: 0 12px;
@@ -6087,8 +6360,8 @@ mod tests {
     use super::{
         LayerPanelItem, PendingDocumentAction, ShellGuide, ShellImportDiagnostic,
         ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
-        brush_preview_radius, build_brush_preview_paths, format_import_report_details,
-        shell_status_hint, status_notice_class,
+        StartupPhase, StartupTimingSummary, brush_preview_radius, build_brush_preview_paths,
+        format_import_report_details, shell_status_hint, status_notice_class,
     };
     use common::CanvasSize;
     use std::path::PathBuf;
@@ -6256,5 +6529,44 @@ mod tests {
 
         snapshot.file_job_active = true;
         assert_eq!(status_notice_class(&snapshot), "status-notice-busy");
+    }
+
+    #[test]
+    fn startup_phase_copy_is_non_empty_and_distinct() {
+        let phases = [
+            StartupPhase::Launching,
+            StartupPhase::LoadingShell,
+            StartupPhase::WarmingCanvas,
+            StartupPhase::OpeningWorkspace,
+        ];
+
+        for phase in phases {
+            assert!(!phase.title().is_empty());
+            assert!(!phase.detail().is_empty());
+        }
+
+        assert_ne!(StartupPhase::Launching.title(), StartupPhase::LoadingShell.title());
+        assert_ne!(
+            StartupPhase::WarmingCanvas.detail(),
+            StartupPhase::OpeningWorkspace.detail()
+        );
+    }
+
+    #[test]
+    fn startup_timing_summary_formats_machine_readable_line() {
+        let summary = StartupTimingSummary {
+            shell_init_ms: 12,
+            warmup_ms: 34,
+            handoff_ms: 5,
+            total_ms: 51,
+            renderer_warmed: true,
+        };
+
+        let line = summary.format_log_line();
+        assert!(line.contains("shell_init=12ms"));
+        assert!(line.contains("warmup=34ms"));
+        assert!(line.contains("handoff=5ms"));
+        assert!(line.contains("total=51ms"));
+        assert!(line.contains("renderer_warmed=true"));
     }
 }
