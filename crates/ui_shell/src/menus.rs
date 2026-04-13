@@ -702,12 +702,11 @@ fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiSta
         build_icon_label_shortcut_button("folder-open-line.svg", "Open Project...", Some("Ctrl+O"));
     open_project.add_css_class("menu-dropdown-item");
     {
-        let parent = window.clone();
         let shell_state = shell_state.clone();
         let popover = popover.clone();
         open_project.connect_clicked(move |_| {
             popover.popdown();
-            file_workflow::choose_open_project(&parent, shell_state.clone());
+            shell_state.request_open_project();
         });
     }
     menu.append(&open_project);
@@ -715,12 +714,11 @@ fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiSta
     let import_image = build_icon_label_button("image-add-line.svg", "Import Image Or PSD...");
     import_image.add_css_class("menu-dropdown-item");
     {
-        let parent = window.clone();
         let shell_state = shell_state.clone();
         let popover = popover.clone();
         import_image.connect_clicked(move |_| {
             popover.popdown();
-            file_workflow::choose_import_image(&parent, shell_state.clone());
+            shell_state.request_import_image();
         });
     }
     menu.append(&import_image);

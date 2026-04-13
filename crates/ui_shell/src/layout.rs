@@ -55,7 +55,7 @@ pub(super) fn build_ui(
 fn build_header_bar() -> HeaderBar {
     match load_titlebar_template() {
         Ok(template) => {
-            template.app_name_label.set_label(APP_NAME);
+            template.app_name_label.set_visible(false);
             template
                 .workspace_button
                 .set_tooltip_text(Some("Current workspace preset"));
@@ -86,16 +86,15 @@ fn build_header_bar_fallback() -> HeaderBar {
     let header = HeaderBar::new();
     header.add_css_class("titlebar");
     header.set_show_title_buttons(true);
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header.set_title_widget(Some(&spacer));
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);
     title_row.add_css_class("app-brand");
     let title_icon = build_logo_icon(APP_NAME, 16);
     title_icon.add_css_class("titlebar-icon");
     title_row.append(&title_icon);
-
-    let title = Label::new(Some(APP_NAME));
-    title.add_css_class("titlebar-app-name");
-    title_row.append(&title);
     header.pack_start(&title_row);
 
     let actions = GtkBox::new(Orientation::Horizontal, 6);

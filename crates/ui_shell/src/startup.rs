@@ -80,7 +80,7 @@ impl StartupSplash {
         content.set_margin_start(28);
         content.set_margin_end(28);
 
-        let logo = build_logo_icon(APP_NAME, 112);
+        let logo = build_logo_icon(APP_NAME, 256);
         logo.add_css_class("startup-splash-logo");
         content.append(&logo);
 

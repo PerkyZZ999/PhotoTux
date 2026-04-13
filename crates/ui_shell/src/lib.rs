@@ -375,6 +375,8 @@ fn build_color_chip(label_text: &str, css_class: &str) -> Button {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingDocumentAction {
+    ChooseOpenProject,
+    ChooseImportImage,
     OpenProject(PathBuf),
     ImportImage(PathBuf),
 }
@@ -382,15 +384,19 @@ enum PendingDocumentAction {
 impl PendingDocumentAction {
     const fn prompt_title(&self) -> &'static str {
         match self {
-            Self::OpenProject(_) => "Save changes before opening another project?",
-            Self::ImportImage(_) => "Save changes before importing?",
+            Self::ChooseOpenProject | Self::OpenProject(_) => {
+                "Save changes before opening another project?"
+            }
+            Self::ChooseImportImage | Self::ImportImage(_) => "Save changes before importing?",
         }
     }
 
     const fn prompt_action_phrase(&self) -> &'static str {
         match self {
-            Self::OpenProject(_) => "open another project",
-            Self::ImportImage(_) => "import a file that replaces the current document",
+            Self::ChooseOpenProject | Self::OpenProject(_) => "open another project",
+            Self::ChooseImportImage | Self::ImportImage(_) => {
+                "import a file that replaces the current document"
+            }
         }
     }
 
@@ -400,13 +406,6 @@ impl PendingDocumentAction {
             document_title,
             self.prompt_action_phrase()
         )
-    }
-
-    fn perform(&self, controller: &mut dyn ShellController) {
-        match self {
-            Self::OpenProject(path) => controller.open_document(path.clone()),
-            Self::ImportImage(path) => controller.import_image(path.clone()),
-        }
     }
 }
 
@@ -665,10 +664,8 @@ impl ShellUiState {
                     return true;
                 }
                 Some('o') => {
-                    if let Some(window) = self.window.borrow().as_ref() {
-                        file_workflow::choose_open_project(window, self.clone());
-                        return true;
-                    }
+                    self.request_open_project();
+                    return true;
                 }
                 Some('s') => {
                     self.request_project_save();
@@ -1259,8 +1256,43 @@ impl ShellUiState {
         self.present_document_replacement_prompt(&snapshot, action);
     }
 
-    fn perform_document_replacement(&self, action: PendingDocumentAction) {
-        action.perform(&mut *self.controller.borrow_mut());
+    fn request_open_project(self: &Rc<Self>) {
+        let snapshot = self.controller.borrow().snapshot();
+        if snapshot.dirty {
+            self.present_document_replacement_prompt(&snapshot, PendingDocumentAction::ChooseOpenProject);
+        } else if let Some(window) = self.window.borrow().as_ref() {
+            file_workflow::choose_open_project(window, self.clone());
+        }
+    }
+
+    fn request_import_image(self: &Rc<Self>) {
+        let snapshot = self.controller.borrow().snapshot();
+        if snapshot.dirty {
+            self.present_document_replacement_prompt(&snapshot, PendingDocumentAction::ChooseImportImage);
+        } else if let Some(window) = self.window.borrow().as_ref() {
+            file_workflow::choose_import_image(window, self.clone());
+        }
+    }
+
+    fn perform_document_replacement(self: &Rc<Self>, action: PendingDocumentAction) {
+        match action {
+            PendingDocumentAction::ChooseOpenProject => {
+                if let Some(window) = self.window.borrow().as_ref() {
+                    file_workflow::choose_open_project(window, self.clone());
+                }
+            }
+            PendingDocumentAction::ChooseImportImage => {
+                if let Some(window) = self.window.borrow().as_ref() {
+                    file_workflow::choose_import_image(window, self.clone());
+                }
+            }
+            PendingDocumentAction::OpenProject(path) => {
+                self.controller.borrow_mut().open_document(path);
+            }
+            PendingDocumentAction::ImportImage(path) => {
+                self.controller.borrow_mut().import_image(path);
+            }
+        }
     }
 
     fn request_project_save(&self) {
