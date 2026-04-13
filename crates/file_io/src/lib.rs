@@ -1050,18 +1050,23 @@ where
 }
 
 pub fn import_png_from_path(path: &Path) -> anyhow::Result<Document> {
-    import_raster_document_from_path(path)
-        .with_context(|| format!("failed to import PNG from {}", path.display()))
+    import_raster_document_from_path_with_context(path, "PNG")
 }
 
 pub fn import_jpeg_from_path(path: &Path) -> anyhow::Result<Document> {
-    import_raster_document_from_path(path)
-        .with_context(|| format!("failed to import JPEG from {}", path.display()))
+    import_raster_document_from_path_with_context(path, "JPEG")
 }
 
 pub fn import_webp_from_path(path: &Path) -> anyhow::Result<Document> {
+    import_raster_document_from_path_with_context(path, "WebP")
+}
+
+fn import_raster_document_from_path_with_context(
+    path: &Path,
+    format_name: &str,
+) -> anyhow::Result<Document> {
     import_raster_document_from_path(path)
-        .with_context(|| format!("failed to import WebP from {}", path.display()))
+        .with_context(|| format!("failed to import {format_name} from {}", path.display()))
 }
 
 fn import_raster_document_from_path(path: &Path) -> anyhow::Result<Document> {
