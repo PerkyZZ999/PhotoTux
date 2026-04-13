@@ -69,11 +69,11 @@ impl<T> HistoryStack<T> {
     }
 
     pub fn current_undo(&self) -> Option<&T> {
-        self.undo_entries.last()
+        Self::current_entry(&self.undo_entries)
     }
 
     pub fn current_redo(&self) -> Option<&T> {
-        self.redo_entries.last()
+        Self::current_entry(&self.redo_entries)
     }
 
     pub fn undo_entries(&self) -> &[T] {
@@ -88,6 +88,10 @@ impl<T> HistoryStack<T> {
         let entry = source.pop()?;
         destination.push(entry);
         destination.last()
+    }
+
+    fn current_entry(stack: &[T]) -> Option<&T> {
+        stack.last()
     }
 }
 
