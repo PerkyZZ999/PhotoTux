@@ -102,6 +102,15 @@ enum BrushPreset {
 
 impl BrushPreset {
     const ALL: [Self; 3] = [Self::BalancedRound, Self::SoftShade, Self::InkTaper];
+    const COUNT: usize = Self::ALL.len();
+
+    const fn index(self) -> usize {
+        match self {
+            Self::BalancedRound => 0,
+            Self::SoftShade => 1,
+            Self::InkTaper => 2,
+        }
+    }
 
     const fn label(self) -> &'static str {
         match self {
@@ -120,19 +129,11 @@ impl BrushPreset {
     }
 
     fn next(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|preset| *preset == self)
-            .unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+        Self::ALL[(self.index() + 1) % Self::COUNT]
     }
 
     fn previous(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|preset| *preset == self)
-            .unwrap_or(0);
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+        Self::ALL[(self.index() + Self::COUNT - 1) % Self::COUNT]
     }
 }
 
