@@ -2719,14 +2719,22 @@ popover.menu-dropdown contents {
     padding: 2px;
 }
 
-.panel-scroller scrollbar slider {
-    min-width: 6px;
+.panel-scroller scrollbar.vertical slider {
+    min-width: 8px;
     min-height: 28px;
     border-radius: 999px;
     background: rgba(255,255,255,0.14);
 }
 
-.panel-scroller scrollbar slider:hover {
+.panel-scroller scrollbar.horizontal slider {
+    min-width: 28px;
+    min-height: 8px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.14);
+}
+
+.panel-scroller scrollbar.vertical slider:hover,
+.panel-scroller scrollbar.horizontal slider:hover {
     background: rgba(255,255,255,0.24);
 }
 

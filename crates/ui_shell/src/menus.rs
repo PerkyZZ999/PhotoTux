@@ -625,7 +625,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         });
 
     let swatches_toggle =
-        append_icon_menu_item(&menu, &popover, "grid-fill.svg", "Show Swatches Tab", {
+        append_icon_menu_item(&menu, &popover, "palette-line.svg", "Show Swatches Tab", {
             let shell_state = shell_state.clone();
             move || shell_state.set_top_dock_tab(RightSidebarTopTab::Swatches)
         });
@@ -655,7 +655,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let paths_toggle = append_icon_menu_item(
         &menu,
         &popover,
-        "vector-polygon-line.svg",
+        "focus-3-line.svg",
         "Show Paths Tab",
         {
             let shell_state = shell_state.clone();
