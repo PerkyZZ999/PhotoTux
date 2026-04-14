@@ -1728,10 +1728,16 @@ const THEME_CSS: &str = r#"
 .remix-icon {
     min-width: 12px;
     min-height: 12px;
-    color: #dfe5ee;
     -gtk-icon-style: symbolic;
-    -gtk-icon-palette: error #dfe5ee, warning #dfe5ee, success #dfe5ee;
     -gtk-icon-shadow: none;
+}
+
+.titlebar-icon {
+    color: #dfe5ee;
+}
+
+.remix-icon {
+    color: currentColor;
 }
 
 .chrome-button,
@@ -1746,9 +1752,6 @@ const THEME_CSS: &str = r#"
     border-radius: 3px;
     border: none;
     padding: 2px 6px;
-    -gtk-icon-style: symbolic;
-    -gtk-icon-palette: error currentColor, warning currentColor, success currentColor;
-    -gtk-icon-shadow: none;
     transition: all 100ms ease-in-out;
 }
 
@@ -1783,7 +1786,6 @@ menubutton.menu-button > button.toggle image,
 .swatch-stack-action image {
     color: currentColor;
     -gtk-icon-style: symbolic;
-    -gtk-icon-palette: error currentColor, warning currentColor, success currentColor;
     -gtk-icon-shadow: none;
 }
 

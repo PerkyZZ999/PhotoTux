@@ -1,7 +1,11 @@
 use super::*;
 
 pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
-    format!("{UI_RESOURCE_PREFIX}/assets/icons/remixicon/{icon_name}")
+    let symbolic_icon_name = icon_name
+        .strip_suffix(".svg")
+        .map(|name| format!("{name}-symbolic.svg"))
+        .unwrap_or_else(|| icon_name.to_string());
+    format!("{UI_RESOURCE_PREFIX}/assets/icons/remixicon/{symbolic_icon_name}")
 }
 
 pub(super) fn logo_icon_resource_path(dark_background: bool) -> &'static str {
