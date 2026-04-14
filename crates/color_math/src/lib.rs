@@ -1,16 +1,23 @@
+const SRGB_THRESHOLD: f32 = 0.04045;
+const LINEAR_THRESHOLD: f32 = 0.003_130_8;
+const SRGB_SCALE: f32 = 12.92;
+const SRGB_OFFSET: f32 = 0.055;
+const SRGB_FACTOR: f32 = 1.055;
+const SRGB_GAMMA: f32 = 2.4;
+
 pub fn srgb_to_linear(value: f32) -> f32 {
-    if value <= 0.04045 {
-        value / 12.92
+    if value <= SRGB_THRESHOLD {
+        value / SRGB_SCALE
     } else {
-        ((value + 0.055) / 1.055).powf(2.4)
+        ((value + SRGB_OFFSET) / SRGB_FACTOR).powf(SRGB_GAMMA)
     }
 }
 
 pub fn linear_to_srgb(value: f32) -> f32 {
-    if value <= 0.003_130_8 {
-        value * 12.92
+    if value <= LINEAR_THRESHOLD {
+        value * SRGB_SCALE
     } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
+        SRGB_FACTOR * value.powf(1.0 / SRGB_GAMMA) - SRGB_OFFSET
     }
 }
 
