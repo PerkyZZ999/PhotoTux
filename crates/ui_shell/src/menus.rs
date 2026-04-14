@@ -603,8 +603,8 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 
     let color_toggle =
         append_icon_menu_item(&menu, &popover, "palette-line.svg", "Toggle Color Panel", {
-            let panel = shell_state.color_group.clone();
-            move || panel.set_visible(!panel.is_visible())
+            let shell_state = shell_state.clone();
+            move || shell_state.toggle_context_panel(ContextDockPanel::Color)
         });
 
     let properties_toggle = append_icon_menu_item(
@@ -613,30 +613,53 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         "settings-4-line.svg",
         "Toggle Properties Panel",
         {
-            let panel = shell_state.properties_group.clone();
-            move || panel.set_visible(!panel.is_visible())
+            let shell_state = shell_state.clone();
+            move || shell_state.toggle_context_panel(ContextDockPanel::Properties)
         },
     );
+
+    let history_toggle =
+        append_icon_menu_item(&menu, &popover, "history-line.svg", "Show History Tab", {
+            let shell_state = shell_state.clone();
+            move || shell_state.set_top_dock_tab(RightSidebarTopTab::History)
+        });
+
+    let swatches_toggle =
+        append_icon_menu_item(&menu, &popover, "grid-fill.svg", "Show Swatches Tab", {
+            let shell_state = shell_state.clone();
+            move || shell_state.set_top_dock_tab(RightSidebarTopTab::Swatches)
+        });
 
     let layers_toggle = append_icon_menu_item(
         &menu,
         &popover,
         "layout-column-line.svg",
-        "Toggle Layers Panel",
+        "Show Layers Tab",
         {
-            let panel = shell_state.layers_group.clone();
-            move || panel.set_visible(!panel.is_visible())
+            let shell_state = shell_state.clone();
+            move || shell_state.set_bottom_dock_tab(RightSidebarBottomTab::Layers)
         },
     );
 
-    let history_toggle = append_icon_menu_item(
+    let channels_toggle = append_icon_menu_item(
         &menu,
         &popover,
-        "history-line.svg",
-        "Toggle History Panel",
+        "layout-column-line.svg",
+        "Show Channels Tab",
         {
-            let panel = shell_state.history_group.clone();
-            move || panel.set_visible(!panel.is_visible())
+            let shell_state = shell_state.clone();
+            move || shell_state.set_bottom_dock_tab(RightSidebarBottomTab::Channels)
+        },
+    );
+
+    let paths_toggle = append_icon_menu_item(
+        &menu,
+        &popover,
+        "vector-polygon-line.svg",
+        "Show Paths Tab",
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.set_bottom_dock_tab(RightSidebarBottomTab::Paths)
         },
     );
 
@@ -644,40 +667,33 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         &menu,
         &popover,
         "layout-column-line.svg",
-        "Show All Panels",
+        "Restore Default Sidebar",
         {
-            let color_group = shell_state.color_group.clone();
-            let properties_group = shell_state.properties_group.clone();
-            let layers_group = shell_state.layers_group.clone();
-            let history_group = shell_state.history_group.clone();
-            move || {
-                color_group.set_visible(true);
-                properties_group.set_visible(true);
-                layers_group.set_visible(true);
-                history_group.set_visible(true);
-            }
+            let shell_state = shell_state.clone();
+            move || shell_state.restore_right_sidebar_defaults()
         },
     );
 
     {
-        let color_group = shell_state.color_group.clone();
-        let properties_group = shell_state.properties_group.clone();
-        let layers_group = shell_state.layers_group.clone();
-        let history_group = shell_state.history_group.clone();
+        let shell_state = shell_state.clone();
         let color_toggle = color_toggle.clone();
         let properties_toggle = properties_toggle.clone();
+        let swatches_toggle = swatches_toggle.clone();
         let layers_toggle = layers_toggle.clone();
+        let channels_toggle = channels_toggle.clone();
+        let paths_toggle = paths_toggle.clone();
         let history_toggle = history_toggle.clone();
         let show_all = show_all.clone();
         popover.connect_show(move |_| {
-            let color_visible = color_group.is_visible();
-            let properties_visible = properties_group.is_visible();
-            let layers_visible = layers_group.is_visible();
-            let history_visible = history_group.is_visible();
+            let color_open = shell_state.active_context_panel() == Some(ContextDockPanel::Color);
+            let properties_open =
+                shell_state.active_context_panel() == Some(ContextDockPanel::Properties);
+            let top_tab = shell_state.active_top_dock_tab();
+            let bottom_tab = shell_state.active_bottom_dock_tab();
 
             set_menu_button_label(
                 &color_toggle,
-                if color_visible {
+                if color_open {
                     "Hide Color Panel"
                 } else {
                     "Show Color Panel"
@@ -685,30 +701,56 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             );
             set_menu_button_label(
                 &properties_toggle,
-                if properties_visible {
+                if properties_open {
                     "Hide Properties Panel"
                 } else {
                     "Show Properties Panel"
                 },
             );
             set_menu_button_label(
-                &layers_toggle,
-                if layers_visible {
-                    "Hide Layers Panel"
+                &history_toggle,
+                if top_tab == RightSidebarTopTab::History {
+                    "History Tab Active"
                 } else {
-                    "Show Layers Panel"
+                    "Show History Tab"
                 },
             );
             set_menu_button_label(
-                &history_toggle,
-                if history_visible {
-                    "Hide History Panel"
+                &swatches_toggle,
+                if top_tab == RightSidebarTopTab::Swatches {
+                    "Swatches Tab Active"
                 } else {
-                    "Show History Panel"
+                    "Show Swatches Tab"
+                },
+            );
+            set_menu_button_label(
+                &layers_toggle,
+                if bottom_tab == RightSidebarBottomTab::Layers {
+                    "Layers Tab Active"
+                } else {
+                    "Show Layers Tab"
+                },
+            );
+            set_menu_button_label(
+                &channels_toggle,
+                if bottom_tab == RightSidebarBottomTab::Channels {
+                    "Channels Tab Active"
+                } else {
+                    "Show Channels Tab"
+                },
+            );
+            set_menu_button_label(
+                &paths_toggle,
+                if bottom_tab == RightSidebarBottomTab::Paths {
+                    "Paths Tab Active"
+                } else {
+                    "Show Paths Tab"
                 },
             );
             show_all.set_sensitive(
-                !(color_visible && properties_visible && layers_visible && history_visible),
+                top_tab != RightSidebarTopTab::History
+                    || bottom_tab != RightSidebarBottomTab::Layers
+                    || shell_state.active_context_panel() != Some(ContextDockPanel::Color),
             );
         });
     }

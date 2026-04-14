@@ -111,7 +111,7 @@ fn build_header_bar_fallback() -> HeaderBar {
     header
 }
 
-fn build_workspace_body(shell_state: &ShellUiState) -> GtkBox {
+fn build_workspace_body(shell_state: &Rc<ShellUiState>) -> GtkBox {
     let outer = GtkBox::new(Orientation::Horizontal, 0);
     outer.add_css_class("workspace-body");
     outer.append(&shell_state.tool_rail);

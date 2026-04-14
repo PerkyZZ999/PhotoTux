@@ -8,6 +8,21 @@ type ControllerAction = fn(&mut dyn ShellController);
 type IconChipAction = (&'static str, &'static str, ControllerAction);
 type LabelChipAction = (&'static str, ControllerAction);
 
+#[derive(Clone, Copy)]
+enum ChannelAction {
+    EditPixels,
+    EditMask,
+    AddMask,
+    ToggleMask,
+}
+
+#[derive(Clone, Copy)]
+enum PathAction {
+    ClearSelection,
+    InvertSelection,
+    BeginTransform,
+}
+
 impl ShellUiState {
     pub(super) fn refresh_tool_buttons(&self, snapshot: &ShellSnapshot) {
         for (tool, button) in &self.tool_buttons {
@@ -78,79 +93,194 @@ impl ShellUiState {
         }
         self.color_body.append(&buttons);
 
-        let swatch_header = GtkBox::new(Orientation::Horizontal, 4);
-        swatch_header.add_css_class("color-swatches-header");
-        let swatch_title = Label::new(Some("Swatches"));
-        swatch_title.set_xalign(0.0);
-        swatch_title.add_css_class("color-swatches-title");
-        swatch_header.append(&swatch_title);
+        let hint = Label::new(Some(
+            "Use the Swatches tab in the top dock to store and manage color presets.",
+        ));
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+        hint.add_css_class("color-empty-state");
+        self.color_body.append(&hint);
+    }
 
-        let swatch_menu = Label::new(Some("☰"));
-        swatch_menu.add_css_class("panel-inline-menu");
-        swatch_menu.set_hexpand(true);
-        swatch_menu.set_halign(Align::End);
-        swatch_menu.set_size_request(18, 18);
-        swatch_menu.set_accessible_role(gtk4::AccessibleRole::Presentation);
-        swatch_header.append(&swatch_menu);
-        self.color_body.append(&swatch_header);
+    pub(super) fn refresh_brush_panel(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        clear_box_children(&self.brush_body);
+        self.brush_body.add_css_class("color-panel-body");
 
-        let swatch_actions = GtkBox::new(Orientation::Horizontal, 6);
-        swatch_actions.add_css_class("color-panel-actions");
+        let title = Label::new(Some("Brush Controls"));
+        title.set_xalign(0.0);
+        title.add_css_class("color-swatches-title");
+        self.brush_body.append(&title);
 
-        let add_swatch = build_color_action_button(
-            "Add Swatch",
-            "Add the current foreground color to the swatches grid",
+        let preset_row = GtkBox::new(Orientation::Horizontal, 6);
+        preset_row.add_css_class("layers-toolbar");
+        let previous = build_icon_only_button(
+            "arrow-go-back-line.svg",
+            "Previous brush preset",
+            "chrome-button",
+            10,
         );
         {
             let controller = self.controller.clone();
-            add_swatch.connect_clicked(move |_| controller.borrow_mut().add_color_swatch());
+            previous.connect_clicked(move |_| controller.borrow_mut().previous_brush_preset());
         }
-        swatch_actions.append(&add_swatch);
+        preset_row.append(&previous);
 
-        let delete_swatch =
-            build_color_action_button("Delete Swatch", "Delete the currently selected swatch");
-        delete_swatch.set_sensitive(snapshot.selected_color_swatch.is_some());
+        let preset_chip = GtkBox::new(Orientation::Horizontal, 0);
+        preset_chip.add_css_class("layer-value-box");
+        let preset_label = Label::new(Some(&snapshot.brush_preset_name));
+        preset_label.add_css_class("layer-value-label");
+        preset_chip.append(&preset_label);
+        preset_row.append(&preset_chip);
+
+        let next = build_icon_only_button(
+            "arrow-go-forward-line.svg",
+            "Next brush preset",
+            "chrome-button",
+            10,
+        );
         {
             let controller = self.controller.clone();
-            delete_swatch.connect_clicked(move |_| {
-                controller.borrow_mut().remove_selected_color_swatch();
-            });
+            next.connect_clicked(move |_| controller.borrow_mut().next_brush_preset());
         }
-        swatch_actions.append(&delete_swatch);
-        self.color_body.append(&swatch_actions);
+        preset_row.append(&next);
+        self.brush_body.append(&preset_row);
 
-        if snapshot.color_swatches.is_empty() {
-            let empty = Label::new(Some("No swatches yet. Pick a color, then add one."));
-            empty.set_xalign(0.0);
-            empty.set_wrap(true);
-            empty.add_css_class("color-empty-state");
-            self.color_body.append(&empty);
+        self.brush_body.append(&self.build_brush_adjust_row(
+            "Radius",
+            &format!("{} px", snapshot.brush_radius),
+            (
+                "subtract-line.svg",
+                "Decrease brush radius",
+                |controller| controller.decrease_brush_radius(),
+            ),
+            (
+                "add-line.svg",
+                "Increase brush radius",
+                |controller| controller.increase_brush_radius(),
+            ),
+        ));
+        self.brush_body.append(&self.build_brush_adjust_row(
+            "Hardness",
+            &format!("{}%", snapshot.brush_hardness_percent),
+            (
+                "subtract-line.svg",
+                "Decrease brush hardness",
+                |controller| controller.decrease_brush_hardness(),
+            ),
+            (
+                "add-line.svg",
+                "Increase brush hardness",
+                |controller| controller.increase_brush_hardness(),
+            ),
+        ));
+        self.brush_body.append(&self.build_brush_adjust_row(
+            "Spacing",
+            &snapshot.brush_spacing.to_string(),
+            (
+                "subtract-line.svg",
+                "Decrease brush spacing",
+                |controller| controller.decrease_brush_spacing(),
+            ),
+            (
+                "add-line.svg",
+                "Increase brush spacing",
+                |controller| controller.increase_brush_spacing(),
+            ),
+        ));
+        self.brush_body.append(&self.build_brush_adjust_row(
+            "Flow",
+            &format!("{}%", snapshot.brush_flow_percent),
+            (
+                "subtract-line.svg",
+                "Decrease brush flow",
+                |controller| controller.decrease_brush_flow(),
+            ),
+            (
+                "add-line.svg",
+                "Increase brush flow",
+                |controller| controller.increase_brush_flow(),
+            ),
+        ));
+
+        let toggles = GtkBox::new(Orientation::Vertical, 4);
+        toggles.add_css_class("panel-scroller-content");
+        toggles.append(&self.build_simple_toggle_row(
+            "Pressure Size",
+            snapshot.pressure_size_enabled,
+            "Toggle pen pressure size control",
+            |controller| controller.toggle_pressure_size_enabled(),
+        ));
+        toggles.append(&self.build_simple_toggle_row(
+            "Pressure Opacity",
+            snapshot.pressure_opacity_enabled,
+            "Toggle pen pressure opacity control",
+            |controller| controller.toggle_pressure_opacity_enabled(),
+        ));
+        self.brush_body.append(&toggles);
+    }
+
+    pub(super) fn refresh_text_panel(self: &Rc<Self>, snapshot: &ShellSnapshot) {
+        clear_box_children(&self.text_body);
+        self.text_body.add_css_class("color-panel-body");
+
+        let header = Label::new(Some("Text Controls"));
+        header.set_xalign(0.0);
+        header.add_css_class("color-swatches-title");
+        self.text_body.append(&header);
+
+        if !snapshot.text.selected && !snapshot.text.editing {
+            let hint = Label::new(Some(
+                "Select a text layer to inspect or edit typography settings from this dock.",
+            ));
+            hint.set_xalign(0.0);
+            hint.set_wrap(true);
+            hint.add_css_class("color-empty-state");
+            self.text_body.append(&hint);
+
+            let activate =
+                build_color_action_button("Activate Text Tool", "Switch to the text tool");
+            {
+                let controller = self.controller.clone();
+                activate.connect_clicked(move |_| {
+                    controller.borrow_mut().select_tool(ShellToolKind::Text)
+                });
+            }
+            self.text_body.append(&activate);
             return;
         }
 
-        let swatch_grid = gtk4::Grid::new();
-        swatch_grid.set_column_spacing(2);
-        swatch_grid.set_row_spacing(2);
-        swatch_grid.add_css_class("color-swatches-grid");
-        for (index, color) in snapshot.color_swatches.iter().copied().enumerate() {
-            let swatch = Button::new();
-            swatch.set_has_frame(false);
-            swatch.add_css_class("panel-swatch-button");
-            if snapshot.selected_color_swatch == Some(index) {
-                swatch.add_css_class("panel-swatch-button-active");
-            }
-            swatch.set_tooltip_text(Some(&format!(
-                "Select swatch #{:02X}{:02X}{:02X}",
-                color[0], color[1], color[2]
-            )));
-            swatch.set_child(Some(&build_color_patch(color, 14)));
-            {
-                let controller = self.controller.clone();
-                swatch.connect_clicked(move |_| controller.borrow_mut().select_color_swatch(index));
-            }
-            swatch_grid.attach(&swatch, (index % 12) as i32, (index / 12) as i32, 1, 1);
+        for row_text in [
+            format!("Layer: {}", snapshot.text.layer_name),
+            format!("Font: {}", snapshot.text.font_family),
+            format!("Size: {} px", snapshot.text.font_size_px),
+            format!("Leading: {}%", snapshot.text.line_height_percent),
+            format!("Tracking: {}", snapshot.text.letter_spacing),
+            format!(
+                "Alignment: {}",
+                shell_text_alignment_label(snapshot.text.alignment)
+            ),
+            format!("Fill: {}", rgba_hex(snapshot.text.fill_rgba)),
+        ] {
+            let row = Label::new(Some(&row_text));
+            row.set_xalign(0.0);
+            row.add_css_class("panel-row");
+            self.text_body.append(&row);
         }
-        self.color_body.append(&swatch_grid);
+
+        let edit = build_color_action_button(
+            if snapshot.text.editing {
+                "Editing Text"
+            } else {
+                "Edit Text Layer"
+            },
+            "Open the text editing workflow",
+        );
+        edit.set_sensitive(snapshot.text.selected && !snapshot.text.editing);
+        {
+            let controller = self.controller.clone();
+            edit.connect_clicked(move |_| controller.borrow_mut().begin_text_edit());
+        }
+        self.text_body.append(&edit);
     }
 
     pub(super) fn refresh_properties_panel(&self, snapshot: &ShellSnapshot) {
@@ -713,25 +843,35 @@ impl ShellUiState {
 
     pub(super) fn refresh_layers_panel(self: &Rc<Self>, snapshot: &ShellSnapshot) {
         clear_box_children(&self.layers_body);
-        self.layers_body.append(&self.build_layers_filter_row());
-        self.layers_body
-            .append(&self.build_layers_controls_row(snapshot));
-        self.layers_body.append(&build_layers_info_row(snapshot));
+        match self.active_bottom_dock_tab.get() {
+            RightSidebarBottomTab::Layers => {
+                let content = GtkBox::new(Orientation::Vertical, 0);
+                content.add_css_class("panel-scroller-content");
+                content.append(&self.build_layers_filter_row());
+                content.append(&self.build_layers_controls_row(snapshot));
+                content.append(&build_layers_info_row(snapshot));
 
-        let filter_text = self.layers_filter_text.borrow().trim().to_ascii_lowercase();
-        let list = self.build_layers_list(snapshot, &filter_text);
-        let actions = self.build_layers_actions_row(snapshot);
-
-        if list.first_child().is_none() {
-            let empty = Label::new(Some("No layers match the current filter."));
-            empty.set_xalign(0.0);
-            empty.add_css_class("panel-row");
-            empty.add_css_class("panel-hint-row");
-            list.append(&empty);
+                let filter_text = self.layers_filter_text.borrow().trim().to_ascii_lowercase();
+                let list = self.build_layers_list(snapshot, &filter_text);
+                if list.first_child().is_none() {
+                    let empty = Label::new(Some("No layers match the current filter."));
+                    empty.set_xalign(0.0);
+                    empty.add_css_class("panel-row");
+                    empty.add_css_class("panel-hint-row");
+                    list.append(&empty);
+                }
+                content.append(&list);
+                self.layers_body.append(&build_panel_scroller(&content));
+                self.layers_body
+                    .append(&self.build_layers_footer_actions(snapshot));
+            }
+            RightSidebarBottomTab::Channels => {
+                self.layers_body.append(&self.build_channels_tab(snapshot))
+            }
+            RightSidebarBottomTab::Paths => {
+                self.layers_body.append(&self.build_paths_tab(snapshot))
+            }
         }
-
-        self.layers_body.append(&list);
-        self.layers_body.append(&actions);
     }
 
     fn build_layers_filter_row(self: &Rc<Self>) -> GtkBox {
@@ -1062,25 +1202,182 @@ impl ShellUiState {
         ));
     }
 
-    fn build_layers_actions_row(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
-        let actions = GtkBox::new(Orientation::Horizontal, 4);
-        actions.add_css_class("layers-bottom");
+    fn build_layers_footer_actions(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
+        let footer = GtkBox::new(Orientation::Horizontal, 4);
+        footer.add_css_class("dock-footer");
 
-        for (icon_name, label, action) in build_layer_action_specs(snapshot) {
-            let button = build_tool_chip_icon_button(icon_name, &label);
-            button.add_css_class("layer-action-chip");
+        for (icon_name, tooltip, action) in [
+            ("add-line.svg", "Add Layer", LayerAction::Add),
+            ("group-line.svg", "Create Group", LayerAction::AddGroup),
+            (
+                "file-copy-line.svg",
+                "Duplicate Active Layer",
+                LayerAction::Duplicate,
+            ),
+            ("add-line.svg", "Add Layer Mask", LayerAction::AddMask),
+            (
+                "delete-bin-line.svg",
+                "Delete Active Layer",
+                LayerAction::Delete,
+            ),
+        ] {
+            let button = build_icon_only_button(icon_name, tooltip, "dock-footer-button", 14);
             button.set_sensitive(layer_action_sensitive(action, snapshot));
-
             let controller = self.controller.clone();
             button.connect_clicked(move |_| run_layer_action(&controller, action));
-            actions.append(&button);
+            footer.append(&button);
         }
 
-        actions
+        footer
+    }
+
+    fn build_channels_tab(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
+        let host = GtkBox::new(Orientation::Vertical, 0);
+        let content = GtkBox::new(Orientation::Vertical, 4);
+        content.add_css_class("panel-scroller-content");
+        content.append(&build_channel_row(
+            "Composite RGB",
+            true,
+            snapshot.active_edit_target_name == "Layer Pixels",
+        ));
+        content.append(&build_channel_row("Red", true, false));
+        content.append(&build_channel_row("Green", true, false));
+        content.append(&build_channel_row("Blue", true, false));
+        content.append(&build_channel_row(
+            "Layer Mask",
+            snapshot.active_layer_has_mask,
+            snapshot.active_edit_target_name == "Layer Mask",
+        ));
+        host.append(&build_panel_scroller(&content));
+
+        let footer = GtkBox::new(Orientation::Horizontal, 4);
+        footer.add_css_class("dock-footer");
+        for (icon_name, tooltip, sensitive, action) in [
+            (
+                "edit-line.svg",
+                "Edit layer pixels",
+                !snapshot.text.selected,
+                ChannelAction::EditPixels,
+            ),
+            (
+                "layout-column-line.svg",
+                "Edit layer mask",
+                snapshot.active_layer_has_mask && !snapshot.text.selected,
+                ChannelAction::EditMask,
+            ),
+            (
+                "add-line.svg",
+                "Add layer mask",
+                !snapshot.active_layer_has_mask && !snapshot.text.selected,
+                ChannelAction::AddMask,
+            ),
+            (
+                if snapshot.active_layer_mask_enabled {
+                    "eye-off-line.svg"
+                } else {
+                    "eye-line.svg"
+                },
+                "Toggle mask visibility",
+                snapshot.active_layer_has_mask && !snapshot.text.selected,
+                ChannelAction::ToggleMask,
+            ),
+        ] {
+            let button = build_icon_only_button(icon_name, tooltip, "dock-footer-button", 14);
+            button.set_sensitive(sensitive);
+            let controller = self.controller.clone();
+            button.connect_clicked(move |_| run_channel_action(&controller, action));
+            footer.append(&button);
+        }
+        host.append(&footer);
+        host
+    }
+
+    fn build_paths_tab(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
+        let host = GtkBox::new(Orientation::Vertical, 0);
+        let content = GtkBox::new(Orientation::Vertical, 6);
+        content.add_css_class("panel-scroller-content");
+
+        if let Some(rect) = snapshot.selection_rect {
+            for line in [
+                "Selection Path".to_string(),
+                format!("Bounds: {} x {}", rect.width, rect.height),
+                format!("Origin: {}, {}", rect.x, rect.y),
+                format!(
+                    "Mode: {}",
+                    if snapshot.selection_inverted {
+                        "Inverted"
+                    } else {
+                        "Normal"
+                    }
+                ),
+            ] {
+                let label = Label::new(Some(&line));
+                label.set_xalign(0.0);
+                label.add_css_class("panel-row");
+                content.append(&label);
+            }
+        } else if let Some(path) = snapshot.selection_path.as_ref() {
+            let label = Label::new(Some(&format!("Freeform path with {} points", path.len())));
+            label.set_xalign(0.0);
+            label.add_css_class("panel-row");
+            content.append(&label);
+        } else {
+            let empty = Label::new(Some("No active path. Make a selection to inspect it here."));
+            empty.set_xalign(0.0);
+            empty.set_wrap(true);
+            empty.add_css_class("color-empty-state");
+            content.append(&empty);
+        }
+
+        host.append(&build_panel_scroller(&content));
+
+        let footer = GtkBox::new(Orientation::Horizontal, 4);
+        footer.add_css_class("dock-footer");
+        for (icon_name, tooltip, sensitive, action) in [
+            (
+                "close-line.svg",
+                "Clear current selection",
+                snapshot.selection_rect.is_some() || snapshot.selection_path.is_some(),
+                PathAction::ClearSelection,
+            ),
+            (
+                "swap-line.svg",
+                "Invert current selection",
+                snapshot.selection_rect.is_some() || snapshot.selection_path.is_some(),
+                PathAction::InvertSelection,
+            ),
+            (
+                "expand-diagonal-2-line.svg",
+                "Begin transform",
+                snapshot.can_begin_transform,
+                PathAction::BeginTransform,
+            ),
+        ] {
+            let button = build_icon_only_button(icon_name, tooltip, "dock-footer-button", 14);
+            button.set_sensitive(sensitive);
+            let controller = self.controller.clone();
+            button.connect_clicked(move |_| run_path_action(&controller, action));
+            footer.append(&button);
+        }
+        host.append(&footer);
+        host
     }
 
     pub(super) fn refresh_history_panel(&self, snapshot: &ShellSnapshot) {
         clear_box_children(&self.history_body);
+        match self.active_top_dock_tab.get() {
+            RightSidebarTopTab::History => self
+                .history_body
+                .append(&build_panel_scroller(&self.build_history_content(snapshot))),
+            RightSidebarTopTab::Swatches => self.history_body.append(&build_panel_scroller(
+                &self.build_swatches_content(snapshot),
+            )),
+        }
+    }
+
+    fn build_history_content(&self, snapshot: &ShellSnapshot) -> GtkBox {
+        let content = GtkBox::new(Orientation::Vertical, 0);
+        content.add_css_class("panel-scroller-content");
 
         let actions = GtkBox::new(Orientation::Horizontal, 6);
         actions.add_css_class("history-toolbar");
@@ -1099,7 +1396,7 @@ impl ShellUiState {
             redo.connect_clicked(move |_| controller.borrow_mut().redo());
         }
         actions.append(&redo);
-        self.history_body.append(&actions);
+        content.append(&actions);
 
         let active_index = snapshot.history_entries.len().saturating_sub(1);
         for (index, entry) in snapshot.history_entries.iter().enumerate() {
@@ -1120,8 +1417,248 @@ impl ShellUiState {
             label.add_css_class("history-name");
             row.append(&label);
 
-            self.history_body.append(&row);
+            content.append(&row);
         }
+
+        content
+    }
+
+    fn build_swatches_content(&self, snapshot: &ShellSnapshot) -> GtkBox {
+        let content = GtkBox::new(Orientation::Vertical, 6);
+        content.add_css_class("panel-scroller-content");
+
+        let header = GtkBox::new(Orientation::Horizontal, 4);
+        header.add_css_class("compact-swatches-header");
+        let title = Label::new(Some("Swatches"));
+        title.set_xalign(0.0);
+        title.set_hexpand(true);
+        title.add_css_class("color-swatches-title");
+        header.append(&title);
+
+        let add_swatch = build_icon_only_button(
+            "add-line.svg",
+            "Add the current foreground color to swatches",
+            "compact-swatch-action-button",
+            12,
+        );
+        {
+            let controller = self.controller.clone();
+            add_swatch.connect_clicked(move |_| controller.borrow_mut().add_color_swatch());
+        }
+        header.append(&add_swatch);
+
+        let remove_swatch = build_icon_only_button(
+            "delete-bin-line.svg",
+            "Delete the selected swatch",
+            "compact-swatch-action-button",
+            12,
+        );
+        remove_swatch.set_sensitive(snapshot.selected_color_swatch.is_some());
+        {
+            let controller = self.controller.clone();
+            remove_swatch.connect_clicked(move |_| {
+                controller.borrow_mut().remove_selected_color_swatch();
+            });
+        }
+        header.append(&remove_swatch);
+        content.append(&header);
+
+        let current = GtkBox::new(Orientation::Horizontal, 6);
+        current.add_css_class("compact-swatches-current");
+        current.append(&build_color_patch(snapshot.foreground_color, 18));
+        let current_label = Label::new(Some(&format!(
+            "Current {}",
+            rgba_hex(snapshot.foreground_color)
+        )));
+        current_label.set_xalign(0.0);
+        current_label.add_css_class("color-summary-label");
+        current.append(&current_label);
+        content.append(&current);
+
+        if snapshot.color_swatches.is_empty() {
+            let empty = Label::new(Some("No swatches yet. Pick a color and add one."));
+            empty.set_xalign(0.0);
+            empty.set_wrap(true);
+            empty.add_css_class("color-empty-state");
+            content.append(&empty);
+            return content;
+        }
+
+        let swatch_grid = gtk4::Grid::new();
+        swatch_grid.set_column_spacing(2);
+        swatch_grid.set_row_spacing(2);
+        swatch_grid.add_css_class("compact-swatches-grid");
+        for (index, color) in snapshot.color_swatches.iter().copied().enumerate() {
+            let swatch = Button::new();
+            swatch.set_has_frame(false);
+            swatch.add_css_class("compact-swatch-button");
+            if snapshot.selected_color_swatch == Some(index) {
+                swatch.add_css_class("panel-swatch-button-active");
+            }
+            swatch.set_tooltip_text(Some(&format!(
+                "Select swatch #{:02X}{:02X}{:02X}",
+                color[0], color[1], color[2]
+            )));
+            swatch.set_child(Some(&build_color_patch(color, 12)));
+            {
+                let controller = self.controller.clone();
+                swatch.connect_clicked(move |_| controller.borrow_mut().select_color_swatch(index));
+            }
+            swatch_grid.attach(&swatch, (index % 14) as i32, (index / 14) as i32, 1, 1);
+        }
+        content.append(&swatch_grid);
+        content
+    }
+
+    fn build_brush_adjust_row(
+        self: &Rc<Self>,
+        label_text: &str,
+        value_text: &str,
+        decrease: IconChipAction,
+        increase: IconChipAction,
+    ) -> GtkBox {
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        row.add_css_class("brush-adjust-row");
+
+        let label = Label::new(Some(label_text));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.add_css_class("layer-control-label");
+        row.append(&label);
+
+        let (minus_icon, minus_tooltip, minus_action) = decrease;
+        let minus = build_icon_only_button(minus_icon, minus_tooltip, "dock-footer-button", 12);
+        {
+            let controller = self.controller.clone();
+            minus.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                minus_action(&mut *controller);
+            });
+        }
+        row.append(&minus);
+
+        let value = GtkBox::new(Orientation::Horizontal, 0);
+        value.add_css_class("layer-value-box");
+        let value_label = Label::new(Some(value_text));
+        value_label.add_css_class("layer-value-label");
+        value.append(&value_label);
+        row.append(&value);
+
+        let (plus_icon, plus_tooltip, plus_action) = increase;
+        let plus = build_icon_only_button(plus_icon, plus_tooltip, "dock-footer-button", 12);
+        {
+            let controller = self.controller.clone();
+            plus.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                plus_action(&mut *controller);
+            });
+        }
+        row.append(&plus);
+        row
+    }
+
+    fn build_simple_toggle_row<F>(
+        self: &Rc<Self>,
+        label_text: &str,
+        active: bool,
+        tooltip: &'static str,
+        action: F,
+    ) -> GtkBox
+    where
+        F: Fn(&mut dyn ShellController) + 'static,
+    {
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        row.add_css_class("brush-adjust-row");
+
+        let label = Label::new(Some(label_text));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.add_css_class("layer-control-label");
+        row.append(&label);
+
+        let state = Label::new(Some(if active { "On" } else { "Off" }));
+        state.add_css_class("layer-value-label");
+        row.append(&state);
+
+        let toggle = build_icon_only_button(
+            if active {
+                "eye-off-line.svg"
+            } else {
+                "eye-line.svg"
+            },
+            tooltip,
+            "dock-footer-button",
+            12,
+        );
+        {
+            let controller = self.controller.clone();
+            toggle.connect_clicked(move |_| {
+                let mut controller = controller.borrow_mut();
+                action(&mut *controller);
+            });
+        }
+        row.append(&toggle);
+        row
+    }
+}
+
+fn build_panel_scroller(content: &impl IsA<gtk4::Widget>) -> ScrolledWindow {
+    let scroller = ScrolledWindow::new();
+    scroller.add_css_class("panel-scroller");
+    scroller.set_hexpand(true);
+    scroller.set_vexpand(true);
+    scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroller.set_child(Some(content));
+    scroller
+}
+
+fn build_channel_row(label_text: &str, visible: bool, active: bool) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 8);
+    row.add_css_class(if active {
+        "history-item-active"
+    } else {
+        "history-item"
+    });
+
+    let visibility_icon = Label::new(Some(if visible { "◉" } else { "○" }));
+    visibility_icon.add_css_class("history-icon");
+    row.append(&visibility_icon);
+
+    let swatch = build_color_patch([245, 245, 245, 255], 12);
+    row.append(&swatch);
+
+    let label = Label::new(Some(label_text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.add_css_class("history-name");
+    row.append(&label);
+    row
+}
+
+fn run_channel_action(controller: &Rc<RefCell<dyn ShellController>>, action: ChannelAction) {
+    let mut controller = controller.borrow_mut();
+    match action {
+        ChannelAction::EditPixels => controller.edit_active_layer_pixels(),
+        ChannelAction::EditMask => controller.edit_active_layer_mask(),
+        ChannelAction::AddMask => controller.add_active_layer_mask(),
+        ChannelAction::ToggleMask => controller.toggle_active_layer_mask_enabled(),
+    }
+}
+
+fn run_path_action(controller: &Rc<RefCell<dyn ShellController>>, action: PathAction) {
+    let mut controller = controller.borrow_mut();
+    match action {
+        PathAction::ClearSelection => controller.clear_selection(),
+        PathAction::InvertSelection => controller.invert_selection(),
+        PathAction::BeginTransform => controller.begin_transform(),
+    }
+}
+
+fn shell_text_alignment_label(alignment: ShellTextAlignment) -> &'static str {
+    match alignment {
+        ShellTextAlignment::Left => "Left",
+        ShellTextAlignment::Center => "Center",
+        ShellTextAlignment::Right => "Right",
     }
 }
 
@@ -1244,17 +1781,9 @@ fn props_guides_row(snapshot: &ShellSnapshot) -> String {
 enum LayerAction {
     Add,
     AddGroup,
-    Ungroup,
     Duplicate,
     Delete,
-    EditText,
-    MoveIntoGroup,
-    MoveOutOfGroup,
     AddMask,
-    ToggleMask,
-    ToggleMaskTarget,
-    MoveUp,
-    MoveDown,
 }
 
 fn build_layers_info_row(snapshot: &ShellSnapshot) -> GtkBox {
@@ -1290,92 +1819,14 @@ fn build_layers_info_row(snapshot: &ShellSnapshot) -> GtkBox {
     info_row
 }
 
-fn build_layer_action_specs(snapshot: &ShellSnapshot) -> Vec<(&'static str, String, LayerAction)> {
-    let toggle_mask_icon = if snapshot.active_layer_mask_enabled {
-        "eye-off-line.svg"
-    } else {
-        "eye-line.svg"
-    };
-    let toggle_mask_label = if snapshot.active_layer_mask_enabled {
-        "Mask Off"
-    } else {
-        "Mask On"
-    };
-    let toggle_target_label = if snapshot.active_edit_target_name == "Layer Mask" {
-        "Edit Layer"
-    } else {
-        "Edit Mask"
-    };
-
-    vec![
-        ("add-line.svg", "+ Layer".to_string(), LayerAction::Add),
-        (
-            "group-line.svg",
-            "+ Group".to_string(),
-            LayerAction::AddGroup,
-        ),
-        ("node-tree.svg", "Ungroup".to_string(), LayerAction::Ungroup),
-        (
-            "file-copy-line.svg",
-            "Duplicate".to_string(),
-            LayerAction::Duplicate,
-        ),
-        (
-            "delete-bin-line.svg",
-            "Delete".to_string(),
-            LayerAction::Delete,
-        ),
-        ("text.svg", "Edit Text".to_string(), LayerAction::EditText),
-        (
-            "folder-add-line.svg",
-            "Into Group".to_string(),
-            LayerAction::MoveIntoGroup,
-        ),
-        (
-            "folder-reduce-line.svg",
-            "Out Group".to_string(),
-            LayerAction::MoveOutOfGroup,
-        ),
-        ("add-line.svg", "+ Mask".to_string(), LayerAction::AddMask),
-        (
-            toggle_mask_icon,
-            toggle_mask_label.to_string(),
-            LayerAction::ToggleMask,
-        ),
-        (
-            "edit-line.svg",
-            toggle_target_label.to_string(),
-            LayerAction::ToggleMaskTarget,
-        ),
-        ("arrow-up-line.svg", "Up".to_string(), LayerAction::MoveUp),
-        (
-            "arrow-down-line.svg",
-            "Down".to_string(),
-            LayerAction::MoveDown,
-        ),
-    ]
-}
-
 fn layer_action_sensitive(action: LayerAction, snapshot: &ShellSnapshot) -> bool {
     match action {
         LayerAction::Add | LayerAction::Delete => true,
         LayerAction::AddGroup => {
             snapshot.can_create_group_from_active_layer && !snapshot.text.selected
         }
-        LayerAction::Ungroup => snapshot.can_ungroup_selected_group,
         LayerAction::Duplicate => !snapshot.text.selected,
-        LayerAction::EditText => snapshot.text.selected && !snapshot.text.editing,
-        LayerAction::MoveIntoGroup => {
-            snapshot.can_move_active_layer_into_selected_group && !snapshot.text.selected
-        }
-        LayerAction::MoveOutOfGroup => {
-            snapshot.can_move_active_layer_out_of_group && !snapshot.text.selected
-        }
         LayerAction::AddMask => !snapshot.text.selected && !snapshot.active_layer_has_mask,
-        LayerAction::ToggleMask | LayerAction::ToggleMaskTarget => {
-            !snapshot.text.selected && snapshot.active_layer_has_mask
-        }
-        LayerAction::MoveUp | LayerAction::MoveDown => !snapshot.text.selected,
     }
 }
 
@@ -1383,27 +1834,9 @@ fn run_layer_action(controller: &Rc<RefCell<dyn ShellController>>, action: Layer
     match action {
         LayerAction::Add => controller.borrow_mut().add_layer(),
         LayerAction::AddGroup => controller.borrow_mut().create_group_from_active_layer(),
-        LayerAction::Ungroup => controller.borrow_mut().ungroup_selected_group(),
         LayerAction::Duplicate => controller.borrow_mut().duplicate_active_layer(),
         LayerAction::Delete => controller.borrow_mut().delete_active_layer(),
-        LayerAction::EditText => controller.borrow_mut().begin_text_edit(),
-        LayerAction::MoveIntoGroup => controller
-            .borrow_mut()
-            .move_active_layer_into_selected_group(),
-        LayerAction::MoveOutOfGroup => controller.borrow_mut().move_active_layer_out_of_group(),
         LayerAction::AddMask => controller.borrow_mut().add_active_layer_mask(),
-        LayerAction::ToggleMask => controller.borrow_mut().toggle_active_layer_mask_enabled(),
-        LayerAction::ToggleMaskTarget => {
-            let mut controller = controller.borrow_mut();
-            let snapshot = controller.snapshot();
-            if snapshot.active_edit_target_name == "Layer Mask" {
-                controller.edit_active_layer_pixels();
-            } else {
-                controller.edit_active_layer_mask();
-            }
-        }
-        LayerAction::MoveUp => controller.borrow_mut().move_active_layer_up(),
-        LayerAction::MoveDown => controller.borrow_mut().move_active_layer_down(),
     }
 }
 

@@ -8,8 +8,8 @@ use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
     CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, GestureDrag, GestureStylus, HeaderBar, IconTheme,
-    Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
-    ResponseType, Separator, SpinButton, gdk,
+    Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, PolicyType,
+    Popover, ResponseType, ScrolledWindow, Separator, SpinButton, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -541,12 +541,23 @@ struct ShellUiState {
     document_tab_label: Label,
     layers_group: GtkBox,
     layers_body: GtkBox,
+    layers_tab_buttons: Vec<Button>,
     properties_group: GtkBox,
     properties_body: GtkBox,
     color_group: GtkBox,
     color_body: GtkBox,
+    brush_group: GtkBox,
+    brush_body: GtkBox,
+    text_group: GtkBox,
+    text_body: GtkBox,
     history_group: GtkBox,
     history_body: GtkBox,
+    history_tab_buttons: Vec<Button>,
+    active_top_dock_tab: Cell<RightSidebarTopTab>,
+    active_bottom_dock_tab: Cell<RightSidebarBottomTab>,
+    active_context_panel: Cell<Option<ContextDockPanel>>,
+    context_toolbar_buttons: RefCell<Vec<(ContextDockPanel, Button)>>,
+    context_panel_host: RefCell<Option<GtkBox>>,
     status_bar: GtkBox,
     menu_zoom_label: Label,
     status_doc: Label,
@@ -571,6 +582,27 @@ struct ShellUiState {
     last_zoom_percent: RefCell<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RightSidebarTopTab {
+    History,
+    Swatches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RightSidebarBottomTab {
+    Layers,
+    Channels,
+    Paths,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextDockPanel {
+    Color,
+    Properties,
+    Brush,
+    Text,
+}
+
 impl ShellUiState {
     fn new(controller: Rc<RefCell<dyn ShellController>>) -> Rc<Self> {
         let (
@@ -586,16 +618,30 @@ impl ShellUiState {
         let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
 
         let (color_group, color_body) =
-            shell_chrome::build_panel_group("color", &["Color", "Swatches", "Navigator"], 6, false);
+            shell_chrome::build_panel_group("color", &["Color"], 6, false);
 
         let (properties_group, properties_body) =
-            shell_chrome::build_panel_group("properties", &["Properties", "Adjust"], 4, false);
+            shell_chrome::build_panel_group("properties", &["Properties"], 4, false);
 
-        let (layers_group, layers_body) =
-            shell_chrome::build_panel_group("layers", &["Layers", "Channels", "Paths"], 4, false);
+        let (brush_group, brush_body) =
+            shell_chrome::build_panel_group("brush", &["Brush"], 4, false);
+        let (text_group, text_body) = shell_chrome::build_panel_group("text", &["Text"], 4, false);
 
-        let (history_group, history_body) =
-            shell_chrome::build_panel_group("history", &["History"], 4, true);
+        let (layers_group, layers_body, layers_tab_buttons) =
+            shell_chrome::build_interactive_panel_group(
+                "layers",
+                &["Layers", "Channels", "Paths"],
+                4,
+                true,
+            );
+
+        let (history_group, history_body, history_tab_buttons) =
+            shell_chrome::build_interactive_panel_group(
+                "history",
+                &["History", "Swatches"],
+                4,
+                true,
+            );
 
         let (status_bar, status_doc, status_zoom, status_cursor, status_notice, status_mode) =
             shell_chrome::build_status_bar();
@@ -658,7 +704,7 @@ impl ShellUiState {
         vertical_ruler_label.add_css_class("ruler-vertical");
         vertical_ruler_label.set_yalign(0.0);
 
-        Rc::new(Self {
+        let shell_state = Rc::new(Self {
             controller,
             window: RefCell::new(None),
             recovery_prompt_visible: Cell::new(false),
@@ -688,12 +734,23 @@ impl ShellUiState {
             document_tab_label,
             layers_group,
             layers_body,
+            layers_tab_buttons,
             properties_group,
             properties_body,
             color_group,
             color_body,
+            brush_group,
+            brush_body,
+            text_group,
+            text_body,
             history_group,
             history_body,
+            history_tab_buttons,
+            active_top_dock_tab: Cell::new(RightSidebarTopTab::History),
+            active_bottom_dock_tab: Cell::new(RightSidebarBottomTab::Layers),
+            active_context_panel: Cell::new(Some(ContextDockPanel::Color)),
+            context_toolbar_buttons: RefCell::new(Vec::new()),
+            context_panel_host: RefCell::new(None),
             status_bar,
             menu_zoom_label,
             status_doc,
@@ -716,11 +773,85 @@ impl ShellUiState {
             last_ui_revision: Cell::new(0),
             last_snapshot: RefCell::new(None),
             last_zoom_percent: RefCell::new(0),
-        })
+        });
+
+        shell_state.connect_sidebar_tabs();
+        shell_state
     }
 
     fn bump_ui_revision(&self) {
         self.ui_revision.set(self.ui_revision.get().wrapping_add(1));
+    }
+
+    fn connect_sidebar_tabs(self: &Rc<Self>) {
+        for (index, button) in self.history_tab_buttons.iter().enumerate() {
+            let shell_state = self.clone();
+            button.connect_clicked(move |_| {
+                let tab = match index {
+                    0 => RightSidebarTopTab::History,
+                    _ => RightSidebarTopTab::Swatches,
+                };
+                shell_state.set_top_dock_tab(tab);
+            });
+        }
+
+        for (index, button) in self.layers_tab_buttons.iter().enumerate() {
+            let shell_state = self.clone();
+            button.connect_clicked(move |_| {
+                let tab = match index {
+                    0 => RightSidebarBottomTab::Layers,
+                    1 => RightSidebarBottomTab::Channels,
+                    _ => RightSidebarBottomTab::Paths,
+                };
+                shell_state.set_bottom_dock_tab(tab);
+            });
+        }
+    }
+
+    pub(crate) fn set_top_dock_tab(&self, tab: RightSidebarTopTab) {
+        if self.active_top_dock_tab.get() != tab {
+            self.active_top_dock_tab.set(tab);
+            self.bump_ui_revision();
+        }
+    }
+
+    pub(crate) fn active_top_dock_tab(&self) -> RightSidebarTopTab {
+        self.active_top_dock_tab.get()
+    }
+
+    pub(crate) fn set_bottom_dock_tab(&self, tab: RightSidebarBottomTab) {
+        if self.active_bottom_dock_tab.get() != tab {
+            self.active_bottom_dock_tab.set(tab);
+            self.bump_ui_revision();
+        }
+    }
+
+    pub(crate) fn active_bottom_dock_tab(&self) -> RightSidebarBottomTab {
+        self.active_bottom_dock_tab.get()
+    }
+
+    pub(crate) fn toggle_context_panel(&self, panel: ContextDockPanel) {
+        let next = if self.active_context_panel.get() == Some(panel) {
+            None
+        } else {
+            Some(panel)
+        };
+        if self.active_context_panel.get() != next {
+            self.active_context_panel.set(next);
+            self.bump_ui_revision();
+        }
+    }
+
+    pub(crate) fn active_context_panel(&self) -> Option<ContextDockPanel> {
+        self.active_context_panel.get()
+    }
+
+    pub(crate) fn restore_right_sidebar_defaults(&self) {
+        self.active_top_dock_tab.set(RightSidebarTopTab::History);
+        self.active_bottom_dock_tab
+            .set(RightSidebarBottomTab::Layers);
+        self.active_context_panel.set(Some(ContextDockPanel::Color));
+        self.bump_ui_revision();
     }
 
     fn handle_shortcut(self: &Rc<Self>, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
@@ -1511,11 +1642,54 @@ impl ShellUiState {
         );
         self.update_tool_option_labels(snapshot);
         self.refresh_tool_buttons(snapshot);
+        self.refresh_right_sidebar_chrome();
         self.refresh_color_panel(snapshot);
         self.refresh_properties_panel(snapshot);
+        self.refresh_brush_panel(snapshot);
+        self.refresh_text_panel(snapshot);
         self.refresh_layers_panel(snapshot);
         self.refresh_history_panel(snapshot);
         self.refresh_contextual_task_bar(snapshot);
+    }
+
+    fn refresh_right_sidebar_chrome(&self) {
+        for (index, button) in self.history_tab_buttons.iter().enumerate() {
+            let is_active = match index {
+                0 => self.active_top_dock_tab.get() == RightSidebarTopTab::History,
+                _ => self.active_top_dock_tab.get() == RightSidebarTopTab::Swatches,
+            };
+            set_sidebar_tab_active(button, is_active);
+        }
+
+        for (index, button) in self.layers_tab_buttons.iter().enumerate() {
+            let is_active = match index {
+                0 => self.active_bottom_dock_tab.get() == RightSidebarBottomTab::Layers,
+                1 => self.active_bottom_dock_tab.get() == RightSidebarBottomTab::Channels,
+                _ => self.active_bottom_dock_tab.get() == RightSidebarBottomTab::Paths,
+            };
+            set_sidebar_tab_active(button, is_active);
+        }
+
+        let active_context = self.active_context_panel.get();
+        self.color_group
+            .set_visible(active_context == Some(ContextDockPanel::Color));
+        self.properties_group
+            .set_visible(active_context == Some(ContextDockPanel::Properties));
+        self.brush_group
+            .set_visible(active_context == Some(ContextDockPanel::Brush));
+        self.text_group
+            .set_visible(active_context == Some(ContextDockPanel::Text));
+        if let Some(host) = self.context_panel_host.borrow().as_ref() {
+            host.set_visible(active_context.is_some());
+        }
+
+        for (panel, button) in self.context_toolbar_buttons.borrow().iter() {
+            if active_context == Some(*panel) {
+                button.add_css_class("dock-icon-button-active");
+            } else {
+                button.remove_css_class("dock-icon-button-active");
+            }
+        }
     }
 
     fn refresh_contextual_task_bar(&self, snapshot: &ShellSnapshot) {
@@ -1658,11 +1832,9 @@ impl ShellUiState {
         self.vertical_ruler_label
             .set_label(&format_vertical_ruler(snapshot.canvas_size.height));
 
-        if snapshot_changed {
+        if snapshot_changed || ui_changed {
             self.refresh_snapshot_views(&snapshot);
             self.last_snapshot.replace(Some(snapshot));
-        } else if ui_changed {
-            self.refresh_layers_panel(&snapshot);
         }
 
         self.last_ui_revision.set(self.ui_revision.get());
@@ -1685,6 +1857,14 @@ fn install_theme() {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+fn set_sidebar_tab_active(button: &Button, active: bool) {
+    if active {
+        button.add_css_class("panel-tab-active");
+    } else {
+        button.remove_css_class("panel-tab-active");
     }
 }
 
@@ -2523,6 +2703,84 @@ popover.menu-dropdown contents {
 .layers-toolbar,
 .history-toolbar {
     padding: 8px;
+}
+
+.panel-scroller {
+    background: transparent;
+    border: none;
+}
+
+.panel-scroller > viewport {
+    background: transparent;
+}
+
+.panel-scroller scrollbar {
+    background: transparent;
+    padding: 2px;
+}
+
+.panel-scroller scrollbar slider {
+    min-width: 6px;
+    min-height: 28px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.14);
+}
+
+.panel-scroller scrollbar slider:hover {
+    background: rgba(255,255,255,0.24);
+}
+
+.panel-scroller-content {
+    padding: 4px 8px 8px 8px;
+}
+
+.dock-footer {
+    padding: 6px 8px 8px 8px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    background: #2b2b2b;
+}
+
+.dock-footer-button {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+}
+
+.brush-adjust-row {
+    padding: 0;
+    min-height: 24px;
+}
+
+.compact-swatches-header {
+    margin-bottom: 2px;
+}
+
+.compact-swatches-current {
+    margin-bottom: 2px;
+}
+
+.compact-swatches-grid {
+    margin-top: 2px;
+}
+
+.compact-swatch-action-button {
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0;
+}
+
+.compact-swatch-button {
+    min-width: 14px;
+    min-height: 14px;
+    padding: 0;
+    border-radius: 3px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: #252525;
+}
+
+.compact-swatch-button:hover {
+    border-color: rgba(255,255,255,0.18);
+    background: #2c2c2c;
 }
 
 .layer-action-chip {

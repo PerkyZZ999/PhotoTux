@@ -1,5 +1,7 @@
 use super::*;
-use crate::ui_templates::{DocumentTabsTemplate, StatusBarTemplate};
+use crate::ui_templates::{
+    DocumentTabsTemplate, PanelGroupTemplate, StatusBarTemplate, load_panel_group_template,
+};
 
 #[derive(Clone, Copy)]
 struct ToolRailButtonSpec {
@@ -192,63 +194,127 @@ pub(super) fn build_document_tabs() -> (GtkBox, Label) {
         })
 }
 
-pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
+pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     let sidebar = GtkBox::new(Orientation::Horizontal, 0);
     sidebar.add_css_class("right-sidebar");
-    sidebar.set_size_request(300, -1);
+    sidebar.set_size_request(360, -1);
 
-    let dock_icons = GtkBox::new(Orientation::Vertical, 3);
+    let context_host = GtkBox::new(Orientation::Vertical, 0);
+    context_host.add_css_class("context-dock-host");
+    context_host.set_size_request(248, -1);
+    context_host.set_vexpand(true);
+    context_host.append(&shell_state.color_group);
+    context_host.append(&shell_state.properties_group);
+    context_host.append(&shell_state.brush_group);
+    context_host.append(&shell_state.text_group);
+    context_host.set_visible(shell_state.active_context_panel.get().is_some());
+    shell_state
+        .context_panel_host
+        .replace(Some(context_host.clone()));
+
+    let dock_icons = GtkBox::new(Orientation::Vertical, 4);
     dock_icons.add_css_class("panel-icon-strip");
-    for (icon_name, tooltip) in [
-        ("palette-line.svg", "Color"),
-        ("settings-4-line.svg", "Properties"),
-        ("layout-column-line.svg", "Layers"),
-        ("history-line.svg", "History"),
+    for (panel, icon_name, tooltip) in [
+        (ContextDockPanel::Color, "palette-line.svg", "Color"),
+        (
+            ContextDockPanel::Properties,
+            "settings-4-line.svg",
+            "Properties",
+        ),
+        (ContextDockPanel::Brush, "brush-2-line.svg", "Brush"),
+        (ContextDockPanel::Text, "text.svg", "Text"),
     ] {
-        let placeholder = GtkBox::new(Orientation::Horizontal, 0);
-        placeholder.add_css_class("dock-icon-button");
-        placeholder.add_css_class("dock-icon-placeholder");
-        placeholder.set_size_request(24, 24);
-        placeholder.set_accessible_role(gtk4::AccessibleRole::Presentation);
-
-        let icon = build_remix_icon(icon_name, tooltip, 18);
-        icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
-        placeholder.append(&icon);
-        dock_icons.append(&placeholder);
+        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 18);
+        button.add_css_class("dock-icon-button");
+        button.set_size_request(28, 28);
+        {
+            let shell_state = shell_state.clone();
+            button.connect_clicked(move |_| shell_state.toggle_context_panel(panel));
+        }
+        shell_state
+            .context_toolbar_buttons
+            .borrow_mut()
+            .push((panel, button.clone()));
+        dock_icons.append(&button);
     }
 
-    let dock = GtkBox::new(Orientation::Vertical, 8);
+    let dock = GtkBox::new(Orientation::Vertical, 0);
     dock.add_css_class("panel-dock");
     dock.set_hexpand(true);
     dock.set_vexpand(true);
 
-    let paned_bottom = Paned::new(Orientation::Vertical);
-    paned_bottom.set_start_child(Some(&shell_state.layers_group));
-    paned_bottom.set_end_child(Some(&shell_state.history_group));
-    paned_bottom.set_position(200);
-    paned_bottom.set_wide_handle(true);
-    paned_bottom.set_focusable(false);
+    let paned = Paned::new(Orientation::Vertical);
+    paned.set_start_child(Some(&shell_state.history_group));
+    paned.set_end_child(Some(&shell_state.layers_group));
+    paned.set_position(210);
+    paned.set_wide_handle(true);
+    paned.set_vexpand(true);
+    paned.set_focusable(false);
+    dock.append(&paned);
 
-    let paned_middle = Paned::new(Orientation::Vertical);
-    paned_middle.set_start_child(Some(&shell_state.properties_group));
-    paned_middle.set_end_child(Some(&paned_bottom));
-    paned_middle.set_position(150);
-    paned_middle.set_wide_handle(true);
-    paned_middle.set_focusable(false);
-
-    let paned_top = Paned::new(Orientation::Vertical);
-    paned_top.set_start_child(Some(&shell_state.color_group));
-    paned_top.set_end_child(Some(&paned_middle));
-    paned_top.set_position(150);
-    paned_top.set_wide_handle(true);
-    paned_top.set_vexpand(true);
-    paned_top.set_focusable(false);
-
-    dock.append(&paned_top);
-
+    sidebar.append(&context_host);
     sidebar.append(&dock_icons);
     sidebar.append(&dock);
     sidebar
+}
+
+pub(super) fn build_interactive_panel_group(
+    shell_name: &str,
+    tabs: &[&str],
+    body_spacing: i32,
+    body_vexpand: bool,
+) -> (GtkBox, GtkBox, Vec<Button>) {
+    match build_interactive_panel_group_shell(shell_name, tabs, body_spacing, body_vexpand) {
+        Ok(shell) => shell,
+        Err(error) => {
+            tracing::error!(%error, panel = shell_name, "failed to load interactive panel group");
+            let (group, body) = build_panel_group(shell_name, tabs, body_spacing, body_vexpand);
+            (group, body, Vec::new())
+        }
+    }
+}
+
+fn build_interactive_panel_group_shell(
+    shell_name: &str,
+    tabs: &[&str],
+    body_spacing: i32,
+    body_vexpand: bool,
+) -> anyhow::Result<(GtkBox, GtkBox, Vec<Button>)> {
+    let PanelGroupTemplate {
+        root,
+        header,
+        body,
+        tab_buttons,
+    } = load_panel_group_template()?;
+    root.set_focusable(false);
+    header.set_focusable(false);
+    body.set_focusable(false);
+    root.set_widget_name(&format!("{shell_name}-panel"));
+    header.set_widget_name(&format!("{shell_name}-panel-header"));
+    body.set_widget_name(&format!("{shell_name}-panel-body"));
+    body.set_spacing(body_spacing);
+    body.set_vexpand(body_vexpand);
+
+    while let Some(child) = header.first_child() {
+        header.remove(&child);
+    }
+
+    let mut active_buttons = Vec::new();
+    for (index, tab) in tabs.iter().enumerate() {
+        let button = tab_buttons.get(index).cloned().unwrap_or_else(Button::new);
+        button.set_label(tab);
+        button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+        button.add_css_class("panel-tab");
+        if index == 0 {
+            button.add_css_class("panel-tab-active");
+        } else {
+            button.remove_css_class("panel-tab-active");
+        }
+        header.append(&button);
+        active_buttons.push(button);
+    }
+
+    Ok((root, body, active_buttons))
 }
 
 pub(super) fn build_status_bar() -> (GtkBox, Label, Label, Label, Label, Label) {
