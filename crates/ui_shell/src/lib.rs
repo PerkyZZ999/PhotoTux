@@ -1728,14 +1728,12 @@ const THEME_CSS: &str = r#"
 .remix-icon {
     min-width: 12px;
     min-height: 12px;
+    color: #dfe5ee;
+    -gtk-icon-shadow: none;
 }
 
 .remix-icon {
-    color: inherit;
-}
-
-.titlebar-icon {
-    color: #3b8beb;
+    color: currentColor;
 }
 
 .chrome-button,
@@ -1771,6 +1769,18 @@ const THEME_CSS: &str = r#"
 .dock-icon-button:hover {
     background: #383838;
     border: 1px solid #4a4a4a;
+}
+
+.chrome-button image,
+.menu-button image,
+menubutton.menu-button > button.toggle image,
+.tool-chip image,
+.tool-button image,
+.dock-icon-button image,
+.chrome-icon-button image,
+.layer-visibility-button image,
+.swatch-stack-action image {
+    color: currentColor;
 }
 
 .tool-chip {
@@ -1837,7 +1847,7 @@ const THEME_CSS: &str = r#"
     border-radius: 3px;
     min-width: 0;
     padding: 2px 6px;
-    color: #999999;
+    color: #e0e0e0;
     box-shadow: none;
     outline: none;
 }
@@ -1855,7 +1865,7 @@ menubutton.menu-button > button.toggle {
     min-width: 0;
     min-height: 0;
     padding: 2px 6px;
-    color: #999999;
+    color: #e0e0e0;
     box-shadow: none;
     outline: none;
     -gtk-icon-shadow: none;
@@ -1975,7 +1985,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     background: transparent;
     border: none;
     border-radius: 4px;
-    color: #c4cad3;
+    color: #e0e0e0;
 }
 
 .tool-button:hover {
@@ -2037,7 +2047,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     min-width: 12px;
     min-height: 12px;
     padding: 0;
-    color: #9ea7b3;
+    color: #e0e0e0;
 }
 
 .swatch-stack-action:hover {
@@ -2177,7 +2187,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     background: transparent;
     border: none;
     border-radius: 3px;
-    color: #c0c7d1;
+    color: #e0e0e0;
 }
 
 .dock-icon-button:hover {
@@ -2193,7 +2203,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     padding: 0;
     background: transparent;
     border: none;
-    color: #999999;
+    color: #e0e0e0;
 }
 
 .chrome-icon-button:hover,
