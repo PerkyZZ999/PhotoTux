@@ -1,11 +1,17 @@
 use super::*;
 
-pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
-    let symbolic_icon_name = icon_name
+pub(super) fn remix_icon_theme_name(icon_name: &str) -> String {
+    icon_name
         .strip_suffix(".svg")
-        .map(|name| format!("{name}-symbolic.svg"))
-        .unwrap_or_else(|| icon_name.to_string());
-    format!("{UI_RESOURCE_PREFIX}/assets/icons/remixicon/{symbolic_icon_name}")
+        .map(|name| format!("phototux-{name}-symbolic"))
+        .unwrap_or_else(|| icon_name.to_string())
+}
+
+pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
+    format!(
+        "{UI_RESOURCE_PREFIX}/icons/scalable/actions/{}.svg",
+        remix_icon_theme_name(icon_name)
+    )
 }
 
 pub(super) fn logo_icon_resource_path(dark_background: bool) -> &'static str {
@@ -21,9 +27,25 @@ pub(super) fn build_logo_icon(dark_background: bool, alt_text: &str, size: i32) 
 }
 
 pub(super) fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {
-    let image = build_optional_resource_image(&remix_icon_resource_path(icon_name), alt_text, size);
+    let image = build_optional_themed_icon(icon_name, alt_text, size);
     image.add_css_class("remix-icon");
     image
+}
+
+pub(super) fn set_remix_icon_or_fallback(
+    image: &Image,
+    icon_name: &str,
+    alt_text: &str,
+    size: i32,
+) {
+    if bundled_ui_resource_exists(&remix_icon_resource_path(icon_name)) {
+        image.set_icon_name(Some(&remix_icon_theme_name(icon_name)));
+    } else {
+        warn_missing_optional_ui_resource(&remix_icon_resource_path(icon_name));
+        image.set_icon_name(Some(OPTIONAL_ICON_FALLBACK_NAME));
+    }
+    image.set_pixel_size(size);
+    image.set_tooltip_text(Some(alt_text));
 }
 
 pub(super) fn set_image_resource_or_fallback(
@@ -52,8 +74,10 @@ pub(super) fn build_icon_only_button(
     button.add_css_class(css_class);
     button.set_has_frame(false);
     button.set_tooltip_text(Some(tooltip));
+    button.update_property(&[gtk4::accessible::Property::Label(tooltip)]);
 
     let icon = build_remix_icon(icon_name, tooltip, size);
+    icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
     button.set_child(Some(&icon));
     button
 }
@@ -66,9 +90,12 @@ pub(super) fn build_compact_icon_label_button(icon_name: &str, label: &str, size
     let button = Button::new();
     button.set_has_frame(false);
     button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk4::accessible::Property::Label(label)]);
 
     let content = GtkBox::new(Orientation::Horizontal, 4);
-    content.append(&build_remix_icon(icon_name, label, size));
+    let icon = build_remix_icon(icon_name, label, size);
+    icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
+    content.append(&icon);
 
     let text = Label::new(Some(label));
     text.add_css_class("icon-label-text");
@@ -106,9 +133,12 @@ pub(super) fn build_icon_label_shortcut_button(
     button.set_hexpand(true);
     button.set_halign(Align::Fill);
     button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk4::accessible::Property::Label(label)]);
 
     let content = GtkBox::new(Orientation::Horizontal, 5);
-    content.append(&build_remix_icon(icon_name, label, 12));
+    let icon = build_remix_icon(icon_name, label, 12);
+    icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
+    content.append(&icon);
     content.set_hexpand(true);
 
     let text = Label::new(Some(label));
@@ -142,6 +172,7 @@ pub(super) fn set_menu_button_label(button: &Button, label: &str) {
             {
                 text.set_label(label);
                 button.set_tooltip_text(Some(label));
+                button.update_property(&[gtk4::accessible::Property::Label(label)]);
                 break;
             }
             current = child.next_sibling();
@@ -206,6 +237,20 @@ fn build_optional_resource_image(resource_path: &str, alt_text: &str, size: i32)
         Image::from_resource(resource_path)
     } else {
         warn_missing_optional_ui_resource(resource_path);
+        Image::from_icon_name(OPTIONAL_ICON_FALLBACK_NAME)
+    };
+    image.set_pixel_size(size);
+    image.set_halign(Align::Center);
+    image.set_valign(Align::Center);
+    image.set_tooltip_text(Some(alt_text));
+    image
+}
+
+fn build_optional_themed_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {
+    let image = if bundled_ui_resource_exists(&remix_icon_resource_path(icon_name)) {
+        Image::from_icon_name(&remix_icon_theme_name(icon_name))
+    } else {
+        warn_missing_optional_ui_resource(&remix_icon_resource_path(icon_name));
         Image::from_icon_name(OPTIONAL_ICON_FALLBACK_NAME)
     };
     image.set_pixel_size(size);

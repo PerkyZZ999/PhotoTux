@@ -429,6 +429,50 @@ pub struct Document {
     pub selection_inverted: bool,
     pub guides: Vec<Guide>,
     pub guides_visible: bool,
+    #[serde(default = "default_document_color_swatches")]
+    pub color_swatches: Vec<[u8; 4]>,
+}
+
+pub fn default_document_color_swatches() -> Vec<[u8; 4]> {
+    [
+        [255, 255, 255, 255],
+        [0, 0, 0, 255],
+        [240, 240, 240, 255],
+        [160, 160, 160, 255],
+        [96, 96, 96, 255],
+        [255, 59, 48, 255],
+        [255, 149, 0, 255],
+        [255, 204, 0, 255],
+        [52, 199, 89, 255],
+        [0, 122, 255, 255],
+        [88, 86, 214, 255],
+        [175, 82, 222, 255],
+        [255, 105, 180, 255],
+        [150, 75, 0, 255],
+        [245, 245, 220, 255],
+        [128, 0, 0, 255],
+        [128, 64, 0, 255],
+        [128, 128, 0, 255],
+        [0, 100, 0, 255],
+        [0, 128, 128, 255],
+        [0, 0, 128, 255],
+        [75, 0, 130, 255],
+        [128, 0, 128, 255],
+        [220, 20, 60, 255],
+        [255, 140, 0, 255],
+        [255, 215, 0, 255],
+        [50, 205, 50, 255],
+        [0, 191, 255, 255],
+        [30, 144, 255, 255],
+        [106, 90, 205, 255],
+        [218, 112, 214, 255],
+        [255, 20, 147, 255],
+        [210, 180, 140, 255],
+        [205, 133, 63, 255],
+        [139, 69, 19, 255],
+        [47, 47, 47, 255],
+    ]
+    .to_vec()
 }
 
 impl Document {
@@ -448,6 +492,7 @@ impl Document {
             selection_inverted: false,
             guides: Vec::new(),
             guides_visible: true,
+            color_swatches: default_document_color_swatches(),
         }
     }
 
@@ -512,6 +557,33 @@ impl Document {
 
     pub fn toggle_guides_visible(&mut self) {
         self.guides_visible = !self.guides_visible;
+    }
+
+    pub fn color_swatches(&self) -> &[[u8; 4]] {
+        &self.color_swatches
+    }
+
+    pub fn color_swatch(&self, index: usize) -> Option<[u8; 4]> {
+        self.color_swatches.get(index).copied()
+    }
+
+    pub fn add_color_swatch(&mut self, rgba: [u8; 4]) -> usize {
+        if let Some(index) = self
+            .color_swatches
+            .iter()
+            .position(|swatch| *swatch == rgba)
+        {
+            return index;
+        }
+        self.color_swatches.push(rgba);
+        self.color_swatches.len() - 1
+    }
+
+    pub fn remove_color_swatch(&mut self, index: usize) -> Option<[u8; 4]> {
+        if index >= self.color_swatches.len() {
+            return None;
+        }
+        Some(self.color_swatches.remove(index))
     }
 
     pub fn layer_hierarchy(&self) -> &[LayerHierarchyNode] {

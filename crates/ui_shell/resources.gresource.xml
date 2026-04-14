@@ -47,4 +47,43 @@
     <file alias="assets/icons/remixicon/zoom-in-line-symbolic.svg">assets/icons/remixicon/zoom-in-line-symbolic.svg</file>
     <file alias="assets/icons/remixicon/zoom-out-line-symbolic.svg">assets/icons/remixicon/zoom-out-line-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/com/phototux/icons/scalable/actions">
+    <file alias="phototux-brush-2-line-symbolic.svg">assets/icons/remixicon/brush-2-line-symbolic.svg</file>
+    <file alias="phototux-add-line-symbolic.svg">assets/icons/remixicon/add-line-symbolic.svg</file>
+    <file alias="phototux-arrow-down-line-symbolic.svg">assets/icons/remixicon/arrow-down-line-symbolic.svg</file>
+    <file alias="phototux-arrow-go-back-line-symbolic.svg">assets/icons/remixicon/arrow-go-back-line-symbolic.svg</file>
+    <file alias="phototux-arrow-go-forward-line-symbolic.svg">assets/icons/remixicon/arrow-go-forward-line-symbolic.svg</file>
+    <file alias="phototux-arrow-up-line-symbolic.svg">assets/icons/remixicon/arrow-up-line-symbolic.svg</file>
+    <file alias="phototux-drag-move-line-symbolic.svg">assets/icons/remixicon/drag-move-line-symbolic.svg</file>
+    <file alias="phototux-eraser-line-symbolic.svg">assets/icons/remixicon/eraser-line-symbolic.svg</file>
+    <file alias="phototux-expand-diagonal-2-line-symbolic.svg">assets/icons/remixicon/expand-diagonal-2-line-symbolic.svg</file>
+    <file alias="phototux-export-line-symbolic.svg">assets/icons/remixicon/export-line-symbolic.svg</file>
+    <file alias="phototux-eye-line-symbolic.svg">assets/icons/remixicon/eye-line-symbolic.svg</file>
+    <file alias="phototux-eye-off-line-symbolic.svg">assets/icons/remixicon/eye-off-line-symbolic.svg</file>
+    <file alias="phototux-check-line-symbolic.svg">assets/icons/remixicon/check-line-symbolic.svg</file>
+    <file alias="phototux-close-line-symbolic.svg">assets/icons/remixicon/close-line-symbolic.svg</file>
+    <file alias="phototux-delete-bin-line-symbolic.svg">assets/icons/remixicon/delete-bin-line-symbolic.svg</file>
+    <file alias="phototux-edit-line-symbolic.svg">assets/icons/remixicon/edit-line-symbolic.svg</file>
+    <file alias="phototux-file-copy-line-symbolic.svg">assets/icons/remixicon/file-copy-line-symbolic.svg</file>
+    <file alias="phototux-focus-3-line-symbolic.svg">assets/icons/remixicon/focus-3-line-symbolic.svg</file>
+    <file alias="phototux-folder-open-line-symbolic.svg">assets/icons/remixicon/folder-open-line-symbolic.svg</file>
+    <file alias="phototux-folder-add-line-symbolic.svg">assets/icons/remixicon/folder-add-line-symbolic.svg</file>
+    <file alias="phototux-folder-reduce-line-symbolic.svg">assets/icons/remixicon/folder-reduce-line-symbolic.svg</file>
+    <file alias="phototux-group-line-symbolic.svg">assets/icons/remixicon/group-line-symbolic.svg</file>
+    <file alias="phototux-hand-symbolic.svg">assets/icons/remixicon/hand-symbolic.svg</file>
+    <file alias="phototux-history-line-symbolic.svg">assets/icons/remixicon/history-line-symbolic.svg</file>
+    <file alias="phototux-image-add-line-symbolic.svg">assets/icons/remixicon/image-add-line-symbolic.svg</file>
+    <file alias="phototux-layout-column-line-symbolic.svg">assets/icons/remixicon/layout-column-line-symbolic.svg</file>
+    <file alias="phototux-node-tree-symbolic.svg">assets/icons/remixicon/node-tree-symbolic.svg</file>
+    <file alias="phototux-palette-line-symbolic.svg">assets/icons/remixicon/palette-line-symbolic.svg</file>
+    <file alias="phototux-refresh-line-symbolic.svg">assets/icons/remixicon/refresh-line-symbolic.svg</file>
+    <file alias="phototux-save-3-line-symbolic.svg">assets/icons/remixicon/save-3-line-symbolic.svg</file>
+    <file alias="phototux-search-line-symbolic.svg">assets/icons/remixicon/search-line-symbolic.svg</file>
+    <file alias="phototux-settings-4-line-symbolic.svg">assets/icons/remixicon/settings-4-line-symbolic.svg</file>
+    <file alias="phototux-subtract-line-symbolic.svg">assets/icons/remixicon/subtract-line-symbolic.svg</file>
+    <file alias="phototux-swap-line-symbolic.svg">assets/icons/remixicon/swap-line-symbolic.svg</file>
+    <file alias="phototux-text-symbolic.svg">assets/icons/remixicon/text-symbolic.svg</file>
+    <file alias="phototux-zoom-in-line-symbolic.svg">assets/icons/remixicon/zoom-in-line-symbolic.svg</file>
+    <file alias="phototux-zoom-out-line-symbolic.svg">assets/icons/remixicon/zoom-out-line-symbolic.svg</file>
+  </gresource>
 </gresources>

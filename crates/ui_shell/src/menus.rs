@@ -29,7 +29,10 @@ pub(super) fn build_menu_bar(window: &ApplicationWindow, shell_state: Rc<ShellUi
 }
 
 fn build_top_level_menu(label: &str) -> (MenuButton, Popover, GtkBox) {
-    let button = MenuButton::builder().label(label).build();
+    let button = MenuButton::builder()
+        .label(label)
+        .use_underline(true)
+        .build();
     button.set_has_frame(false);
     button.add_css_class("menu-button");
     let (popover, menu) = create_menu_popover(&button);
@@ -91,7 +94,7 @@ fn append_menu_separator(menu: &GtkBox) {
 }
 
 fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Edit");
+    let (button, popover, menu) = build_top_level_menu("_Edit");
 
     let undo = append_icon_menu_item(&menu, &popover, "arrow-go-back-line.svg", "Undo", {
         let controller = shell_state.controller.clone();
@@ -118,7 +121,7 @@ fn build_edit_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Image");
+    let (button, popover, menu) = build_top_level_menu("_Image");
 
     let start_transform = append_icon_shortcut_menu_item(
         &menu,
@@ -225,7 +228,7 @@ fn build_image_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Layer");
+    let (button, popover, menu) = build_top_level_menu("_Layer");
 
     append_icon_menu_item(&menu, &popover, "add-line.svg", "New Layer", {
         let controller = shell_state.controller.clone();
@@ -333,7 +336,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Select");
+    let (button, popover, menu) = build_top_level_menu("_Select");
 
     let clear = append_icon_menu_item(&menu, &popover, "close-line.svg", "Clear Selection", {
         let controller = shell_state.controller.clone();
@@ -365,7 +368,7 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Filter");
+    let (button, popover, menu) = build_top_level_menu("_Filter");
 
     let opacity_up =
         append_icon_menu_item(&menu, &popover, "add-line.svg", "Increase Layer Opacity", {
@@ -452,7 +455,7 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("View");
+    let (button, popover, menu) = build_top_level_menu("_View");
 
     append_icon_shortcut_menu_item(
         &menu,
@@ -531,7 +534,7 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("File");
+    let (button, popover, menu) = build_top_level_menu("_File");
 
     append_icon_shortcut_menu_item(
         &menu,
@@ -596,7 +599,7 @@ fn build_file_menu_button(window: &ApplicationWindow, shell_state: Rc<ShellUiSta
 }
 
 fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Window");
+    let (button, popover, menu) = build_top_level_menu("_Window");
 
     let color_toggle =
         append_icon_menu_item(&menu, &popover, "palette-line.svg", "Toggle Color Panel", {
@@ -714,7 +717,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 }
 
 fn build_help_menu_button(window: &ApplicationWindow) -> MenuButton {
-    let (button, popover, menu) = build_top_level_menu("Help");
+    let (button, popover, menu) = build_top_level_menu("_Help");
 
     append_icon_menu_item(&menu, &popover, "text.svg", "Keyboard Shortcuts", {
         let parent = window.clone();

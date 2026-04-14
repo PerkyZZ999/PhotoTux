@@ -30,8 +30,14 @@ impl ShellUiState {
         self.color_body.append(&summary);
 
         let picker_row = GtkBox::new(Orientation::Horizontal, 6);
-        picker_row.append(&build_color_gradient_preview(snapshot.foreground_color));
-        picker_row.append(&build_color_spectrum_preview(snapshot.foreground_color));
+        picker_row.append(&build_color_gradient_preview(
+            &self.controller,
+            snapshot.foreground_color,
+        ));
+        picker_row.append(&build_color_spectrum_preview(
+            &self.controller,
+            snapshot.foreground_color,
+        ));
         self.color_body.append(&picker_row);
 
         let fg_hex = rgba_hex(snapshot.foreground_color);
@@ -79,49 +85,70 @@ impl ShellUiState {
         swatch_title.add_css_class("color-swatches-title");
         swatch_header.append(&swatch_title);
 
-        let swatch_menu = Button::with_label("☰");
+        let swatch_menu = Label::new(Some("☰"));
         swatch_menu.add_css_class("panel-inline-menu");
         swatch_menu.set_hexpand(true);
         swatch_menu.set_halign(Align::End);
-        swatch_menu.set_sensitive(false);
-        swatch_menu.set_tooltip_text(Some("Swatch options"));
+        swatch_menu.set_size_request(18, 18);
+        swatch_menu.set_accessible_role(gtk4::AccessibleRole::Presentation);
         swatch_header.append(&swatch_menu);
         self.color_body.append(&swatch_header);
+
+        let swatch_actions = GtkBox::new(Orientation::Horizontal, 6);
+        swatch_actions.add_css_class("color-panel-actions");
+
+        let add_swatch = build_color_action_button(
+            "Add Swatch",
+            "Add the current foreground color to the swatches grid",
+        );
+        {
+            let controller = self.controller.clone();
+            add_swatch.connect_clicked(move |_| controller.borrow_mut().add_color_swatch());
+        }
+        swatch_actions.append(&add_swatch);
+
+        let delete_swatch =
+            build_color_action_button("Delete Swatch", "Delete the currently selected swatch");
+        delete_swatch.set_sensitive(snapshot.selected_color_swatch.is_some());
+        {
+            let controller = self.controller.clone();
+            delete_swatch.connect_clicked(move |_| {
+                controller.borrow_mut().remove_selected_color_swatch();
+            });
+        }
+        swatch_actions.append(&delete_swatch);
+        self.color_body.append(&swatch_actions);
+
+        if snapshot.color_swatches.is_empty() {
+            let empty = Label::new(Some("No swatches yet. Pick a color, then add one."));
+            empty.set_xalign(0.0);
+            empty.set_wrap(true);
+            empty.add_css_class("color-empty-state");
+            self.color_body.append(&empty);
+            return;
+        }
 
         let swatch_grid = gtk4::Grid::new();
         swatch_grid.set_column_spacing(2);
         swatch_grid.set_row_spacing(2);
         swatch_grid.add_css_class("color-swatches-grid");
-        for (index, color) in DEFAULT_COLOR_SWATCHES.iter().copied().enumerate() {
+        for (index, color) in snapshot.color_swatches.iter().copied().enumerate() {
             let swatch = Button::new();
             swatch.set_has_frame(false);
             swatch.add_css_class("panel-swatch-button");
-            if color
-                == [
-                    snapshot.foreground_color[0],
-                    snapshot.foreground_color[1],
-                    snapshot.foreground_color[2],
-                ]
-            {
+            if snapshot.selected_color_swatch == Some(index) {
                 swatch.add_css_class("panel-swatch-button-active");
             }
             swatch.set_tooltip_text(Some(&format!(
-                "Set foreground color to #{:02X}{:02X}{:02X}",
+                "Select swatch #{:02X}{:02X}{:02X}",
                 color[0], color[1], color[2]
             )));
-            swatch.set_child(Some(&build_color_patch(
-                [color[0], color[1], color[2], 255],
-                14,
-            )));
+            swatch.set_child(Some(&build_color_patch(color, 14)));
             {
                 let controller = self.controller.clone();
-                swatch.connect_clicked(move |_| {
-                    controller
-                        .borrow_mut()
-                        .set_foreground_color([color[0], color[1], color[2], 255]);
-                });
+                swatch.connect_clicked(move |_| controller.borrow_mut().select_color_swatch(index));
             }
-            swatch_grid.attach(&swatch, (index % 18) as i32, (index / 18) as i32, 1, 1);
+            swatch_grid.attach(&swatch, (index % 12) as i32, (index / 12) as i32, 1, 1);
         }
         self.color_body.append(&swatch_grid);
     }
@@ -1386,45 +1413,6 @@ fn clear_box_children(container: &GtkBox) {
     }
 }
 
-const DEFAULT_COLOR_SWATCHES: [[u8; 3]; 36] = [
-    [0x00, 0x00, 0x00],
-    [0x3a, 0x3a, 0x3a],
-    [0x66, 0x66, 0x66],
-    [0x99, 0x99, 0x99],
-    [0xcc, 0xcc, 0xcc],
-    [0xff, 0xff, 0xff],
-    [0xff, 0x3b, 0x30],
-    [0xff, 0x95, 0x00],
-    [0xff, 0xea, 0x00],
-    [0x8a, 0xff, 0x00],
-    [0x00, 0xe6, 0x5a],
-    [0x00, 0xc7, 0xff],
-    [0x00, 0x7a, 0xff],
-    [0x36, 0x3f, 0xe0],
-    [0x7b, 0x2c, 0xff],
-    [0xb1, 0x20, 0xff],
-    [0xd0, 0x3b, 0xff],
-    [0xff, 0x4d, 0x9d],
-    [0x6d, 0x4c, 0x41],
-    [0xa1, 0x88, 0x7f],
-    [0xc0, 0xca, 0x33],
-    [0x66, 0xbb, 0x6a],
-    [0x26, 0xa6, 0x9a],
-    [0x42, 0xa5, 0xf5],
-    [0x5c, 0x6b, 0xc0],
-    [0xab, 0x47, 0xbc],
-    [0xef, 0x53, 0x50],
-    [0xff, 0x70, 0x43],
-    [0xff, 0xca, 0x28],
-    [0xd4, 0xe1, 0x57],
-    [0x9c, 0xcc, 0x65],
-    [0x4d, 0xd0, 0xe1],
-    [0x4f, 0xc3, 0xf7],
-    [0x90, 0xa4, 0xae],
-    [0xf4, 0xa2, 0xc5],
-    [0xcf, 0xd8, 0xdc],
-];
-
 fn rgba_hex(rgba: [u8; 4]) -> String {
     format!("#{:02X}{:02X}{:02X}", rgba[0], rgba[1], rgba[2])
 }
@@ -1521,7 +1509,15 @@ fn build_color_summary_chip(prefix: &str, rgba: [u8; 4]) -> GtkBox {
     row
 }
 
-fn build_color_gradient_preview(rgba: [u8; 4]) -> gtk4::Overlay {
+const COLOR_GRADIENT_WIDTH: f64 = 220.0;
+const COLOR_GRADIENT_HEIGHT: f64 = 175.0;
+const COLOR_SPECTRUM_WIDTH: f64 = 14.0;
+const COLOR_SPECTRUM_HEIGHT: f64 = 175.0;
+
+fn build_color_gradient_preview(
+    controller: &Rc<RefCell<dyn ShellController>>,
+    rgba: [u8; 4],
+) -> gtk4::Overlay {
     let (hue, saturation, value) = rgba_to_hsv(rgba);
     let hue_rgb = hsv_to_rgb(hue, 1.0, 1.0);
 
@@ -1529,8 +1525,9 @@ fn build_color_gradient_preview(rgba: [u8; 4]) -> gtk4::Overlay {
     overlay.add_css_class("color-gradient-frame");
 
     let surface = gtk4::DrawingArea::new();
-    surface.set_content_width(220);
-    surface.set_content_height(175);
+    surface.set_content_width(COLOR_GRADIENT_WIDTH as i32);
+    surface.set_content_height(COLOR_GRADIENT_HEIGHT as i32);
+    surface.set_tooltip_text(Some("Drag to set saturation and brightness"));
     surface.set_draw_func(move |_, ctx, width, height| {
         let width = width as f64;
         let height = height as f64;
@@ -1553,27 +1550,60 @@ fn build_color_gradient_preview(rgba: [u8; 4]) -> gtk4::Overlay {
         ctx.rectangle(0.0, 0.0, width, height);
         let _ = ctx.fill();
     });
+    {
+        let controller = controller.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |_, _, x, y| {
+            apply_gradient_pick(&controller, hue, x, y);
+        });
+        surface.add_controller(click);
+    }
+    {
+        let drag_origin = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let controller = controller.clone();
+        let drag = GestureDrag::new();
+        {
+            let drag_origin = drag_origin.clone();
+            let controller = controller.clone();
+            drag.connect_drag_begin(move |_, start_x, start_y| {
+                drag_origin.set((start_x, start_y));
+                apply_gradient_pick(&controller, hue, start_x, start_y);
+            });
+        }
+        {
+            let drag_origin = drag_origin.clone();
+            drag.connect_drag_update(move |_, offset_x, offset_y| {
+                let (start_x, start_y) = drag_origin.get();
+                apply_gradient_pick(&controller, hue, start_x + offset_x, start_y + offset_y);
+            });
+        }
+        surface.add_controller(drag);
+    }
     overlay.set_child(Some(&surface));
 
     let cursor = GtkBox::new(Orientation::Horizontal, 0);
     cursor.add_css_class("color-picker-cursor");
     cursor.set_halign(Align::Start);
     cursor.set_valign(Align::Start);
-    cursor.set_margin_start((saturation * 210.0).round() as i32);
-    cursor.set_margin_top(((1.0 - value) * 165.0).round() as i32);
+    cursor.set_margin_start((saturation * (COLOR_GRADIENT_WIDTH - 10.0)).round() as i32);
+    cursor.set_margin_top(((1.0 - value) * (COLOR_GRADIENT_HEIGHT - 10.0)).round() as i32);
     overlay.add_overlay(&cursor);
     overlay
 }
 
-fn build_color_spectrum_preview(rgba: [u8; 4]) -> gtk4::Overlay {
-    let (hue, _, _) = rgba_to_hsv(rgba);
+fn build_color_spectrum_preview(
+    controller: &Rc<RefCell<dyn ShellController>>,
+    rgba: [u8; 4],
+) -> gtk4::Overlay {
+    let (hue, saturation, value) = rgba_to_hsv(rgba);
 
     let overlay = gtk4::Overlay::new();
     overlay.add_css_class("color-spectrum-frame");
 
     let spectrum = gtk4::DrawingArea::new();
-    spectrum.set_content_width(14);
-    spectrum.set_content_height(175);
+    spectrum.set_content_width(COLOR_SPECTRUM_WIDTH as i32);
+    spectrum.set_content_height(COLOR_SPECTRUM_HEIGHT as i32);
+    spectrum.set_tooltip_text(Some("Drag to set hue"));
     spectrum.set_draw_func(move |_, ctx, width, height| {
         let width = width as f64;
         let height = height as f64;
@@ -1598,15 +1628,70 @@ fn build_color_spectrum_preview(rgba: [u8; 4]) -> gtk4::Overlay {
         ctx.rectangle(0.0, 0.0, width, height);
         let _ = ctx.fill();
     });
+    {
+        let controller = controller.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |_, _, _, y| {
+            apply_spectrum_pick(&controller, saturation, value, y);
+        });
+        spectrum.add_controller(click);
+    }
+    {
+        let drag_origin = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let controller = controller.clone();
+        let drag = GestureDrag::new();
+        {
+            let drag_origin = drag_origin.clone();
+            let controller = controller.clone();
+            drag.connect_drag_begin(move |_, start_x, start_y| {
+                drag_origin.set((start_x, start_y));
+                let _ = start_x;
+                apply_spectrum_pick(&controller, saturation, value, start_y);
+            });
+        }
+        {
+            let drag_origin = drag_origin.clone();
+            drag.connect_drag_update(move |_, _, offset_y| {
+                let (_, start_y) = drag_origin.get();
+                apply_spectrum_pick(&controller, saturation, value, start_y + offset_y);
+            });
+        }
+        spectrum.add_controller(drag);
+    }
     overlay.set_child(Some(&spectrum));
 
     let cursor = GtkBox::new(Orientation::Horizontal, 0);
     cursor.add_css_class("color-spectrum-cursor");
     cursor.set_halign(Align::Start);
     cursor.set_valign(Align::Start);
-    cursor.set_margin_top(((hue / 360.0) * 171.0).round() as i32);
+    cursor.set_margin_top(((hue / 360.0) * (COLOR_SPECTRUM_HEIGHT - 4.0)).round() as i32);
     overlay.add_overlay(&cursor);
     overlay
+}
+
+fn apply_gradient_pick(controller: &Rc<RefCell<dyn ShellController>>, hue: f64, x: f64, y: f64) {
+    let saturation = (x / (COLOR_GRADIENT_WIDTH - 1.0)).clamp(0.0, 1.0);
+    let value = (1.0 - (y / (COLOR_GRADIENT_HEIGHT - 1.0))).clamp(0.0, 1.0);
+    let [r, g, b] = hsv_to_rgb(hue, saturation, value);
+    controller.borrow_mut().set_foreground_color([r, g, b, 255]);
+}
+
+fn apply_spectrum_pick(
+    controller: &Rc<RefCell<dyn ShellController>>,
+    saturation: f64,
+    value: f64,
+    y: f64,
+) {
+    let hue = ((y / (COLOR_SPECTRUM_HEIGHT - 1.0)).clamp(0.0, 1.0) * 359.0).clamp(0.0, 359.0);
+    let [r, g, b] = hsv_to_rgb(hue, saturation, value);
+    controller.borrow_mut().set_foreground_color([r, g, b, 255]);
+}
+
+fn build_color_action_button(label: &str, tooltip: &str) -> Button {
+    let button = Button::with_label(label);
+    button.add_css_class("color-action-button");
+    button.set_tooltip_text(Some(tooltip));
+    button
 }
 
 fn build_color_value_row(fields: &[(&str, String)]) -> GtkBox {

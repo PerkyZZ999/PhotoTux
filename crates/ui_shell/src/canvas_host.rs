@@ -9,6 +9,7 @@ pub(super) fn build_canvas_host(
     picture.set_can_shrink(true);
     picture.set_focusable(true);
     picture.set_focus_on_click(true);
+    picture.update_property(&[gtk4::accessible::Property::Label("Document Canvas")]);
     picture.add_css_class("frame");
 
     let state = Rc::new(RefCell::new(CanvasHostState::new(

@@ -102,6 +102,7 @@ pub(super) fn build_left_tool_rail(
 
     let bg = build_color_chip("", "swatch-bg");
     bg.set_tooltip_text(Some("Background Color"));
+    bg.update_property(&[gtk4::accessible::Property::Label("Background Color")]);
     bg.set_halign(gtk4::Align::End);
     bg.set_valign(gtk4::Align::End);
     bg.set_margin_bottom(1);
@@ -110,6 +111,7 @@ pub(super) fn build_left_tool_rail(
 
     let fg = build_color_chip("", "swatch-fg");
     fg.set_tooltip_text(Some("Foreground Color"));
+    fg.update_property(&[gtk4::accessible::Property::Label("Foreground Color")]);
     fg.set_halign(gtk4::Align::Start);
     fg.set_valign(gtk4::Align::Start);
     fg.set_margin_top(1);
@@ -203,10 +205,16 @@ pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
         ("layout-column-line.svg", "Layers"),
         ("history-line.svg", "History"),
     ] {
-        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 18);
-        button.add_css_class("dock-icon-button");
-        button.set_size_request(24, 24);
-        dock_icons.append(&button);
+        let placeholder = GtkBox::new(Orientation::Horizontal, 0);
+        placeholder.add_css_class("dock-icon-button");
+        placeholder.add_css_class("dock-icon-placeholder");
+        placeholder.set_size_request(24, 24);
+        placeholder.set_accessible_role(gtk4::AccessibleRole::Presentation);
+
+        let icon = build_remix_icon(icon_name, tooltip, 18);
+        icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
+        placeholder.append(&icon);
+        dock_icons.append(&placeholder);
     }
 
     let dock = GtkBox::new(Orientation::Vertical, 8);
@@ -219,12 +227,14 @@ pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     paned_bottom.set_end_child(Some(&shell_state.history_group));
     paned_bottom.set_position(200);
     paned_bottom.set_wide_handle(true);
+    paned_bottom.set_focusable(false);
 
     let paned_middle = Paned::new(Orientation::Vertical);
     paned_middle.set_start_child(Some(&shell_state.properties_group));
     paned_middle.set_end_child(Some(&paned_bottom));
     paned_middle.set_position(150);
     paned_middle.set_wide_handle(true);
+    paned_middle.set_focusable(false);
 
     let paned_top = Paned::new(Orientation::Vertical);
     paned_top.set_start_child(Some(&shell_state.color_group));
@@ -232,6 +242,7 @@ pub(super) fn build_right_sidebar(shell_state: &ShellUiState) -> GtkBox {
     paned_top.set_position(150);
     paned_top.set_wide_handle(true);
     paned_top.set_vexpand(true);
+    paned_top.set_focusable(false);
 
     dock.append(&paned_top);
 
@@ -264,10 +275,12 @@ pub(super) fn build_panel_group(
             group.set_widget_name(&format!("{shell_name}-panel"));
             group.add_css_class("panel-group");
             group.set_vexpand(true);
+            group.set_focusable(false);
 
             let header = GtkBox::new(Orientation::Horizontal, 2);
             header.set_widget_name(&format!("{shell_name}-panel-header"));
             header.add_css_class("panel-group-header");
+            header.set_focusable(false);
             for (index, tab) in tabs.iter().enumerate() {
                 if index == 0 {
                     let button = Button::with_label(tab);
@@ -288,6 +301,7 @@ pub(super) fn build_panel_group(
             body.set_widget_name(&format!("{shell_name}-panel-body"));
             body.add_css_class("panel-group-body");
             body.set_vexpand(body_vexpand);
+            body.set_focusable(false);
 
             group.append(&header);
             group.append(&body);
@@ -343,6 +357,7 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     top_strip.set_halign(Align::Center);
     let top_left_corner = Label::new(Some(""));
     top_left_corner.add_css_class("ruler-corner");
+    top_left_corner.set_accessible_role(gtk4::AccessibleRole::Presentation);
     top_left_corner.set_size_request(24, 24);
     top_strip.append(&top_left_corner);
 

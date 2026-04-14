@@ -7,9 +7,9 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
     CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
-    EventControllerScrollFlags, GestureDrag, GestureStylus, HeaderBar, Image, Label, MenuButton,
-    MessageDialog, MessageType, Orientation, Paned, Picture, Popover, ResponseType, Separator,
-    SpinButton, gdk,
+    EventControllerScrollFlags, GestureClick, GestureDrag, GestureStylus, HeaderBar, IconTheme,
+    Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, Popover,
+    ResponseType, Separator, SpinButton, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -46,7 +46,7 @@ use status_presenter::{
 use ui_support::{
     build_icon_label_button, build_icon_label_shortcut_button, build_icon_only_button,
     build_logo_icon, build_remix_icon, create_menu_popover, logo_icon_resource_path,
-    remix_icon_resource_path, set_image_resource_or_fallback, set_menu_button_label,
+    set_image_resource_or_fallback, set_menu_button_label, set_remix_icon_or_fallback,
     shell_tool_icon, shell_tool_shortcut,
 };
 
@@ -237,6 +237,8 @@ pub struct ShellSnapshot {
     pub selection_inverted: bool,
     pub foreground_color: [u8; 4],
     pub background_color: [u8; 4],
+    pub color_swatches: Vec<[u8; 4]>,
+    pub selected_color_swatch: Option<usize>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub history_entries: Vec<String>,
@@ -272,6 +274,9 @@ pub trait ShellController {
     fn reset_colors(&mut self);
     fn set_foreground_color(&mut self, rgba: [u8; 4]);
     fn set_background_color(&mut self, rgba: [u8; 4]);
+    fn add_color_swatch(&mut self);
+    fn select_color_swatch(&mut self, index: usize);
+    fn remove_selected_color_swatch(&mut self);
     fn clear_selection(&mut self);
     fn invert_selection(&mut self);
     fn add_horizontal_guide(&mut self);
@@ -367,7 +372,11 @@ fn ensure_ui_resources_registered() -> Result<()> {
 }
 
 fn build_color_chip(label_text: &str, css_class: &str) -> Button {
-    let button = Button::with_label(label_text);
+    let button = if label_text.is_empty() {
+        Button::new()
+    } else {
+        Button::with_label(label_text)
+    };
     button.add_css_class("color-chip");
     button.add_css_class(css_class);
     button
@@ -717,6 +726,12 @@ impl ShellUiState {
     fn handle_shortcut(self: &Rc<Self>, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
         let is_control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
         let is_shift = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+        let has_menu_navigation_modifier = modifiers.intersects(
+            gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::META_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::HYPER_MASK,
+        );
         let key_char = key
             .to_unicode()
             .map(|character| character.to_ascii_lowercase());
@@ -733,6 +748,9 @@ impl ShellUiState {
         }
         if self.handle_mode_exit_key(key) {
             return true;
+        }
+        if has_menu_navigation_modifier {
+            return false;
         }
         self.handle_tool_select_shortcut(key_char)
     }
@@ -1485,9 +1503,9 @@ impl ShellUiState {
     fn refresh_snapshot_views(self: &Rc<Self>, snapshot: &ShellSnapshot) {
         self.tool_options_label
             .set_label(&snapshot.active_tool_name);
-        set_image_resource_or_fallback(
+        set_remix_icon_or_fallback(
             &self.tool_options_icon,
-            &remix_icon_resource_path(shell_tool_icon(snapshot.active_tool)),
+            shell_tool_icon(snapshot.active_tool),
             &snapshot.active_tool_name,
             18,
         );
@@ -1661,6 +1679,7 @@ fn install_theme() {
     provider.load_from_data(THEME_CSS);
 
     if let Some(display) = gdk::Display::default() {
+        IconTheme::for_display(&display).add_resource_path("/com/phototux/icons");
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
@@ -2347,6 +2366,26 @@ menubutton.menu-button > button.toggle:focus-visible {
     margin-bottom: 8px;
 }
 
+.color-action-button {
+    min-height: 24px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 1px solid #494949;
+    background: #303030;
+    color: #dfe5ee;
+}
+
+.color-action-button:hover {
+    background: #383838;
+    border-color: #5d5d5d;
+}
+
+.color-action-button:disabled {
+    color: #7c848e;
+    background: #262626;
+    border-color: #373737;
+}
+
 .color-swatches-header {
     margin: 0 0 5px 0;
 }
@@ -2391,6 +2430,11 @@ menubutton.menu-button > button.toggle:focus-visible {
 .panel-swatch-button-active {
     border-color: #3b8beb;
     background: rgba(59,139,235,0.14);
+}
+
+.color-empty-state {
+    color: #8f98a4;
+    font-size: 11px;
 }
 
 popover.menu-dropdown contents {
@@ -2925,6 +2969,8 @@ mod tests {
             selection_inverted: false,
             foreground_color: [255, 255, 255, 255],
             background_color: [0, 0, 0, 255],
+            color_swatches: vec![[255, 255, 255, 255], [0, 0, 0, 255]],
+            selected_color_swatch: Some(0),
             can_undo: false,
             can_redo: false,
             history_entries: Vec::new(),

@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const PROJECT_FILE_EXTENSION: &str = "ptx";
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 3;
 pub const CURRENT_PSD_IMPORT_MANIFEST_VERSION: u32 = 1;
 pub const RECOVERY_FILE_SUFFIX: &str = ".autosave";
 const PSD_IMPORT_SIDECAR_TIMEOUT: Duration = Duration::from_secs(15);
@@ -358,6 +358,8 @@ pub struct ProjectManifest {
     pub guides: Vec<ManifestGuideRecord>,
     #[serde(default = "default_guides_visible")]
     pub guides_visible: bool,
+    #[serde(default = "default_project_color_swatches")]
+    pub color_swatches: Vec<[u8; 4]>,
 }
 
 impl From<&Document> for ProjectManifest {
@@ -407,12 +409,17 @@ impl From<&Document> for ProjectManifest {
                 .map(ManifestGuideRecord::from)
                 .collect(),
             guides_visible: document.guides_visible(),
+            color_swatches: document.color_swatches().to_vec(),
         }
     }
 }
 
 fn default_guides_visible() -> bool {
     true
+}
+
+fn default_project_color_swatches() -> Vec<[u8; 4]> {
+    doc_model::default_document_color_swatches()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -770,6 +777,7 @@ impl TryFrom<ProjectFile> for Document {
             layer_hierarchy,
             guides,
             guides_visible,
+            color_swatches,
         } = manifest;
 
         let mut restored_layers = Vec::with_capacity(manifest_layers.len());
@@ -868,6 +876,7 @@ impl TryFrom<ProjectFile> for Document {
             selection_inverted: false,
             guides: guides.iter().map(Guide::from).collect(),
             guides_visible,
+            color_swatches,
         };
         document
             .set_layer_hierarchy(restored_hierarchy)
@@ -2432,6 +2441,22 @@ mod tests {
             ]
         );
         assert!(!restored.guides_visible());
+    }
+
+    #[test]
+    fn save_and_load_document_roundtrip_preserves_color_swatches() {
+        let mut document = Document::new(512, 512);
+        document.add_color_swatch([17, 34, 51, 255]);
+        document.add_color_swatch([200, 210, 220, 255]);
+
+        let path = temporary_project_path();
+        save_document_to_path(&path, &document).expect("save should succeed");
+        let restored = load_document_from_path(&path).expect("load should succeed");
+        fs::remove_file(&path).expect("temporary project file should be removed");
+
+        assert_eq!(restored.color_swatches(), document.color_swatches());
+        assert!(restored.color_swatches().contains(&[17, 34, 51, 255]));
+        assert!(restored.color_swatches().contains(&[200, 210, 220, 255]));
     }
 
     #[test]

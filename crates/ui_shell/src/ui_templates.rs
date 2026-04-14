@@ -210,6 +210,9 @@ pub(crate) fn build_panel_group_shell(
     body_vexpand: bool,
 ) -> Result<(GtkBox, GtkBox)> {
     let template = load_panel_group_template()?;
+    template.root.set_focusable(false);
+    template.header.set_focusable(false);
+    template.body.set_focusable(false);
     template
         .root
         .set_widget_name(&format!("{shell_name}-panel"));

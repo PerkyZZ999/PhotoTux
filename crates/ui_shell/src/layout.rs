@@ -60,12 +60,7 @@ fn build_header_bar_from_template(template: TitlebarTemplate) -> HeaderBar {
         16,
     );
     template.search_icon.add_css_class("remix-icon");
-    set_image_resource_or_fallback(
-        &template.search_icon,
-        &remix_icon_resource_path("search-line.svg"),
-        "Search",
-        12,
-    );
+    ui_support::set_remix_icon_or_fallback(&template.search_icon, "search-line.svg", "Search", 12);
     template.search_button.set_tooltip_text(Some("Search"));
     template.root
 }
@@ -123,6 +118,7 @@ fn build_workspace_body(shell_state: &ShellUiState) -> GtkBox {
 
     let inner = Paned::new(Orientation::Horizontal);
     inner.set_wide_handle(true);
+    inner.set_focusable(false);
     inner.set_start_child(Some(&shell_chrome::build_document_region(shell_state)));
     inner.set_end_child(Some(&shell_chrome::build_right_sidebar(shell_state)));
     inner.set_position(1120);

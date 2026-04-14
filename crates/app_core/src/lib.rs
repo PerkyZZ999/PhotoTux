@@ -48,6 +48,7 @@ struct PhotoTuxController {
     history: HistoryStack<EditorHistoryEntry>,
     foreground_color: [u8; 4],
     background_color: [u8; 4],
+    selected_color_swatch_index: Option<usize>,
     status_message: String,
     document_title: String,
     document_path: Option<PathBuf>,
@@ -962,6 +963,7 @@ impl PhotoTuxController {
             history,
             foreground_color: [232, 236, 243, 255],
             background_color: [27, 29, 33, 255],
+            selected_color_swatch_index: None,
             status_message: "Ready".to_string(),
             document_title: "untitled.ptx".to_string(),
             document_path: None,
@@ -1007,6 +1009,7 @@ impl PhotoTuxController {
             brush_flow: 0.82,
         };
         controller.reset_selected_structure_target_to_active_layer();
+        controller.sync_selected_color_swatch();
         controller.refresh_recovery_path();
         controller.recovery_offer_pending = controller
             .recovery_path
@@ -2357,6 +2360,7 @@ impl PhotoTuxController {
     fn replace_document_after_load(&mut self, state: DocumentLoadState) {
         self.document = state.document;
         self.reset_selected_structure_target_to_active_layer();
+        self.sync_selected_color_swatch();
         self.document_title = state.document_title;
         self.document_path = state.document_path;
         self.working_directory = state.working_directory;
@@ -2374,6 +2378,14 @@ impl PhotoTuxController {
         self.reset_history_to(&state.history_label);
         self.bump_canvas_revision();
         self.status_message = state.status_message;
+    }
+
+    fn sync_selected_color_swatch(&mut self) {
+        self.selected_color_swatch_index = self
+            .document
+            .color_swatches()
+            .iter()
+            .position(|swatch| *swatch == self.foreground_color);
     }
 
     fn enqueue_primary_save(&mut self, path: PathBuf) {
@@ -2577,6 +2589,7 @@ impl PhotoTuxController {
             self.recovery_offer_pending = false;
             self.document = document;
             self.reset_selected_structure_target_to_active_layer();
+            self.sync_selected_color_swatch();
             self.document_path = document_path;
             self.document_title = document_title;
             self.recovery_path = Some(recovery_path.clone());
@@ -3208,6 +3221,8 @@ impl ShellController for PhotoTuxController {
             selection_inverted: self.document.selection_inverted(),
             foreground_color: self.foreground_color,
             background_color: self.background_color,
+            color_swatches: self.document.color_swatches().to_vec(),
+            selected_color_swatch: self.selected_color_swatch_index,
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
             history_entries: self
@@ -3570,20 +3585,24 @@ impl ShellController for PhotoTuxController {
 
     fn swap_colors(&mut self) {
         std::mem::swap(&mut self.foreground_color, &mut self.background_color);
+        self.sync_selected_color_swatch();
         self.push_history("Swap Colors");
     }
 
     fn reset_colors(&mut self) {
         self.foreground_color = [232, 236, 243, 255];
         self.background_color = [27, 29, 33, 255];
+        self.sync_selected_color_swatch();
         self.push_history("Reset Colors");
     }
 
     fn set_foreground_color(&mut self, rgba: [u8; 4]) {
         if self.foreground_color == rgba {
+            self.sync_selected_color_swatch();
             return;
         }
         self.foreground_color = rgba;
+        self.sync_selected_color_swatch();
         self.push_history(format!(
             "Set Foreground #{:02X}{:02X}{:02X}",
             rgba[0], rgba[1], rgba[2]
@@ -3598,6 +3617,73 @@ impl ShellController for PhotoTuxController {
         self.push_history(format!(
             "Set Background #{:02X}{:02X}{:02X}",
             rgba[0], rgba[1], rgba[2]
+        ));
+    }
+
+    fn add_color_swatch(&mut self) {
+        let swatch = self.foreground_color;
+        let before_len = self.document.color_swatches().len();
+        let index = self.document.add_color_swatch(swatch);
+        self.selected_color_swatch_index = Some(index);
+        if self.document.color_swatches().len() == before_len {
+            self.status_message = format!(
+                "Swatch #{:02X}{:02X}{:02X} already exists",
+                swatch[0], swatch[1], swatch[2]
+            );
+            return;
+        }
+        self.mark_document_dirty_without_raster_invalidation();
+        self.status_message = format!(
+            "Added swatch #{:02X}{:02X}{:02X}",
+            swatch[0], swatch[1], swatch[2]
+        );
+        self.push_history(format!(
+            "Add Swatch #{:02X}{:02X}{:02X}",
+            swatch[0], swatch[1], swatch[2]
+        ));
+    }
+
+    fn select_color_swatch(&mut self, index: usize) {
+        let Some(swatch) = self.document.color_swatch(index) else {
+            return;
+        };
+        self.selected_color_swatch_index = Some(index);
+        if self.foreground_color == swatch {
+            self.status_message = format!(
+                "Selected swatch #{:02X}{:02X}{:02X}",
+                swatch[0], swatch[1], swatch[2]
+            );
+            return;
+        }
+        self.foreground_color = swatch;
+        self.push_history(format!(
+            "Select Swatch #{:02X}{:02X}{:02X}",
+            swatch[0], swatch[1], swatch[2]
+        ));
+        self.status_message = format!(
+            "Selected swatch #{:02X}{:02X}{:02X}",
+            swatch[0], swatch[1], swatch[2]
+        );
+    }
+
+    fn remove_selected_color_swatch(&mut self) {
+        let Some(index) = self.selected_color_swatch_index else {
+            return;
+        };
+        let Some(removed) = self.document.remove_color_swatch(index) else {
+            self.selected_color_swatch_index = None;
+            return;
+        };
+        self.selected_color_swatch_index = None;
+        self.sync_selected_color_swatch();
+        self.mark_document_dirty_without_raster_invalidation();
+        self.status_message = format!(
+            "Deleted swatch #{:02X}{:02X}{:02X}",
+            removed[0], removed[1], removed[2]
+        );
+        self.push_history(format!(
+            "Delete Swatch #{:02X}{:02X}{:02X}",
+            removed[0], removed[1], removed[2]
         ));
     }
 
@@ -5480,6 +5566,38 @@ mod tests {
         let recolored = controller.snapshot();
         assert_eq!(recolored.foreground_color, [255, 140, 0, 255]);
         assert_eq!(recolored.background_color, [12, 24, 36, 255]);
+    }
+
+    #[test]
+    fn color_swatch_actions_update_snapshot_and_document() {
+        let mut controller = PhotoTuxController::new();
+        controller.set_foreground_color([17, 34, 51, 255]);
+        let starting_len = controller.snapshot().color_swatches.len();
+
+        controller.add_color_swatch();
+        let added = controller.snapshot();
+        assert_eq!(added.color_swatches.len(), starting_len + 1);
+        let added_index = added
+            .selected_color_swatch
+            .expect("added swatch should be selected");
+        assert_eq!(added.color_swatches[added_index], [17, 34, 51, 255]);
+
+        controller.set_foreground_color([12, 24, 36, 255]);
+        controller.select_color_swatch(added_index);
+        let selected = controller.snapshot();
+        assert_eq!(selected.foreground_color, [17, 34, 51, 255]);
+        assert_eq!(selected.selected_color_swatch, Some(added_index));
+
+        controller.remove_selected_color_swatch();
+        let removed = controller.snapshot();
+        assert_eq!(removed.color_swatches.len(), starting_len);
+        assert_eq!(removed.selected_color_swatch, None);
+        assert!(
+            !controller
+                .document
+                .color_swatches()
+                .contains(&[17, 34, 51, 255])
+        );
     }
 
     #[test]
