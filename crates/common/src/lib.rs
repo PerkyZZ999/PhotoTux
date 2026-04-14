@@ -56,6 +56,14 @@ impl CanvasRect {
             height,
         }
     }
+
+    pub const fn right(self) -> i32 {
+        self.x + self.width as i32
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.y + self.height as i32
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

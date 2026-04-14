@@ -249,12 +249,10 @@ impl SelectionShape {
     pub fn contains_pixel(&self, pixel_x: i32, pixel_y: i32) -> bool {
         match self {
             Self::Rectangular(selection) => {
-                let right = selection.x + selection.width as i32;
-                let bottom = selection.y + selection.height as i32;
                 pixel_x >= selection.x
-                    && pixel_x < right
+                    && pixel_x < selection.right()
                     && pixel_y >= selection.y
-                    && pixel_y < bottom
+                    && pixel_y < selection.bottom()
             }
             Self::Freeform(selection) => selection.contains_pixel(pixel_x, pixel_y),
         }
