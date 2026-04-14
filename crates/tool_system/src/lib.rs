@@ -853,10 +853,8 @@ fn transform_target_bounds(document: &Document, layer_index: usize) -> Option<Ca
     let selection_bounds = selection_shape.bounds();
     let left = source_bounds.x.max(selection_bounds.x);
     let top = source_bounds.y.max(selection_bounds.y);
-    let right = (source_bounds.x + source_bounds.width as i32)
-        .min(selection_bounds.x + selection_bounds.width as i32);
-    let bottom = (source_bounds.y + source_bounds.height as i32)
-        .min(selection_bounds.y + selection_bounds.height as i32);
+    let right = source_bounds.right().min(selection_bounds.right());
+    let bottom = source_bounds.bottom().min(selection_bounds.bottom());
 
     if left >= right || top >= bottom {
         return Some(source_bounds);
