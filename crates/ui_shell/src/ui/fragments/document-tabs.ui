@@ -33,9 +33,8 @@
       </object>
     </child>
     <child>
-      <object class="GtkButton" id="document_tab_add_button">
+      <object class="GtkLabel" id="document_tab_add_placeholder">
         <property name="label">+</property>
-        <property name="sensitive">False</property>
         <property name="tooltip-text">Multiple document tabs are not active yet</property>
         <style>
           <class name="document-tab-add"/>

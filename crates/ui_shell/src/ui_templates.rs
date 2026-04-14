@@ -79,7 +79,7 @@ pub(crate) struct DocumentTabsTemplate {
     pub(crate) root: GtkBox,
     pub(crate) active_tab_button: Button,
     pub(crate) active_tab_label: Label,
-    pub(crate) add_tab_button: Button,
+    pub(crate) add_tab_placeholder: Label,
 }
 
 #[derive(Debug)]
@@ -187,7 +187,7 @@ pub(crate) fn load_document_tabs_template() -> Result<DocumentTabsTemplate> {
         root: b.get("document_tabs_root")?,
         active_tab_button: b.get("document_tab_active_button")?,
         active_tab_label: b.get("document_tab_title")?,
-        add_tab_button: b.get("document_tab_add_button")?,
+        add_tab_placeholder: b.get("document_tab_add_placeholder")?,
     })
 }
 
@@ -222,20 +222,24 @@ pub(crate) fn build_panel_group_shell(
     template.body.set_spacing(body_spacing);
     template.body.set_vexpand(body_vexpand);
 
-    for (index, button) in template.tab_buttons.iter().enumerate() {
-        let active = index == 0 && tabs.get(index).is_some();
-        if let Some(tab) = tabs.get(index) {
-            button.set_label(tab);
-            button.set_visible(true);
-            button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
-        } else {
-            button.set_visible(false);
-        }
+    while let Some(child) = template.header.first_child() {
+        template.header.remove(&child);
+    }
 
-        if active {
-            button.add_css_class("panel-tab-active");
-        } else {
-            button.remove_css_class("panel-tab-active");
+    for (index, button) in template.tab_buttons.iter().enumerate() {
+        if let Some(tab) = tabs.get(index) {
+            if index == 0 {
+                button.set_label(tab);
+                button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+                button.add_css_class("panel-tab-active");
+                template.header.append(button);
+            } else {
+                let placeholder = Label::new(Some(tab));
+                placeholder.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+                placeholder.add_css_class("panel-tab");
+                placeholder.add_css_class("panel-tab-placeholder");
+                template.header.append(&placeholder);
+            }
         }
     }
 
@@ -326,10 +330,11 @@ mod tests {
         assert!(markup.contains("document_tabs_root"));
         assert!(markup.contains("document_tab_active_button"));
         assert!(markup.contains("document_tab_title"));
-        assert!(markup.contains("document_tab_add_button"));
+        assert!(markup.contains("document_tab_add_placeholder"));
         assert!(markup.contains("document-tabs"));
         assert!(markup.contains("document-tab-active"));
         assert!(markup.contains("document-tab-title"));
+        assert!(markup.contains("document-tab-add"));
     }
 
     #[test]
@@ -448,7 +453,7 @@ mod tests {
         let document_tabs =
             load_document_tabs_template().expect("document tabs template should load");
         assert!(document_tabs.root.has_css_class("document-tabs"));
-        assert_eq!(document_tabs.add_tab_button.label().as_deref(), Some("+"));
+        assert_eq!(document_tabs.add_tab_placeholder.label(), "+");
 
         let status_bar = load_status_bar_template().expect("status bar template should load");
         assert!(status_bar.root.has_css_class("status-bar"));

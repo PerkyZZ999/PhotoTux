@@ -545,6 +545,13 @@ struct ShellUiState {
     status_cursor: Label,
     status_notice: Label,
     status_mode: Label,
+    contextual_fit_button: Button,
+    contextual_zoom_out_button: Button,
+    contextual_zoom_in_button: Button,
+    contextual_clear_selection_button: Button,
+    contextual_invert_selection_button: Button,
+    contextual_edit_pixels_button: Button,
+    contextual_edit_mask_button: Button,
     canvas_info_label: Label,
     horizontal_ruler_label: Label,
     vertical_ruler_label: Label,
@@ -585,6 +592,54 @@ impl ShellUiState {
             shell_chrome::build_status_bar();
         let menu_zoom_label = Label::new(Some("100%"));
         menu_zoom_label.add_css_class("menu-zoom-display");
+        let contextual_fit_button =
+            ui_support::build_contextual_icon_label_button("focus-3-line.svg", "Fit View");
+        {
+            let canvas_state = canvas_state.clone();
+            contextual_fit_button.connect_clicked(move |_| canvas_state.borrow_mut().fit_to_view());
+        }
+        let contextual_zoom_out_button =
+            ui_support::build_contextual_icon_label_button("zoom-out-line.svg", "Zoom Out");
+        {
+            let canvas_state = canvas_state.clone();
+            contextual_zoom_out_button
+                .connect_clicked(move |_| canvas_state.borrow_mut().zoom_out());
+        }
+        let contextual_zoom_in_button =
+            ui_support::build_contextual_icon_label_button("zoom-in-line.svg", "Zoom In");
+        {
+            let canvas_state = canvas_state.clone();
+            contextual_zoom_in_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_in());
+        }
+        let contextual_clear_selection_button =
+            ui_support::build_contextual_icon_label_button("close-line.svg", "Clear Selection");
+        {
+            let controller = controller.clone();
+            contextual_clear_selection_button
+                .connect_clicked(move |_| controller.borrow_mut().clear_selection());
+        }
+        let contextual_invert_selection_button =
+            ui_support::build_contextual_icon_label_button("swap-line.svg", "Invert Selection");
+        {
+            let controller = controller.clone();
+            contextual_invert_selection_button
+                .connect_clicked(move |_| controller.borrow_mut().invert_selection());
+        }
+        let contextual_edit_pixels_button =
+            ui_support::build_contextual_icon_label_button("edit-line.svg", "Layer Pixels");
+        contextual_edit_pixels_button.add_css_class("contextual-task-button-primary");
+        {
+            let controller = controller.clone();
+            contextual_edit_pixels_button
+                .connect_clicked(move |_| controller.borrow_mut().edit_active_layer_pixels());
+        }
+        let contextual_edit_mask_button =
+            ui_support::build_contextual_icon_label_button("layout-column-line.svg", "Layer Mask");
+        {
+            let controller = controller.clone();
+            contextual_edit_mask_button
+                .connect_clicked(move |_| controller.borrow_mut().edit_active_layer_mask());
+        }
         let canvas_info_label = Label::new(Some("untitled.ptx @ 100% (RGB/8)"));
         canvas_info_label.add_css_class("canvas-info");
         let horizontal_ruler_label = Label::new(Some(""));
@@ -637,6 +692,13 @@ impl ShellUiState {
             status_cursor,
             status_notice,
             status_mode,
+            contextual_fit_button,
+            contextual_zoom_out_button,
+            contextual_zoom_in_button,
+            contextual_clear_selection_button,
+            contextual_invert_selection_button,
+            contextual_edit_pixels_button,
+            contextual_edit_mask_button,
             canvas_info_label,
             horizontal_ruler_label,
             vertical_ruler_label,
@@ -1435,6 +1497,25 @@ impl ShellUiState {
         self.refresh_properties_panel(snapshot);
         self.refresh_layers_panel(snapshot);
         self.refresh_history_panel(snapshot);
+        self.refresh_contextual_task_bar(snapshot);
+    }
+
+    fn refresh_contextual_task_bar(&self, snapshot: &ShellSnapshot) {
+        let has_selection = snapshot.selection_rect.is_some();
+        let can_edit_pixels = !snapshot.text.selected;
+        let can_edit_mask = !snapshot.text.selected && snapshot.active_layer_has_mask;
+
+        self.contextual_fit_button.set_sensitive(true);
+        self.contextual_zoom_out_button.set_sensitive(true);
+        self.contextual_zoom_in_button.set_sensitive(true);
+        self.contextual_clear_selection_button
+            .set_sensitive(has_selection);
+        self.contextual_invert_selection_button
+            .set_sensitive(has_selection);
+        self.contextual_edit_pixels_button
+            .set_sensitive(can_edit_pixels);
+        self.contextual_edit_mask_button
+            .set_sensitive(can_edit_mask);
     }
 
     fn current_refresh_snapshot(&self) -> ShellSnapshot {
@@ -1661,7 +1742,6 @@ const THEME_CSS: &str = r#"
 .menu-button,
 .tool-chip,
 .tool-button,
-.document-tab-add,
 .panel-tab,
 .dock-icon-button,
 .color-chip {
@@ -1688,7 +1768,6 @@ const THEME_CSS: &str = r#"
 .tool-chip:hover,
 .tool-button:hover,
 .panel-tab:hover,
-.document-tab-add:hover,
 .dock-icon-button:hover {
     background: #383838;
     border: 1px solid #4a4a4a;
@@ -1702,6 +1781,21 @@ const THEME_CSS: &str = r#"
 
 .tool-chip:hover {
     color: #e0e0e0;
+}
+
+.tool-chip:disabled,
+.tool-chip-icon-only:disabled {
+    background: transparent;
+    border-color: transparent;
+    color: #6f7680;
+    opacity: 1;
+}
+
+.tool-chip:disabled .icon-label-text,
+.tool-chip:disabled image,
+.tool-chip-icon-only:disabled image {
+    color: #6f7680;
+    opacity: 0.55;
 }
 
 .workspace-chip {
@@ -1977,9 +2071,9 @@ menubutton.menu-button > button.toggle:focus-visible {
     padding: 10px 16px 16px 16px;
 }
 
-.document-tab-add:disabled {
+.document-tab-add {
     color: #5a5a5a;
-    opacity: 1;
+    padding: 2px 6px;
 }
 
 .ruler-corner,
@@ -2037,6 +2131,13 @@ menubutton.menu-button > button.toggle:focus-visible {
 .contextual-task-button:hover {
     background: #4a4a4a;
     border-color: #555555;
+}
+
+.contextual-task-button:disabled,
+.contextual-task-button-primary:disabled {
+    background: #2b2b2b;
+    color: #6f7680;
+    border-color: #353535;
 }
 
 .contextual-task-button-primary {
@@ -2145,6 +2246,10 @@ menubutton.menu-button > button.toggle:focus-visible {
     font-weight: 600;
     border-radius: 0;
     margin-bottom: 0;
+}
+
+.panel-tab-placeholder {
+    color: #66707c;
 }
 
 .panel-group-body {
@@ -2293,12 +2398,34 @@ popover.menu-dropdown contents {
     color: #999999;
 }
 
+.menu-dropdown-item .icon-label-text,
+.menu-dropdown-item image {
+    color: #d7d7d7;
+    opacity: 1;
+}
+
+.menu-dropdown-item .icon-label-shortcut {
+    color: #8d8d8d;
+}
+
 .menu-dropdown-item:hover {
     background: #3b8beb;
     color: #ffffff;
 }
 
+.menu-dropdown-item:hover .icon-label-text,
+.menu-dropdown-item:hover .icon-label-shortcut,
+.menu-dropdown-item:hover image {
+    color: #ffffff;
+}
+
 .menu-dropdown-item:disabled {
+    color: #666666;
+}
+
+.menu-dropdown-item:disabled .icon-label-text,
+.menu-dropdown-item:disabled .icon-label-shortcut,
+.menu-dropdown-item:disabled image {
     color: #666666;
 }
 

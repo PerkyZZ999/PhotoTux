@@ -173,7 +173,7 @@ pub(super) fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
     match tool {
         ShellToolKind::Move => "drag-move-line.svg",
         ShellToolKind::RectangularMarquee => "focus-3-line.svg",
-        ShellToolKind::Lasso => "focus-3-line.svg",
+        ShellToolKind::Lasso => "edit-line.svg",
         ShellToolKind::Transform => "expand-diagonal-2-line.svg",
         ShellToolKind::Text => "layout-column-line.svg",
         ShellToolKind::Brush => "brush-2-line.svg",

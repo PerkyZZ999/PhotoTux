@@ -262,7 +262,7 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let toggle_mask = append_icon_menu_item(
         &menu,
         &popover,
-        "contrast-2-line.svg",
+        "eye-line.svg",
         "Enable or Disable Layer Mask",
         {
             let controller = shell_state.controller.clone();
@@ -335,27 +335,15 @@ fn build_layer_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let (button, popover, menu) = build_top_level_menu("Select");
 
-    let clear = append_icon_menu_item(
-        &menu,
-        &popover,
-        "close-circle-line.svg",
-        "Clear Selection",
-        {
-            let controller = shell_state.controller.clone();
-            move || controller.borrow_mut().clear_selection()
-        },
-    );
+    let clear = append_icon_menu_item(&menu, &popover, "close-line.svg", "Clear Selection", {
+        let controller = shell_state.controller.clone();
+        move || controller.borrow_mut().clear_selection()
+    });
 
-    let invert = append_icon_menu_item(
-        &menu,
-        &popover,
-        "contrast-2-line.svg",
-        "Invert Selection",
-        {
-            let controller = shell_state.controller.clone();
-            move || controller.borrow_mut().invert_selection()
-        },
-    );
+    let invert = append_icon_menu_item(&menu, &popover, "swap-line.svg", "Invert Selection", {
+        let controller = shell_state.controller.clone();
+        move || controller.borrow_mut().invert_selection()
+    });
 
     {
         let shell_state = shell_state.clone();
@@ -379,21 +367,16 @@ fn build_select_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let (button, popover, menu) = build_top_level_menu("Filter");
 
-    let opacity_up = append_icon_menu_item(
-        &menu,
-        &popover,
-        "add-circle-line.svg",
-        "Increase Layer Opacity",
-        {
+    let opacity_up =
+        append_icon_menu_item(&menu, &popover, "add-line.svg", "Increase Layer Opacity", {
             let controller = shell_state.controller.clone();
             move || controller.borrow_mut().increase_active_layer_opacity()
-        },
-    );
+        });
 
     let opacity_down = append_icon_menu_item(
         &menu,
         &popover,
-        "indeterminate-circle-line.svg",
+        "subtract-line.svg",
         "Decrease Layer Opacity",
         {
             let controller = shell_state.controller.clone();
@@ -404,7 +387,7 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let next_blend = append_icon_menu_item(
         &menu,
         &popover,
-        "arrow-right-s-line.svg",
+        "arrow-go-forward-line.svg",
         "Next Blend Mode",
         {
             let controller = shell_state.controller.clone();
@@ -415,7 +398,7 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let previous_blend = append_icon_menu_item(
         &menu,
         &popover,
-        "arrow-left-s-line.svg",
+        "arrow-go-back-line.svg",
         "Previous Blend Mode",
         {
             let controller = shell_state.controller.clone();
@@ -435,15 +418,14 @@ fn build_filter_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             }
         });
 
-    let desaturate =
-        append_icon_menu_item(&menu, &popover, "contrast-drop-2-line.svg", "Desaturate", {
-            let controller = shell_state.controller.clone();
-            move || {
-                controller
-                    .borrow_mut()
-                    .apply_destructive_filter(DestructiveFilterKind::Desaturate)
-            }
-        });
+    let desaturate = append_icon_menu_item(&menu, &popover, "palette-line.svg", "Desaturate", {
+        let controller = shell_state.controller.clone();
+        move || {
+            controller
+                .borrow_mut()
+                .apply_destructive_filter(DestructiveFilterKind::Desaturate)
+        }
+    });
 
     {
         let shell_state = shell_state.clone();
@@ -499,7 +481,7 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     append_icon_shortcut_menu_item(
         &menu,
         &popover,
-        "fullscreen-line.svg",
+        "focus-3-line.svg",
         "Fit To View",
         Some("Ctrl+0"),
         {
@@ -625,7 +607,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let properties_toggle = append_icon_menu_item(
         &menu,
         &popover,
-        "equalizer-line.svg",
+        "settings-4-line.svg",
         "Toggle Properties Panel",
         {
             let panel = shell_state.properties_group.clone();
@@ -658,7 +640,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
     let show_all = append_icon_menu_item(
         &menu,
         &popover,
-        "layout-grid-line.svg",
+        "layout-column-line.svg",
         "Show All Panels",
         {
             let color_group = shell_state.color_group.clone();
@@ -734,27 +716,21 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
 fn build_help_menu_button(window: &ApplicationWindow) -> MenuButton {
     let (button, popover, menu) = build_top_level_menu("Help");
 
-    append_icon_menu_item(
-        &menu,
-        &popover,
-        "keyboard-line.svg",
-        "Keyboard Shortcuts",
-        {
-            let parent = window.clone();
-            move || {
-                file_workflow::show_info_dialog(
-                    &parent,
-                    "Keyboard Shortcuts",
-                    "Core keyboard shortcuts",
-                    Some(
-                        "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nI Text Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform Or Text\nEsc Cancel Transform, Text, Or Clear Selection",
-                    ),
-                );
-            }
-        },
-    );
+    append_icon_menu_item(&menu, &popover, "text.svg", "Keyboard Shortcuts", {
+        let parent = window.clone();
+        move || {
+            file_workflow::show_info_dialog(
+                &parent,
+                "Keyboard Shortcuts",
+                "Core keyboard shortcuts",
+                Some(
+                    "Ctrl+O Open Project\nCtrl+S Save\nCtrl+Shift+S Save As\nCtrl+Z Undo\nCtrl+Shift+Z or Ctrl+Y Redo\nCtrl+D Clear Selection\nCtrl+I Invert Selection\nCtrl++ Zoom In\nCtrl+- Zoom Out\nCtrl+0 Fit To View\nV Move Tool\nM Marquee Tool\nI Text Tool\nT Transform Tool\nB Brush Tool\nE Eraser Tool\nH Hand Tool\nZ Zoom Tool\nEnter Commit Transform Or Text\nEsc Cancel Transform, Text, Or Clear Selection",
+                ),
+            );
+        }
+    });
 
-    append_icon_menu_item(&menu, &popover, "information-line.svg", "About PhotoTux", {
+    append_icon_menu_item(&menu, &popover, "node-tree.svg", "About PhotoTux", {
         let parent = window.clone();
         move || {
             file_workflow::show_info_dialog(

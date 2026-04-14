@@ -1,5 +1,4 @@
 use super::*;
-use crate::ui_support::build_contextual_icon_label_button;
 use crate::ui_templates::{DocumentTabsTemplate, StatusBarTemplate};
 
 #[derive(Clone, Copy)]
@@ -22,7 +21,7 @@ const TOOL_RAIL_BUTTON_SPECS: [ToolRailButtonSpec; 9] = [
     },
     ToolRailButtonSpec {
         tool: ShellToolKind::Lasso,
-        icon_name: "focus-3-line.svg",
+        icon_name: "edit-line.svg",
         separator_before: false,
     },
     ToolRailButtonSpec {
@@ -270,13 +269,19 @@ pub(super) fn build_panel_group(
             header.set_widget_name(&format!("{shell_name}-panel-header"));
             header.add_css_class("panel-group-header");
             for (index, tab) in tabs.iter().enumerate() {
-                let button = Button::with_label(tab);
-                button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
-                button.add_css_class("panel-tab");
                 if index == 0 {
+                    let button = Button::with_label(tab);
+                    button.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+                    button.add_css_class("panel-tab");
                     button.add_css_class("panel-tab-active");
+                    header.append(&button);
+                } else {
+                    let label = Label::new(Some(tab));
+                    label.set_widget_name(&format!("{shell_name}-panel-tab-{}", index + 1));
+                    label.add_css_class("panel-tab");
+                    label.add_css_class("panel-tab-placeholder");
+                    header.append(&label);
                 }
-                header.append(&button);
             }
 
             let body = GtkBox::new(Orientation::Vertical, body_spacing);
@@ -307,9 +312,8 @@ fn build_document_tabs_fallback() -> (GtkBox, Label) {
     active_tab.set_child(Some(&tab_content));
     tabs.append(&active_tab);
 
-    let plus_tab = Button::with_label("+");
+    let plus_tab = Label::new(Some("+"));
     plus_tab.add_css_class("document-tab-add");
-    plus_tab.set_sensitive(false);
     plus_tab.set_tooltip_text(Some("Multiple document tabs are not active yet"));
     tabs.append(&plus_tab);
 
@@ -318,9 +322,8 @@ fn build_document_tabs_fallback() -> (GtkBox, Label) {
 
 fn build_document_tabs_from_template(template: DocumentTabsTemplate) -> (GtkBox, Label) {
     template.active_tab_button.set_can_focus(false);
-    template.add_tab_button.set_sensitive(false);
     template
-        .add_tab_button
+        .add_tab_placeholder
         .set_tooltip_text(Some("Multiple document tabs are not active yet"));
     (template.root, template.active_tab_label)
 }
@@ -371,59 +374,18 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     task_bar.set_valign(Align::End);
     task_bar.set_margin_bottom(16);
 
-    let fit_button = build_contextual_icon_label_button("focus-3-line.svg", "Fit View");
-    {
-        let canvas_state = shell_state.canvas_state.clone();
-        fit_button.connect_clicked(move |_| canvas_state.borrow_mut().fit_to_view());
-    }
-    task_bar.append(&fit_button);
-
-    let zoom_out_button = build_contextual_icon_label_button("zoom-out-line.svg", "Zoom Out");
-    {
-        let canvas_state = shell_state.canvas_state.clone();
-        zoom_out_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_out());
-    }
-    task_bar.append(&zoom_out_button);
-
-    let zoom_in_button = build_contextual_icon_label_button("zoom-in-line.svg", "Zoom In");
-    {
-        let canvas_state = shell_state.canvas_state.clone();
-        zoom_in_button.connect_clicked(move |_| canvas_state.borrow_mut().zoom_in());
-    }
-    task_bar.append(&zoom_in_button);
+    task_bar.append(&shell_state.contextual_fit_button);
+    task_bar.append(&shell_state.contextual_zoom_out_button);
+    task_bar.append(&shell_state.contextual_zoom_in_button);
 
     let separator = Separator::new(Orientation::Vertical);
     separator.add_css_class("contextual-task-separator");
     task_bar.append(&separator);
 
-    let clear_selection = build_contextual_icon_label_button("close-line.svg", "Clear Selection");
-    {
-        let controller = shell_state.controller.clone();
-        clear_selection.connect_clicked(move |_| controller.borrow_mut().clear_selection());
-    }
-    task_bar.append(&clear_selection);
-
-    let invert_selection = build_contextual_icon_label_button("swap-line.svg", "Invert Selection");
-    {
-        let controller = shell_state.controller.clone();
-        invert_selection.connect_clicked(move |_| controller.borrow_mut().invert_selection());
-    }
-    task_bar.append(&invert_selection);
-
-    let edit_pixels = build_contextual_icon_label_button("edit-line.svg", "Layer Pixels");
-    edit_pixels.add_css_class("contextual-task-button-primary");
-    {
-        let controller = shell_state.controller.clone();
-        edit_pixels.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_pixels());
-    }
-    task_bar.append(&edit_pixels);
-
-    let edit_mask = build_contextual_icon_label_button("layout-column-line.svg", "Layer Mask");
-    {
-        let controller = shell_state.controller.clone();
-        edit_mask.connect_clicked(move |_| controller.borrow_mut().edit_active_layer_mask());
-    }
-    task_bar.append(&edit_mask);
+    task_bar.append(&shell_state.contextual_clear_selection_button);
+    task_bar.append(&shell_state.contextual_invert_selection_button);
+    task_bar.append(&shell_state.contextual_edit_pixels_button);
+    task_bar.append(&shell_state.contextual_edit_mask_button);
 
     canvas_overlay.add_overlay(&task_bar);
     canvas_frame.append(&canvas_overlay);
