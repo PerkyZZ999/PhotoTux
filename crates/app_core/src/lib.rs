@@ -1378,10 +1378,8 @@ impl PhotoTuxController {
             let layer_bounds = self.active_raster_layer_bounds()?;
             let left = layer_bounds.x.max(selection_bounds.x);
             let top = layer_bounds.y.max(selection_bounds.y);
-            let right = (layer_bounds.x + layer_bounds.width as i32)
-                .min(selection_bounds.x + selection_bounds.width as i32);
-            let bottom = (layer_bounds.y + layer_bounds.height as i32)
-                .min(selection_bounds.y + selection_bounds.height as i32);
+            let right = layer_bounds.right().min(selection_bounds.right());
+            let bottom = layer_bounds.bottom().min(selection_bounds.bottom());
             if left < right && top < bottom {
                 return Some(CanvasRect::new(
                     left,
@@ -1433,8 +1431,8 @@ impl PhotoTuxController {
         let mut snapped_y = translate_y;
         let mut best_x_distance = GUIDE_SNAP_THRESHOLD + 1;
         let mut best_y_distance = GUIDE_SNAP_THRESHOLD + 1;
-        let right = moved.x + moved.width as i32;
-        let bottom = moved.y + moved.height as i32;
+        let right = moved.right();
+        let bottom = moved.bottom();
 
         for guide in self.document.guides() {
             match guide.orientation {
