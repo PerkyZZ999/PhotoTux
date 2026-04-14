@@ -1027,8 +1027,8 @@ fn clear_selected_pixels(
 fn union_rect(left: CanvasRect, right: CanvasRect) -> CanvasRect {
     let min_x = left.x.min(right.x);
     let min_y = left.y.min(right.y);
-    let max_x = (left.x + left.width as i32).max(right.x + right.width as i32);
-    let max_y = (left.y + left.height as i32).max(right.y + right.height as i32);
+    let max_x = left.right().max(right.right());
+    let max_y = left.bottom().max(right.bottom());
     CanvasRect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32)
 }
 
