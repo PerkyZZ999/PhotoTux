@@ -336,10 +336,10 @@ fn pixel_is_within_clip(
         return true;
     };
 
-    let right = clip_rect.x + clip_rect.width as i32;
-    let bottom = clip_rect.y + clip_rect.height as i32;
-    let inside =
-        pixel_x >= clip_rect.x && pixel_x < right && pixel_y >= clip_rect.y && pixel_y < bottom;
+    let inside = pixel_x >= clip_rect.x
+        && pixel_x < clip_rect.right()
+        && pixel_y >= clip_rect.y
+        && pixel_y < clip_rect.bottom();
     inside != clip_inverted
 }
 
