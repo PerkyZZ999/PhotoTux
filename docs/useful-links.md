@@ -33,3 +33,7 @@ https://docs.rs/gtk4-macros/latest/gtk4_macros/derive.CompositeTemplate.html
 https://docs.gtk.org/gtk4/css-properties.html
 https://developer.gnome.org/hig/
 https://gnome.pages.gitlab.gnome.org/blueprint-compiler/reference/templates.html
+
+# Photoshop UI Documentations
+**Left-side Toolbar** : https://www.photoshopessentials.com/basics/photoshop-tools-toolbar-overview/
+**Top Option Bar** : `docs/OptionBar.md`

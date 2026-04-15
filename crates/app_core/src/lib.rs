@@ -7,11 +7,11 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::{CanvasRaster, CanvasRect, DestructiveFilterKind};
+use common::{CanvasRaster, CanvasRect, CanvasSize, DestructiveFilterKind, DocumentId};
 use doc_model::{
-    BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerHierarchyNode,
-    LayerHierarchyNodeRef, LayerStateSnapshot, RasterMask, SelectionShape, TextAlignment,
-    TextLayer, TextStyle, TextTransform,
+    BlendMode, Document, Guide, GuideOrientation, LayerEditTarget, LayerGroup, LayerHierarchyNode,
+    LayerHierarchyNodeRef, LayerStateSnapshot, RasterLayer, RasterMask, SelectionShape,
+    TextAlignment, TextLayer, TextStyle, TextTransform, default_document_color_swatches,
 };
 use file_io::{
     PROJECT_FILE_EXTENSION, PsdImportDiagnostic, PsdImportDiagnosticSeverity, PsdImportResult,
@@ -28,8 +28,9 @@ use tool_system::{
     SimpleTransformTool,
 };
 use ui_shell::{
-    LayerPanelItem, ShellAlert, ShellAlertTone, ShellController, ShellGuide, ShellImportDiagnostic,
-    ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
+    LayerPanelItem, LayerPanelPreview, ShellAlert, ShellAlertTone, ShellController, ShellGuide,
+    ShellImportDiagnostic, ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot,
+    ShellToolKind,
 };
 
 pub fn build_shell_controller() -> Rc<RefCell<dyn ShellController>> {
@@ -40,6 +41,7 @@ const AUTOSAVE_IDLE_INTERVAL: Duration = Duration::from_secs(2);
 const GUIDE_SNAP_THRESHOLD: i32 = 8;
 const PSD_IMPORT_SIDECAR_PATH_ENV: &str = "PHOTOTUX_PSD_IMPORT_SIDECAR";
 const PSD_IMPORT_SIDECAR_ARGS_ENV: &str = "PHOTOTUX_PSD_IMPORT_SIDECAR_ARGS";
+const LAYER_PANEL_PREVIEW_SIZE: u32 = 28;
 
 #[derive(Debug)]
 struct PhotoTuxController {
@@ -1670,6 +1672,243 @@ impl PhotoTuxController {
             .and_then(|group| self.visual_bounds_for_hierarchy_children(&group.children))
     }
 
+    fn collect_layer_ids_from_nodes(
+        nodes: &[LayerHierarchyNode],
+        raster_ids: &mut Vec<common::LayerId>,
+        text_ids: &mut Vec<common::LayerId>,
+    ) {
+        for node in nodes {
+            match node {
+                LayerHierarchyNode::Layer(layer_id) => {
+                    raster_ids.push(*layer_id);
+                    text_ids.push(*layer_id);
+                }
+                LayerHierarchyNode::Group(group) => {
+                    Self::collect_layer_ids_from_nodes(&group.children, raster_ids, text_ids);
+                }
+            }
+        }
+    }
+
+    fn layer_panel_preview_document_for_layer(
+        &self,
+        layer_id: common::LayerId,
+    ) -> Option<Document> {
+        if let Some(layer_index) = self.document.layer_index_by_id(layer_id) {
+            let bounds = self.document.layer_canvas_bounds(layer_index)?;
+            let mut layer = self.document.layer(layer_index)?.clone();
+            layer.visible = true;
+            layer.opacity_percent = 100;
+            layer.offset_x -= bounds.x;
+            layer.offset_y -= bounds.y;
+            return Some(Document {
+                id: DocumentId::new(),
+                canvas_size: CanvasSize::new(bounds.width.max(1), bounds.height.max(1)),
+                layers: vec![layer.clone()],
+                text_layers: Vec::new(),
+                layer_hierarchy: vec![LayerHierarchyNode::Layer(layer.id)],
+                active_layer_index: 0,
+                active_edit_target: LayerEditTarget::LayerPixels,
+                tile_size: self.document.tile_size,
+                selection: None,
+                selection_inverted: false,
+                guides: Vec::new(),
+                guides_visible: false,
+                color_swatches: default_document_color_swatches(),
+            });
+        }
+
+        let text_layer = self.document.text_layer_by_id(layer_id)?.clone();
+        let bounds = text_layer_bounds(&text_layer)?;
+        let mut text_layer = text_layer;
+        text_layer.visible = true;
+        text_layer.opacity_percent = 100;
+        text_layer.transform.origin_x -= bounds.x;
+        text_layer.transform.origin_y -= bounds.y;
+        Some(Document {
+            id: DocumentId::new(),
+            canvas_size: CanvasSize::new(bounds.width.max(1), bounds.height.max(1)),
+            layers: Vec::new(),
+            text_layers: vec![text_layer.clone()],
+            layer_hierarchy: vec![LayerHierarchyNode::Layer(text_layer.id)],
+            active_layer_index: 0,
+            active_edit_target: LayerEditTarget::LayerPixels,
+            tile_size: self.document.tile_size,
+            selection: None,
+            selection_inverted: false,
+            guides: Vec::new(),
+            guides_visible: false,
+            color_swatches: default_document_color_swatches(),
+        })
+    }
+
+    fn rebase_group_children(
+        nodes: &[LayerHierarchyNode],
+        raster_layers: &mut [RasterLayer],
+        text_layers: &mut [TextLayer],
+        bounds: CanvasRect,
+    ) -> Vec<LayerHierarchyNode> {
+        nodes
+            .iter()
+            .map(|node| match node {
+                LayerHierarchyNode::Layer(layer_id) => {
+                    if let Some(layer) =
+                        raster_layers.iter_mut().find(|layer| layer.id == *layer_id)
+                    {
+                        layer.visible = true;
+                        layer.opacity_percent = 100;
+                        layer.offset_x -= bounds.x;
+                        layer.offset_y -= bounds.y;
+                    }
+                    if let Some(text_layer) = text_layers
+                        .iter_mut()
+                        .find(|text_layer| text_layer.id == *layer_id)
+                    {
+                        text_layer.visible = true;
+                        text_layer.opacity_percent = 100;
+                        text_layer.transform.origin_x -= bounds.x;
+                        text_layer.transform.origin_y -= bounds.y;
+                    }
+                    LayerHierarchyNode::Layer(*layer_id)
+                }
+                LayerHierarchyNode::Group(group) => LayerHierarchyNode::Group(LayerGroup {
+                    id: group.id,
+                    name: group.name.clone(),
+                    visible: true,
+                    opacity_percent: 100,
+                    children: Self::rebase_group_children(
+                        &group.children,
+                        raster_layers,
+                        text_layers,
+                        bounds,
+                    ),
+                }),
+            })
+            .collect()
+    }
+
+    fn layer_panel_preview_document_for_group(&self, group: &LayerGroup) -> Option<Document> {
+        let bounds = self.visual_bounds_for_hierarchy_children(&group.children)?;
+        let mut raster_ids = Vec::new();
+        let mut text_ids = Vec::new();
+        Self::collect_layer_ids_from_nodes(&group.children, &mut raster_ids, &mut text_ids);
+
+        let mut layers = self
+            .document
+            .layers
+            .iter()
+            .filter(|layer| raster_ids.contains(&layer.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut text_layers = self
+            .document
+            .text_layers
+            .iter()
+            .filter(|layer| text_ids.contains(&layer.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let group = LayerGroup {
+            id: group.id,
+            name: group.name.clone(),
+            visible: true,
+            opacity_percent: 100,
+            children: Self::rebase_group_children(
+                &group.children,
+                &mut layers,
+                &mut text_layers,
+                bounds,
+            ),
+        };
+
+        Some(Document {
+            id: DocumentId::new(),
+            canvas_size: CanvasSize::new(bounds.width.max(1), bounds.height.max(1)),
+            layers,
+            text_layers,
+            layer_hierarchy: vec![LayerHierarchyNode::Group(group)],
+            active_layer_index: 0,
+            active_edit_target: LayerEditTarget::LayerPixels,
+            tile_size: self.document.tile_size,
+            selection: None,
+            selection_inverted: false,
+            guides: Vec::new(),
+            guides_visible: false,
+            color_swatches: default_document_color_swatches(),
+        })
+    }
+
+    fn scale_raster_to_layer_preview(
+        pixels: &[u8],
+        source_width: u32,
+        source_height: u32,
+    ) -> LayerPanelPreview {
+        let mut output =
+            vec![0_u8; (LAYER_PANEL_PREVIEW_SIZE * LAYER_PANEL_PREVIEW_SIZE * 4) as usize];
+        if source_width == 0 || source_height == 0 || pixels.is_empty() {
+            return LayerPanelPreview {
+                width: LAYER_PANEL_PREVIEW_SIZE,
+                height: LAYER_PANEL_PREVIEW_SIZE,
+                pixels: output,
+            };
+        }
+
+        let scale = (LAYER_PANEL_PREVIEW_SIZE as f32 / source_width as f32)
+            .min(LAYER_PANEL_PREVIEW_SIZE as f32 / source_height as f32);
+        let target_width =
+            ((source_width as f32 * scale).round() as u32).clamp(1, LAYER_PANEL_PREVIEW_SIZE);
+        let target_height =
+            ((source_height as f32 * scale).round() as u32).clamp(1, LAYER_PANEL_PREVIEW_SIZE);
+        let offset_x = ((LAYER_PANEL_PREVIEW_SIZE - target_width) / 2) as usize;
+        let offset_y = ((LAYER_PANEL_PREVIEW_SIZE - target_height) / 2) as usize;
+
+        for target_y in 0..target_height {
+            for target_x in 0..target_width {
+                let source_x = ((target_x as f32 + 0.5) * source_width as f32 / target_width as f32)
+                    .floor()
+                    .clamp(0.0, source_width.saturating_sub(1) as f32)
+                    as u32;
+                let source_y = ((target_y as f32 + 0.5) * source_height as f32
+                    / target_height as f32)
+                    .floor()
+                    .clamp(0.0, source_height.saturating_sub(1) as f32)
+                    as u32;
+                let source_index = ((source_y * source_width + source_x) * 4) as usize;
+                let dest_x = offset_x + target_x as usize;
+                let dest_y = offset_y + target_y as usize;
+                let dest_index = (dest_y * LAYER_PANEL_PREVIEW_SIZE as usize + dest_x) * 4;
+                output[dest_index..dest_index + 4]
+                    .copy_from_slice(&pixels[source_index..source_index + 4]);
+            }
+        }
+
+        LayerPanelPreview {
+            width: LAYER_PANEL_PREVIEW_SIZE,
+            height: LAYER_PANEL_PREVIEW_SIZE,
+            pixels: output,
+        }
+    }
+
+    fn layer_panel_preview_for_layer(
+        &self,
+        layer_id: common::LayerId,
+    ) -> Option<LayerPanelPreview> {
+        let preview_document = self.layer_panel_preview_document_for_layer(layer_id)?;
+        Some(Self::scale_raster_to_layer_preview(
+            &flatten_document_rgba(&preview_document),
+            preview_document.canvas_size.width,
+            preview_document.canvas_size.height,
+        ))
+    }
+
+    fn layer_panel_preview_for_group(&self, group: &LayerGroup) -> Option<LayerPanelPreview> {
+        let preview_document = self.layer_panel_preview_document_for_group(group)?;
+        Some(Self::scale_raster_to_layer_preview(
+            &flatten_document_rgba(&preview_document),
+            preview_document.canvas_size.width,
+            preview_document.canvas_size.height,
+        ))
+    }
+
     fn visual_bounds_for_layer_state_snapshot(
         snapshot: &LayerStateSnapshot,
         tile_size: u32,
@@ -2015,6 +2254,7 @@ impl PhotoTuxController {
                             is_selected: self.selected_structure_target
                                 == LayerHierarchyNodeRef::Layer(*layer_id),
                             is_active: layer_index == self.document.active_layer_index(),
+                            preview: self.layer_panel_preview_for_layer(*layer_id),
                         });
                         continue;
                     }
@@ -2038,6 +2278,7 @@ impl PhotoTuxController {
                         is_selected: self.selected_structure_target
                             == LayerHierarchyNodeRef::Layer(*layer_id),
                         is_active: self.selected_text_layer_id() == Some(*layer_id),
+                        preview: self.layer_panel_preview_for_layer(*layer_id),
                     });
                 }
                 LayerHierarchyNode::Group(group) => {
@@ -2057,6 +2298,7 @@ impl PhotoTuxController {
                         is_selected: self.selected_structure_target
                             == LayerHierarchyNodeRef::Group(group.id),
                         is_active: false,
+                        preview: self.layer_panel_preview_for_group(group),
                     });
                     self.collect_layer_items(&group.children, depth + 1, output);
                 }
@@ -5412,6 +5654,23 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("Duplicate Layer"))
         );
+        assert!(snapshot.layers.iter().any(|layer| layer.preview.is_some()));
+    }
+
+    #[test]
+    fn hidden_layers_keep_preview_thumbnails_in_snapshot() {
+        let mut controller = PhotoTuxController::new();
+        let layer_id = controller.active_layer_id();
+        controller.toggle_layer_visibility(layer_id);
+
+        let layer = controller
+            .snapshot()
+            .layers
+            .into_iter()
+            .find(|layer| layer.layer_id == Some(layer_id))
+            .expect("active layer should still be visible in layer list");
+        assert!(!layer.visible);
+        assert!(layer.preview.is_some());
     }
 
     #[test]

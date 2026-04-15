@@ -7,9 +7,9 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
     CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, GestureDrag, GestureStylus, HeaderBar, IconTheme,
-    Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, PolicyType,
-    Popover, ResponseType, ScrolledWindow, Separator, SpinButton, gdk,
+    EventControllerScrollFlags, GestureClick, GestureDrag, GestureLongPress, GestureStylus,
+    HeaderBar, IconTheme, Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned,
+    Picture, PolicyType, Popover, ResponseType, ScrolledWindow, Separator, SpinButton, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -60,6 +60,13 @@ const STARTUP_WARMUP_HEIGHT: u32 = 720;
 type StartupWindowHook = Box<dyn FnOnce(&ApplicationWindow)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerPanelPreview {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
     pub layer_id: Option<LayerId>,
     pub index: Option<usize>,
@@ -75,6 +82,7 @@ pub struct LayerPanelItem {
     pub mask_target_active: bool,
     pub is_selected: bool,
     pub is_active: bool,
+    pub preview: Option<LayerPanelPreview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,11 +540,10 @@ struct ShellUiState {
     tool_options_bar: GtkBox,
     tool_options_icon: Image,
     tool_options_label: Label,
-    tool_option_keys: [Label; 6],
-    tool_option_values: [Label; 6],
+    tool_options_content: GtkBox,
     canvas_picture: Picture,
     tool_rail: GtkBox,
-    tool_buttons: Vec<(ShellToolKind, Button)>,
+    tool_slot_buttons: Vec<shell_chrome::ToolRailSlotButton>,
     document_tabs: GtkBox,
     document_tab_label: Label,
     layers_group: GtkBox,
@@ -605,14 +612,9 @@ pub(crate) enum ContextDockPanel {
 
 impl ShellUiState {
     fn new(controller: Rc<RefCell<dyn ShellController>>) -> Rc<Self> {
-        let (
-            tool_options_bar,
-            tool_options_icon,
-            tool_options_label,
-            tool_option_keys,
-            tool_option_values,
-        ) = shell_chrome::build_tool_options_bar(controller.clone());
-        let (tool_rail, tool_buttons) = shell_chrome::build_left_tool_rail(controller.clone());
+        let (tool_options_bar, tool_options_icon, tool_options_label, tool_options_content) =
+            shell_chrome::build_tool_options_bar(controller.clone());
+        let (tool_rail, tool_slot_buttons) = shell_chrome::build_left_tool_rail(controller.clone());
         let (document_tabs, document_tab_label) = shell_chrome::build_document_tabs();
         let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
         let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
@@ -725,11 +727,10 @@ impl ShellUiState {
             tool_options_bar,
             tool_options_icon,
             tool_options_label,
-            tool_option_keys,
-            tool_option_values,
+            tool_options_content,
             canvas_picture,
             tool_rail,
-            tool_buttons,
+            tool_slot_buttons,
             document_tabs,
             document_tab_label,
             layers_group,
@@ -776,6 +777,8 @@ impl ShellUiState {
         });
 
         shell_state.connect_sidebar_tabs();
+        let initial_snapshot = shell_state.controller.borrow().snapshot();
+        shell_chrome::refresh_tool_options_bar(&shell_state, &initial_snapshot);
         shell_state
     }
 
@@ -1098,20 +1101,6 @@ impl ShellUiState {
         };
         self.controller.borrow_mut().select_tool(tool);
         true
-    }
-
-    fn update_tool_option_labels(&self, snapshot: &ShellSnapshot) {
-        for ((key, value), (key_label, value_label)) in
-            shell_chrome::tool_option_groups(snapshot).into_iter().zip(
-                self.tool_option_keys
-                    .iter()
-                    .zip(self.tool_option_values.iter()),
-            )
-        {
-            key_label.set_label(&key);
-            value_label.set_label(&value);
-            value_label.set_tooltip_text(Some(&format!("{key}: {value}")));
-        }
     }
 
     fn selected_layer_id(&self) -> Option<LayerId> {
@@ -1654,15 +1643,7 @@ impl ShellUiState {
     }
 
     fn refresh_snapshot_views(self: &Rc<Self>, snapshot: &ShellSnapshot) {
-        self.tool_options_label
-            .set_label(&snapshot.active_tool_name);
-        set_remix_icon_or_fallback(
-            &self.tool_options_icon,
-            shell_tool_icon(snapshot.active_tool),
-            &snapshot.active_tool_name,
-            18,
-        );
-        self.update_tool_option_labels(snapshot);
+        shell_chrome::refresh_tool_options_bar(self, snapshot);
         self.refresh_tool_buttons(snapshot);
         self.refresh_right_sidebar_chrome();
         self.refresh_color_panel(snapshot);
@@ -2137,50 +2118,113 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-options-bar {
-    min-height: 32px;
-    padding: 0 12px;
-    background: #2b2b2b;
-    border-bottom: 1px solid #1a1a1a;
+    min-height: 34px;
+    padding: 0 8px;
+    background: #2c2c2c;
+    border-top: 1px solid #353535;
+    border-bottom: 1px solid #171717;
+}
+
+.tool-options-identity {
+    min-height: 34px;
+    padding: 0 4px 0 0;
+}
+
+.tool-options-content {
+    min-height: 34px;
 }
 
 .tool-options-label {
-    margin: 0 10px 0 6px;
+    margin: 0 2px 0 2px;
     font-weight: 600;
-    color: #e0e0e0;
+    color: #e8e8e8;
+}
+
+.tool-options-identity .tool-options-label {
+    font-size: 12px;
 }
 
 .tool-options-group {
     margin: 0 8px;
+    min-height: 34px;
+    padding: 0;
 }
 
 .tool-options-divider {
-    margin: 7px 10px;
-    color: #444444;
+    margin: 7px 8px;
+    color: #4a4a4a;
     min-height: 18px;
 }
 
 .tool-option-key {
-    color: #a0a0a0;
+    color: #b1b1b1;
     font-size: 11px;
+    margin-top: 1px;
+}
+
+.tool-option-cluster {
+    min-height: 24px;
 }
 
 .tool-option-box {
-    background: #3c3c3c;
-    border: 1px solid #444444;
+    background: #3b3b3b;
+    border: 1px solid #474747;
     border-radius: 3px;
-    padding: 2px 6px;
-    min-width: 62px;
+    padding: 0 8px;
+    min-width: 64px;
+    min-height: 24px;
 }
 
 .tool-option-value {
-    color: #d0d0d0;
+    color: #e4e4e4;
     font-size: 11px;
     font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
 .tool-options-icon {
-    margin-left: 2px;
-    margin-right: 2px;
+    margin-left: 1px;
+    margin-right: 1px;
+}
+
+.tool-option-button,
+.tool-option-toggle-button,
+.tool-option-icon-button {
+    min-height: 24px;
+    padding: 0 8px;
+    border-radius: 3px;
+    border: 1px solid #474747;
+    background: #3b3b3b;
+    color: #e4e4e4;
+}
+
+.tool-option-button:hover,
+.tool-option-toggle-button:hover,
+.tool-option-icon-button:hover {
+    background: #444444;
+    border-color: #545454;
+    color: #f0f0f0;
+}
+
+.tool-option-button:active,
+.tool-option-toggle-button:active,
+.tool-option-icon-button:active {
+    background: #2f2f2f;
+}
+
+.tool-option-toggle-button-active {
+    background: #4d4d4d;
+    border-color: #656565;
+    color: #ffffff;
+}
+
+.tool-option-icon-button {
+    min-width: 24px;
+    padding: 0;
+}
+
+.tool-option-icon-button image {
+    color: currentColor;
+    -gtk-icon-style: symbolic;
 }
 
 .template-dialog-content {
@@ -2233,6 +2277,30 @@ menubutton.menu-button > button.toggle:focus-visible {
     color: #e0e0e0;
 }
 
+.tool-button-flyout-hotspot {
+    min-width: 11px;
+    min-height: 11px;
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+.tool-button-flyout-hotspot:hover {
+    background: transparent;
+}
+
+.tool-button-flyout-indicator {
+    color: #7f8aa0;
+    opacity: 0.95;
+    font-size: 9px;
+    line-height: 1;
+}
+
+.tool-button:hover .tool-button-flyout-indicator,
+.tool-button-active .tool-button-flyout-indicator {
+    color: #d8e7ff;
+}
+
 .tool-button-active {
     background: #3f3f3f;
     border: 1px solid #565656;
@@ -2248,6 +2316,14 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .tool-separator.horizontal {
     color: #4a4a4a;
+}
+
+.tool-flyout-popover {
+    margin-left: 6px;
+}
+
+.tool-flyout-body {
+    min-width: 182px;
 }
 
 .swatch-stack {
@@ -2412,6 +2488,11 @@ menubutton.menu-button > button.toggle:focus-visible {
     min-width: 300px;
 }
 
+.right-sidebar-base {
+    min-width: 360px;
+    background: #262626;
+}
+
 .panel-icon-strip {
     min-width: 40px;
     padding: 8px 0;
@@ -2455,6 +2536,12 @@ menubutton.menu-button > button.toggle:focus-visible {
 .panel-dock {
     padding: 0;
     background: #262626;
+}
+
+.context-dock-host {
+    background: #242424;
+    border: 1px solid #3a3a3a;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.34);
 }
 
 .panel-group {
@@ -3004,6 +3091,22 @@ popover.menu-dropdown contents {
     font-weight: 700;
 }
 
+.layer-preview-image {
+    min-width: 28px;
+    min-height: 28px;
+}
+
+.layer-preview-button {
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+.layer-preview-button:hover {
+    background: transparent;
+    border: none;
+}
+
 .layer-content-button {
     background: transparent;
     border: none;
@@ -3062,6 +3165,19 @@ popover.menu-dropdown contents {
     background: #232323;
     border-color: #383838;
     color: #666666;
+}
+
+.layer-row-context-popover {
+    margin-left: 8px;
+}
+
+.layer-row-context-menu {
+    min-width: 188px;
+}
+
+.layer-row-context-separator {
+    margin: 4px 0;
+    opacity: 0.28;
 }
 
 .mask-state-banner {

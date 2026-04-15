@@ -1,6 +1,6 @@
 use super::*;
 use crate::ui_support::{
-    build_icon_only_button, build_remix_icon, build_tool_chip_icon_button,
+    build_icon_label_button, build_icon_only_button, build_remix_icon, build_tool_chip_icon_button,
     build_tool_chip_icon_label_button,
 };
 
@@ -23,13 +23,20 @@ enum PathAction {
     BeginTransform,
 }
 
+#[derive(Clone, Copy)]
+enum LayerRowTarget {
+    Layer(LayerId),
+    Group(GroupId),
+}
+
 impl ShellUiState {
     pub(super) fn refresh_tool_buttons(&self, snapshot: &ShellSnapshot) {
-        for (tool, button) in &self.tool_buttons {
-            if *tool == snapshot.active_tool {
-                button.add_css_class("tool-button-active");
+        for slot_button in &self.tool_slot_buttons {
+            shell_chrome::sync_tool_rail_slot_button(slot_button, snapshot.active_tool);
+            if shell_chrome::tool_rail_slot_for_tool(snapshot.active_tool) == slot_button.slot {
+                slot_button.button.add_css_class("tool-button-active");
             } else {
-                button.remove_css_class("tool-button-active");
+                slot_button.button.remove_css_class("tool-button-active");
             }
         }
     }
@@ -1030,15 +1037,25 @@ impl ShellUiState {
         }
 
         row.append(&self.build_layer_visibility_button(layer));
-        row.append(&build_layer_preview(layer));
-
-        if layer.is_group {
-            self.append_group_layer_content(&row, layer);
-        } else if layer.is_text {
-            self.append_text_layer_content(&row, layer);
-        } else {
-            self.append_raster_layer_content(&row, layer);
-        }
+        let preview_button = build_layer_preview_button(layer, {
+            let controller = self.controller.clone();
+            let row_target = layer_row_target(layer);
+            move || activate_layer_row_target(&controller, row_target)
+        });
+        let content_button = build_layer_content_button(
+            layer,
+            &layer_meta_text(layer),
+            Some(if layer.is_active { "Active" } else { "" }),
+            {
+                let controller = self.controller.clone();
+                let row_target = layer_row_target(layer);
+                move || activate_layer_row_target(&controller, row_target)
+            },
+        );
+        row.append(&preview_button);
+        row.append(&content_button);
+        self.attach_layer_row_context_menu(&preview_button, layer);
+        self.attach_layer_row_context_menu(&content_button, layer);
 
         row
     }
@@ -1068,126 +1085,39 @@ impl ShellUiState {
         visibility
     }
 
-    fn append_group_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
-        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-        target_strip.add_css_class("layer-target-strip");
-
-        let group_chip = build_target_chip("G", "Select this group", layer.is_selected, true);
-        if let Some(group_id) = layer.group_id {
-            let controller = self.controller.clone();
-            group_chip.connect_clicked(move |_| controller.borrow_mut().select_group(group_id));
-        }
-        target_strip.append(&group_chip);
-        row.append(&target_strip);
-
-        let group_id = layer.group_id;
-        row.append(&build_layer_content_button(
-            layer,
-            &format!("Group • {}%", layer.opacity_percent),
-            None,
-            {
-                let controller = self.controller.clone();
-                move || {
-                    if let Some(group_id) = group_id {
-                        controller.borrow_mut().select_group(group_id);
+    fn attach_layer_row_context_menu(
+        self: &Rc<Self>,
+        activator: &impl IsA<gtk4::Widget>,
+        layer: &LayerPanelItem,
+    ) {
+        let popover = build_layer_row_context_popover(&self.controller, layer);
+        popover.set_parent(activator);
+        activator.as_ref().connect_notify_local(Some("parent"), {
+            let popover = popover.clone();
+            move |widget, _| {
+                if widget.parent().is_none() {
+                    popover.popdown();
+                    if popover.parent().is_some() {
+                        popover.unparent();
                     }
                 }
-            },
-        ));
-    }
+            }
+        });
 
-    fn append_text_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
-        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-        target_strip.add_css_class("layer-target-strip");
-
-        let text_target = build_target_chip("T", "Select this text layer", layer.is_selected, true);
-        if let Some(layer_id) = layer.layer_id {
-            let controller = self.controller.clone();
-            text_target.connect_clicked(move |_| controller.borrow_mut().select_layer(layer_id));
-        }
-        target_strip.append(&text_target);
-
-        let edit_target = build_target_chip("E", "Open text editing", false, true);
-        if let Some(layer_id) = layer.layer_id {
-            let controller = self.controller.clone();
-            edit_target.connect_clicked(move |_| {
-                let mut controller = controller.borrow_mut();
-                controller.select_layer(layer_id);
-                controller.begin_text_edit();
-            });
-        }
-        target_strip.append(&edit_target);
-        row.append(&target_strip);
-
-        let layer_id = layer.layer_id;
-        row.append(&build_layer_content_button(
-            layer,
-            &format!("Text • {}%", layer.opacity_percent),
-            None,
-            {
-                let controller = self.controller.clone();
-                move || {
-                    if let Some(layer_id) = layer_id {
-                        controller.borrow_mut().select_layer(layer_id);
-                    }
-                }
-            },
-        ));
-    }
-
-    fn append_raster_layer_content(self: &Rc<Self>, row: &GtkBox, layer: &LayerPanelItem) {
-        let target_strip = GtkBox::new(Orientation::Horizontal, 3);
-        target_strip.add_css_class("layer-target-strip");
-
-        let layer_target = build_target_chip(
-            "L",
-            "Select the layer and edit its pixels",
-            layer.is_active && !layer.mask_target_active,
-            true,
-        );
-        if let Some(layer_id) = layer.layer_id {
-            let controller = self.controller.clone();
-            layer_target.connect_clicked(move |_| {
-                let mut controller = controller.borrow_mut();
-                controller.select_layer(layer_id);
-                controller.edit_active_layer_pixels();
-            });
-        }
-        target_strip.append(&layer_target);
-
-        let mask_target = build_target_chip(
-            if layer.mask_enabled { "M" } else { "M!" },
-            "Select the layer and edit its mask",
-            layer.mask_target_active,
-            layer.has_mask,
-        );
-        if layer.has_mask
-            && let Some(layer_id) = layer.layer_id
+        let secondary_click = GestureClick::new();
+        secondary_click.set_button(gdk::BUTTON_SECONDARY);
+        secondary_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         {
+            let popover = popover.clone();
             let controller = self.controller.clone();
-            mask_target.connect_clicked(move |_| {
-                let mut controller = controller.borrow_mut();
-                controller.select_layer(layer_id);
-                controller.edit_active_layer_mask();
+            let row_target = layer_row_target(layer);
+            secondary_click.connect_released(move |_, _, x, y| {
+                activate_layer_row_target(&controller, row_target);
+                popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover.present();
             });
         }
-        target_strip.append(&mask_target);
-        row.append(&target_strip);
-
-        let layer_id = layer.layer_id;
-        row.append(&build_layer_content_button(
-            layer,
-            &format!("{}%{}", layer.opacity_percent, layer_mask_suffix(layer)),
-            Some(if layer.is_active { "Active" } else { "" }),
-            {
-                let controller = self.controller.clone();
-                move || {
-                    if let Some(layer_id) = layer_id {
-                        controller.borrow_mut().select_layer(layer_id);
-                    }
-                }
-            },
-        ));
+        activator.add_controller(secondary_click);
     }
 
     fn build_layers_footer_actions(self: &Rc<Self>, snapshot: &ShellSnapshot) -> GtkBox {
@@ -2170,6 +2100,34 @@ fn layer_mask_suffix(layer: &LayerPanelItem) -> String {
     }
 }
 
+fn layer_meta_text(layer: &LayerPanelItem) -> String {
+    if layer.is_group {
+        format!("Group • {}%", layer.opacity_percent)
+    } else if layer.is_text {
+        format!("Text • {}%", layer.opacity_percent)
+    } else {
+        format!("{}%{}", layer.opacity_percent, layer_mask_suffix(layer))
+    }
+}
+
+fn layer_row_target(layer: &LayerPanelItem) -> LayerRowTarget {
+    if let Some(layer_id) = layer.layer_id {
+        LayerRowTarget::Layer(layer_id)
+    } else {
+        LayerRowTarget::Group(layer.group_id.expect("group rows always carry a group id"))
+    }
+}
+
+fn activate_layer_row_target(
+    controller: &Rc<RefCell<dyn ShellController>>,
+    target: LayerRowTarget,
+) {
+    match target {
+        LayerRowTarget::Layer(layer_id) => controller.borrow_mut().select_layer(layer_id),
+        LayerRowTarget::Group(group_id) => controller.borrow_mut().select_group(group_id),
+    }
+}
+
 fn build_layer_preview(layer: &LayerPanelItem) -> GtkBox {
     let preview = GtkBox::new(Orientation::Vertical, 0);
     preview.add_css_class("layer-preview");
@@ -2184,16 +2142,253 @@ fn build_layer_preview(layer: &LayerPanelItem) -> GtkBox {
         preview.add_css_class("layer-preview-masked");
     }
 
-    let glyph = Label::new(Some(if layer.is_group {
-        "G"
-    } else if layer.is_text {
-        "T"
+    if let Some(preview_data) = layer.preview.as_ref() {
+        let bytes = glib::Bytes::from_owned(preview_data.pixels.clone());
+        let texture = gdk::MemoryTexture::new(
+            preview_data.width as i32,
+            preview_data.height as i32,
+            gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            (preview_data.width * 4) as usize,
+        );
+        let picture = Picture::for_paintable(&texture);
+        picture.add_css_class("layer-preview-image");
+        preview.append(&picture);
     } else {
-        "L"
-    }));
-    glyph.add_css_class("layer-preview-glyph");
-    preview.append(&glyph);
+        let glyph = Label::new(Some(if layer.is_group {
+            "G"
+        } else if layer.is_text {
+            "T"
+        } else {
+            "L"
+        }));
+        glyph.add_css_class("layer-preview-glyph");
+        preview.append(&glyph);
+    }
     preview
+}
+
+fn build_layer_preview_button<F>(layer: &LayerPanelItem, on_click: F) -> Button
+where
+    F: Fn() + 'static,
+{
+    let button = Button::new();
+    button.add_css_class("layer-preview-button");
+    button.set_child(Some(&build_layer_preview(layer)));
+    button.connect_clicked(move |_| on_click());
+    button
+}
+
+fn build_layer_row_context_popover(
+    controller: &Rc<RefCell<dyn ShellController>>,
+    layer: &LayerPanelItem,
+) -> Popover {
+    let popover = Popover::new();
+    popover.set_has_arrow(false);
+    popover.set_autohide(false);
+    popover.set_position(gtk4::PositionType::Left);
+    popover.add_css_class("menu-dropdown");
+    popover.add_css_class("layer-row-context-popover");
+
+    let menu = GtkBox::new(Orientation::Vertical, 0);
+    menu.add_css_class("menu-dropdown-body");
+    menu.add_css_class("layer-row-context-menu");
+
+    let row_target = layer_row_target(layer);
+    let is_text = layer.is_text;
+    let has_mask = layer.has_mask;
+    let mask_enabled = layer.mask_enabled;
+    match row_target {
+        LayerRowTarget::Layer(layer_id) => {
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "brush-2-line.svg",
+                "Select Layer Pixels",
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(layer_id);
+                        controller.edit_active_layer_pixels();
+                    }
+                }),
+                !is_text,
+            );
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "layout-column-line.svg",
+                if has_mask {
+                    "Edit Layer Mask"
+                } else {
+                    "Add Layer Mask"
+                },
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(layer_id);
+                        if has_mask {
+                            controller.edit_active_layer_mask();
+                        } else {
+                            controller.add_active_layer_mask();
+                        }
+                    }
+                }),
+                !is_text,
+            );
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                if mask_enabled {
+                    "eye-off-line.svg"
+                } else {
+                    "eye-line.svg"
+                },
+                if mask_enabled {
+                    "Disable Layer Mask"
+                } else {
+                    "Enable Layer Mask"
+                },
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(layer_id);
+                        controller.toggle_active_layer_mask_enabled();
+                    }
+                }),
+                has_mask && !is_text,
+            );
+            if has_mask && !is_text {
+                menu.append(&build_context_separator());
+                append_layer_row_menu_item(
+                    &menu,
+                    &popover,
+                    "delete-bin-line.svg",
+                    "Remove Layer Mask",
+                    Some({
+                        let controller = controller.clone();
+                        move || {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(layer_id);
+                            controller.remove_active_layer_mask();
+                        }
+                    }),
+                    true,
+                );
+            }
+            menu.append(&build_context_separator());
+            if is_text {
+                append_layer_row_menu_item(
+                    &menu,
+                    &popover,
+                    "text.svg",
+                    "Edit Text",
+                    Some({
+                        let controller = controller.clone();
+                        move || {
+                            let mut controller = controller.borrow_mut();
+                            controller.select_layer(layer_id);
+                            controller.begin_text_edit();
+                        }
+                    }),
+                    true,
+                );
+            }
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "file-copy-line.svg",
+                "Duplicate Layer",
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(layer_id);
+                        controller.duplicate_active_layer();
+                    }
+                }),
+                true,
+            );
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "delete-bin-line.svg",
+                "Delete Layer",
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_layer(layer_id);
+                        controller.delete_active_layer();
+                    }
+                }),
+                true,
+            );
+        }
+        LayerRowTarget::Group(group_id) => {
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "focus-3-line.svg",
+                "Select Group",
+                Some({
+                    let controller = controller.clone();
+                    move || controller.borrow_mut().select_group(group_id)
+                }),
+                true,
+            );
+            append_layer_row_menu_item(
+                &menu,
+                &popover,
+                "folder-open-line.svg",
+                "Ungroup",
+                Some({
+                    let controller = controller.clone();
+                    move || {
+                        let mut controller = controller.borrow_mut();
+                        controller.select_group(group_id);
+                        controller.ungroup_selected_group();
+                    }
+                }),
+                true,
+            );
+        }
+    }
+
+    popover.set_child(Some(&menu));
+    popover
+}
+
+fn append_layer_row_menu_item<F>(
+    menu: &GtkBox,
+    popover: &Popover,
+    icon: &str,
+    label: &str,
+    action: Option<F>,
+    sensitive: bool,
+) where
+    F: Fn() + 'static,
+{
+    let item = build_icon_label_button(icon, label);
+    item.add_css_class("menu-dropdown-item");
+    item.set_sensitive(sensitive);
+    if let Some(action) = action {
+        let popover = popover.clone();
+        item.connect_clicked(move |_| {
+            popover.popdown();
+            action();
+        });
+    }
+    menu.append(&item);
+}
+
+fn build_context_separator() -> Separator {
+    let separator = Separator::new(Orientation::Horizontal);
+    separator.add_css_class("layer-row-context-separator");
+    separator
 }
 
 fn build_layer_content_button<F>(

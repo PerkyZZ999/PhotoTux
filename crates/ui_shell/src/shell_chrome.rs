@@ -3,60 +3,113 @@ use crate::ui_templates::{
     DocumentTabsTemplate, PanelGroupTemplate, StatusBarTemplate, load_panel_group_template,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolRailSlot {
+    Move,
+    Selection,
+    Transform,
+    Text,
+    Paint,
+    Navigation,
+}
+
+pub(super) struct ToolRailSlotButton {
+    pub slot: ToolRailSlot,
+    pub root: gtk4::Overlay,
+    pub button: Button,
+    icon: Image,
+    visible_tool: Rc<Cell<ShellToolKind>>,
+}
+
 #[derive(Clone, Copy)]
-struct ToolRailButtonSpec {
-    tool: ShellToolKind,
-    icon_name: &'static str,
+struct ToolRailSlotSpec {
+    slot: ToolRailSlot,
+    default_tool: ShellToolKind,
     separator_before: bool,
 }
 
-const TOOL_RAIL_BUTTON_SPECS: [ToolRailButtonSpec; 9] = [
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Move,
-        icon_name: "drag-move-line.svg",
+const TOOL_RAIL_SLOT_SPECS: [ToolRailSlotSpec; 6] = [
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Move,
+        default_tool: ShellToolKind::Move,
         separator_before: false,
     },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::RectangularMarquee,
-        icon_name: "focus-3-line.svg",
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Selection,
+        default_tool: ShellToolKind::RectangularMarquee,
         separator_before: false,
     },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Lasso,
-        icon_name: "edit-line.svg",
-        separator_before: false,
-    },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Transform,
-        icon_name: "expand-diagonal-2-line.svg",
-        separator_before: false,
-    },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Text,
-        icon_name: "layout-column-line.svg",
-        separator_before: false,
-    },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Brush,
-        icon_name: "brush-2-line.svg",
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Transform,
+        default_tool: ShellToolKind::Transform,
         separator_before: true,
     },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Eraser,
-        icon_name: "eraser-line.svg",
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Text,
+        default_tool: ShellToolKind::Text,
         separator_before: false,
     },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Hand,
-        icon_name: "hand.svg",
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Paint,
+        default_tool: ShellToolKind::Brush,
         separator_before: true,
     },
-    ToolRailButtonSpec {
-        tool: ShellToolKind::Zoom,
-        icon_name: "zoom-in-line.svg",
-        separator_before: false,
+    ToolRailSlotSpec {
+        slot: ToolRailSlot::Navigation,
+        default_tool: ShellToolKind::Hand,
+        separator_before: true,
     },
 ];
+
+pub(super) fn tool_rail_slot_for_tool(tool: ShellToolKind) -> ToolRailSlot {
+    match tool {
+        ShellToolKind::Move => ToolRailSlot::Move,
+        ShellToolKind::RectangularMarquee | ShellToolKind::Lasso => ToolRailSlot::Selection,
+        ShellToolKind::Transform => ToolRailSlot::Transform,
+        ShellToolKind::Text => ToolRailSlot::Text,
+        ShellToolKind::Brush | ShellToolKind::Eraser => ToolRailSlot::Paint,
+        ShellToolKind::Hand | ShellToolKind::Zoom => ToolRailSlot::Navigation,
+    }
+}
+
+pub(super) fn sync_tool_rail_slot_button(
+    slot_button: &ToolRailSlotButton,
+    active_tool: ShellToolKind,
+) {
+    if tool_rail_slot_for_tool(active_tool) == slot_button.slot
+        && slot_button.visible_tool.get() != active_tool
+    {
+        slot_button.visible_tool.set(active_tool);
+        update_tool_rail_slot_visuals(
+            &slot_button.button,
+            &slot_button.icon,
+            active_tool,
+            slot_button.slot,
+        );
+    }
+}
+
+fn tool_rail_slot_tools(slot: ToolRailSlot) -> &'static [ShellToolKind] {
+    match slot {
+        ToolRailSlot::Move => &[ShellToolKind::Move],
+        ToolRailSlot::Selection => &[ShellToolKind::RectangularMarquee, ShellToolKind::Lasso],
+        ToolRailSlot::Transform => &[ShellToolKind::Transform],
+        ToolRailSlot::Text => &[ShellToolKind::Text],
+        ToolRailSlot::Paint => &[ShellToolKind::Brush, ShellToolKind::Eraser],
+        ToolRailSlot::Navigation => &[ShellToolKind::Hand, ShellToolKind::Zoom],
+    }
+}
+
+fn tool_rail_slot_label(slot: ToolRailSlot) -> &'static str {
+    match slot {
+        ToolRailSlot::Move => "Move",
+        ToolRailSlot::Selection => "Selection",
+        ToolRailSlot::Transform => "Transform",
+        ToolRailSlot::Text => "Type",
+        ToolRailSlot::Paint => "Paint",
+        ToolRailSlot::Navigation => "Navigation",
+    }
+}
 
 pub(super) fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
     let region = GtkBox::new(Orientation::Vertical, 0);
@@ -70,28 +123,28 @@ pub(super) fn build_document_region(shell_state: &ShellUiState) -> GtkBox {
 
 pub(super) fn build_tool_options_bar(
     controller: Rc<RefCell<dyn ShellController>>,
-) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
+) -> (GtkBox, Image, Label, GtkBox) {
     let snapshot = controller.borrow().snapshot();
     build_tool_options_bar_fallback(snapshot)
 }
 
 pub(super) fn build_left_tool_rail(
     controller: Rc<RefCell<dyn ShellController>>,
-) -> (GtkBox, Vec<(ShellToolKind, Button)>) {
+) -> (GtkBox, Vec<ToolRailSlotButton>) {
     let rail = GtkBox::new(Orientation::Vertical, 3);
     rail.add_css_class("tool-rail");
     rail.set_size_request(36, -1);
 
     let mut buttons = Vec::new();
 
-    for spec in TOOL_RAIL_BUTTON_SPECS {
+    for spec in TOOL_RAIL_SLOT_SPECS {
         if spec.separator_before {
             rail.append(&build_tool_rail_separator());
         }
 
-        let button = build_tool_rail_button(controller.clone(), spec);
-        rail.append(&button);
-        buttons.push((spec.tool, button));
+        let slot_button = build_tool_rail_button(controller.clone(), spec);
+        rail.append(&slot_button.root);
+        buttons.push(slot_button);
     }
 
     let spacer = GtkBox::new(Orientation::Vertical, 0);
@@ -151,14 +204,70 @@ pub(super) fn build_left_tool_rail(
 
 fn build_tool_rail_button(
     controller: Rc<RefCell<dyn ShellController>>,
-    spec: ToolRailButtonSpec,
-) -> Button {
-    let tooltip = format!("{} ({})", spec.tool.label(), shell_tool_shortcut(spec.tool));
-    let button = build_icon_only_button(spec.icon_name, &tooltip, "tool-button", 18);
+    spec: ToolRailSlotSpec,
+) -> ToolRailSlotButton {
+    let visible_tool = Rc::new(Cell::new(spec.default_tool));
+    let root = gtk4::Overlay::new();
+    root.set_halign(Align::Center);
+    root.set_valign(Align::Start);
+
+    let button = Button::new();
     button.add_css_class("tool-button");
     button.set_size_request(24, 24);
-    button.connect_clicked(move |_| controller.borrow_mut().select_tool(spec.tool));
-    button
+    button.set_has_frame(false);
+
+    let overlay = gtk4::Overlay::new();
+    overlay.set_halign(Align::Fill);
+    overlay.set_valign(Align::Fill);
+
+    let icon = build_remix_icon(
+        shell_tool_icon(spec.default_tool),
+        spec.default_tool.label(),
+        18,
+    );
+    icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
+    overlay.set_child(Some(&icon));
+
+    button.set_child(Some(&overlay));
+    update_tool_rail_slot_visuals(&button, &icon, spec.default_tool, spec.slot);
+    root.set_child(Some(&button));
+
+    {
+        let controller = controller.clone();
+        let visible_tool = visible_tool.clone();
+        button.connect_clicked(move |_| controller.borrow_mut().select_tool(visible_tool.get()));
+    }
+
+    if tool_rail_slot_tools(spec.slot).len() > 1 {
+        let menu_button = MenuButton::new();
+        menu_button.set_has_frame(false);
+        menu_button.add_css_class("tool-button-flyout-hotspot");
+        menu_button.add_css_class("tool-button-flyout-indicator");
+        menu_button.set_halign(Align::End);
+        menu_button.set_valign(Align::End);
+        menu_button.set_margin_end(1);
+        menu_button.set_margin_bottom(1);
+        menu_button.set_label("▾");
+
+        let popover = build_tool_rail_slot_popover(
+            controller.clone(),
+            button.clone(),
+            icon.clone(),
+            visible_tool.clone(),
+            spec.slot,
+        );
+        menu_button.set_popover(Some(&popover));
+        root.add_overlay(&menu_button);
+        attach_tool_rail_slot_flyout(&button, &menu_button);
+    }
+
+    ToolRailSlotButton {
+        slot: spec.slot,
+        root,
+        button,
+        icon,
+        visible_tool,
+    }
 }
 
 fn build_tool_rail_separator() -> Separator {
@@ -185,6 +294,98 @@ where
     button
 }
 
+fn build_tool_rail_slot_popover(
+    controller: Rc<RefCell<dyn ShellController>>,
+    anchor: Button,
+    icon: Image,
+    visible_tool: Rc<Cell<ShellToolKind>>,
+    slot: ToolRailSlot,
+) -> Popover {
+    let popover = Popover::new();
+    popover.set_has_arrow(false);
+    popover.add_css_class("menu-dropdown");
+    popover.set_position(gtk4::PositionType::Right);
+    popover.add_css_class("tool-flyout-popover");
+
+    let menu = GtkBox::new(Orientation::Vertical, 0);
+    menu.add_css_class("menu-dropdown-body");
+    menu.add_css_class("tool-flyout-body");
+
+    for &tool in tool_rail_slot_tools(slot) {
+        let label = tool.label();
+        let item = build_icon_label_shortcut_button(
+            shell_tool_icon(tool),
+            label,
+            Some(shell_tool_shortcut(tool)),
+        );
+        if tool == visible_tool.get() {
+            item.add_css_class("menu-button-active");
+        }
+        {
+            let controller = controller.clone();
+            let anchor = anchor.clone();
+            let icon = icon.clone();
+            let visible_tool = visible_tool.clone();
+            let popover = popover.clone();
+            item.connect_clicked(move |_| {
+                visible_tool.set(tool);
+                update_tool_rail_slot_visuals(&anchor, &icon, tool, slot);
+                popover.popdown();
+                controller.borrow_mut().select_tool(tool);
+            });
+        }
+        menu.append(&item);
+    }
+
+    popover.set_child(Some(&menu));
+    popover
+}
+
+fn attach_tool_rail_slot_flyout(button: &Button, menu_button: &MenuButton) {
+    let secondary_click = GestureClick::new();
+    secondary_click.set_button(gdk::BUTTON_SECONDARY);
+    {
+        let menu_button = menu_button.clone();
+        secondary_click.connect_pressed(move |gesture, _, _, _| {
+            menu_button.popup();
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+    }
+    button.add_controller(secondary_click);
+
+    let long_press = GestureLongPress::new();
+    long_press.set_touch_only(false);
+    {
+        let menu_button = menu_button.clone();
+        long_press.connect_pressed(move |gesture, _, _| {
+            menu_button.popup();
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+    }
+    button.add_controller(long_press);
+}
+
+fn update_tool_rail_slot_visuals(
+    button: &Button,
+    icon: &Image,
+    tool: ShellToolKind,
+    slot: ToolRailSlot,
+) {
+    set_image_resource_or_fallback(icon, shell_tool_icon(tool), tool.label(), 18);
+    let tooltip = if tool_rail_slot_tools(slot).len() > 1 {
+        format!(
+            "{} ({}) — open the flyout for {} tools",
+            tool.label(),
+            shell_tool_shortcut(tool),
+            tool_rail_slot_label(slot).to_lowercase()
+        )
+    } else {
+        format!("{} ({})", tool.label(), shell_tool_shortcut(tool))
+    };
+    button.set_tooltip_text(Some(&tooltip));
+    button.update_property(&[gtk4::accessible::Property::Label(&tooltip)]);
+}
+
 pub(super) fn build_document_tabs() -> (GtkBox, Label) {
     load_document_tabs_template()
         .map(build_document_tabs_from_template)
@@ -194,8 +395,8 @@ pub(super) fn build_document_tabs() -> (GtkBox, Label) {
         })
 }
 
-pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
-    let sidebar = GtkBox::new(Orientation::Horizontal, 0);
+pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> gtk4::Overlay {
+    let sidebar = gtk4::Overlay::new();
     sidebar.add_css_class("right-sidebar");
     sidebar.set_size_request(360, -1);
 
@@ -203,6 +404,10 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     context_host.add_css_class("context-dock-host");
     context_host.set_size_request(248, -1);
     context_host.set_vexpand(true);
+    context_host.set_hexpand(false);
+    context_host.set_halign(Align::End);
+    context_host.set_valign(Align::Fill);
+    context_host.set_margin_end(360);
     context_host.append(&shell_state.color_group);
     context_host.append(&shell_state.properties_group);
     context_host.append(&shell_state.brush_group);
@@ -252,9 +457,15 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     paned.set_focusable(false);
     dock.append(&paned);
 
-    sidebar.append(&context_host);
-    sidebar.append(&dock_icons);
-    sidebar.append(&dock);
+    let base = GtkBox::new(Orientation::Horizontal, 0);
+    base.add_css_class("right-sidebar-base");
+    base.append(&dock_icons);
+    base.append(&dock);
+
+    sidebar.set_child(Some(&base));
+    sidebar.add_overlay(&context_host);
+    sidebar.set_measure_overlay(&context_host, false);
+    sidebar.set_clip_overlay(&context_host, false);
     sidebar
 }
 
@@ -538,111 +749,6 @@ fn build_status_notice_label(text: &str) -> Label {
     label
 }
 
-pub(super) fn tool_option_groups(snapshot: &ShellSnapshot) -> [(String, String); 6] {
-    match snapshot.active_tool {
-        ShellToolKind::Brush | ShellToolKind::Eraser => [
-            tool_option("Preset", snapshot.brush_preset_name.clone()),
-            tool_option("Size", format!("{} px", snapshot.brush_radius)),
-            (
-                "Hardness".to_string(),
-                format!("{}%", snapshot.brush_hardness_percent),
-            ),
-            tool_option("Spacing", format!("{} px", snapshot.brush_spacing)),
-            tool_option("Flow", format!("{}%", snapshot.brush_flow_percent)),
-            tool_option("Pressure", pressure_mode_label(snapshot).to_string()),
-        ],
-        ShellToolKind::Text => [
-            tool_option("Font", snapshot.text.font_family.clone()),
-            tool_option("Size", format!("{} px", snapshot.text.font_size_px)),
-            (
-                "Leading".to_string(),
-                format!("{}%", snapshot.text.line_height_percent),
-            ),
-            (
-                "Tracking".to_string(),
-                snapshot.text.letter_spacing.to_string(),
-            ),
-            tool_option("Align", text_alignment_label(snapshot.text.alignment)),
-            (
-                "Fill".to_string(),
-                format!(
-                    "#{:02X}{:02X}{:02X}",
-                    snapshot.text.fill_rgba[0],
-                    snapshot.text.fill_rgba[1],
-                    snapshot.text.fill_rgba[2]
-                ),
-            ),
-        ],
-        ShellToolKind::Transform => [
-            (
-                "Scale".to_string(),
-                format!("{}%", snapshot.transform_scale_percent),
-            ),
-            (
-                "Scale X".to_string(),
-                format!("{}%", snapshot.transform_scale_x_percent),
-            ),
-            (
-                "Scale Y".to_string(),
-                format!("{}%", snapshot.transform_scale_y_percent),
-            ),
-            (
-                "Rotate".to_string(),
-                format!("{}°", snapshot.transform_rotation_degrees),
-            ),
-            (
-                "Target".to_string(),
-                snapshot.active_edit_target_name.clone(),
-            ),
-            tool_option("Snap", on_off_label(snapshot.snapping_enabled)),
-        ],
-        _ => [
-            tool_option("Layer", snapshot.active_layer_name.clone()),
-            (
-                "Canvas".to_string(),
-                format!(
-                    "{}×{}",
-                    snapshot.canvas_size.width, snapshot.canvas_size.height
-                ),
-            ),
-            (
-                "Blend".to_string(),
-                snapshot.active_layer_blend_mode.clone(),
-            ),
-            (
-                "Opacity".to_string(),
-                format!("{}%", snapshot.active_layer_opacity_percent),
-            ),
-            tool_option("Selection", selection_status_label(snapshot)),
-            tool_option("Snap", on_off_label(snapshot.snapping_enabled)),
-        ],
-    }
-}
-
-fn tool_option(label: &str, value: impl Into<String>) -> (String, String) {
-    (label.to_string(), value.into())
-}
-
-fn pressure_mode_label(snapshot: &ShellSnapshot) -> &'static str {
-    match (
-        snapshot.pressure_size_enabled,
-        snapshot.pressure_opacity_enabled,
-    ) {
-        (true, true) => "Size + Opacity",
-        (true, false) => "Size",
-        (false, true) => "Opacity",
-        (false, false) => "Off",
-    }
-}
-
-fn text_alignment_label(alignment: ShellTextAlignment) -> &'static str {
-    match alignment {
-        ShellTextAlignment::Left => "Left",
-        ShellTextAlignment::Center => "Center",
-        ShellTextAlignment::Right => "Right",
-    }
-}
-
 fn selection_status_label(snapshot: &ShellSnapshot) -> &'static str {
     if snapshot.selection_rect.is_some()
         || snapshot.selection_path.is_some()
@@ -658,60 +764,836 @@ fn on_off_label(enabled: bool) -> &'static str {
     if enabled { "On" } else { "Off" }
 }
 
-fn build_tool_options_bar_fallback(
-    snapshot: ShellSnapshot,
-) -> (GtkBox, Image, Label, [Label; 6], [Label; 6]) {
-    let bar = GtkBox::new(Orientation::Horizontal, 0);
+pub(super) fn refresh_tool_options_bar(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) {
+    shell_state
+        .tool_options_label
+        .set_label(&snapshot.active_tool_name);
+    set_remix_icon_or_fallback(
+        &shell_state.tool_options_icon,
+        shell_tool_icon(snapshot.active_tool),
+        &snapshot.active_tool_name,
+        14,
+    );
+
+    clear_tool_option_children(&shell_state.tool_options_content);
+    populate_tool_options(shell_state, snapshot, &shell_state.tool_options_content);
+}
+
+fn build_tool_options_bar_fallback(snapshot: ShellSnapshot) -> (GtkBox, Image, Label, GtkBox) {
+    let bar = GtkBox::new(Orientation::Horizontal, 8);
     bar.add_css_class("tool-options-bar");
+    bar.set_hexpand(true);
+
+    let identity = GtkBox::new(Orientation::Horizontal, 6);
+    identity.add_css_class("tool-options-identity");
     let tool_icon = build_remix_icon(
         shell_tool_icon(snapshot.active_tool),
         &snapshot.active_tool_name,
-        12,
+        14,
     );
     tool_icon.add_css_class("tool-options-icon");
-    bar.append(&tool_icon);
+    identity.append(&tool_icon);
 
     let tool_name = snapshot.active_tool_name.clone();
     let tool_label = Label::new(Some(&tool_name));
     tool_label.add_css_class("tool-options-label");
-    bar.append(&tool_label);
+    identity.append(&tool_label);
+    bar.append(&identity);
+    bar.append(&build_tool_options_divider());
 
-    let groups = tool_option_groups(&snapshot);
-    let option_keys = std::array::from_fn(|index| {
-        let label = Label::new(Some(&groups[index].0));
-        label.add_css_class("tool-option-key");
-        label
-    });
-    let option_values = std::array::from_fn(|index| {
-        let label = Label::new(Some(&groups[index].1));
-        label.add_css_class("tool-option-value");
-        label.set_tooltip_text(Some(&format!("{}: {}", groups[index].0, groups[index].1)));
-        label
-    });
+    let content = GtkBox::new(Orientation::Horizontal, 0);
+    content.add_css_class("tool-options-content");
+    content.set_hexpand(true);
+    bar.append(&content);
 
-    for index in 0..groups.len() {
-        let divider = Separator::new(Orientation::Vertical);
-        divider.add_css_class("tool-options-divider");
-        bar.append(&divider);
-
-        bar.append(&build_tool_option_group(
-            &option_keys[index],
-            &option_values[index],
-        ));
-    }
-
-    (bar, tool_icon, tool_label, option_keys, option_values)
+    (bar, tool_icon, tool_label, content)
 }
 
-fn build_tool_option_group(key_label: &Label, value_label: &Label) -> GtkBox {
-    let group = GtkBox::new(Orientation::Horizontal, 4);
-    group.add_css_class("tool-options-group");
-    group.append(key_label);
+fn populate_tool_options(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+    content: &GtkBox,
+) {
+    let mut first = true;
 
+    match snapshot.active_tool {
+        ShellToolKind::Brush | ShellToolKind::Eraser => {
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_brush_preset_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Size",
+                    &format!("{} px", snapshot.brush_radius),
+                    "Decrease brush size",
+                    |controller| controller.decrease_brush_radius(),
+                    "Increase brush size",
+                    |controller| controller.increase_brush_radius(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Hardness",
+                    &format!("{}%", snapshot.brush_hardness_percent),
+                    "Decrease brush hardness",
+                    |controller| controller.decrease_brush_hardness(),
+                    "Increase brush hardness",
+                    |controller| controller.increase_brush_hardness(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Spacing",
+                    &format!("{} px", snapshot.brush_spacing),
+                    "Decrease brush spacing",
+                    |controller| controller.decrease_brush_spacing(),
+                    "Increase brush spacing",
+                    |controller| controller.increase_brush_spacing(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Flow",
+                    &format!("{}%", snapshot.brush_flow_percent),
+                    "Decrease brush flow",
+                    |controller| controller.decrease_brush_flow(),
+                    "Increase brush flow",
+                    |controller| controller.increase_brush_flow(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_pressure_group(shell_state, snapshot),
+            );
+        }
+        ShellToolKind::Text => {
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_action_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_font_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_adjust_group(
+                    shell_state,
+                    snapshot,
+                    "Size",
+                    &format!("{} px", snapshot.text.font_size_px),
+                    |update| {
+                        update.font_size_px = update.font_size_px.saturating_sub(1).max(8);
+                    },
+                    |update| {
+                        update.font_size_px = (update.font_size_px + 1).min(256);
+                    },
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_adjust_group(
+                    shell_state,
+                    snapshot,
+                    "Leading",
+                    &format!("{}%", snapshot.text.line_height_percent),
+                    |update| {
+                        update.line_height_percent =
+                            update.line_height_percent.saturating_sub(5).max(80);
+                    },
+                    |update| {
+                        update.line_height_percent = (update.line_height_percent + 5).min(300);
+                    },
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_adjust_group(
+                    shell_state,
+                    snapshot,
+                    "Tracking",
+                    &snapshot.text.letter_spacing.to_string(),
+                    |update| {
+                        update.letter_spacing = (update.letter_spacing - 1).max(-8);
+                    },
+                    |update| {
+                        update.letter_spacing = (update.letter_spacing + 1).min(32);
+                    },
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_alignment_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_text_fill_group(shell_state, snapshot),
+            );
+        }
+        ShellToolKind::Transform => {
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_transform_action_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Scale",
+                    &format!("{}%", snapshot.transform_scale_percent),
+                    "Scale transform down",
+                    |controller| controller.scale_transform_down(),
+                    "Scale transform up",
+                    |controller| controller.scale_transform_up(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "W",
+                    &format!("{}%", snapshot.transform_scale_x_percent),
+                    "Scale width down",
+                    |controller| controller.scale_transform_x_down(),
+                    "Scale width up",
+                    |controller| controller.scale_transform_x_up(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "H",
+                    &format!("{}%", snapshot.transform_scale_y_percent),
+                    "Scale height down",
+                    |controller| controller.scale_transform_y_down(),
+                    "Scale height up",
+                    |controller| controller.scale_transform_y_up(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_adjust_group(
+                    shell_state,
+                    "Rotate",
+                    &format!("{}°", snapshot.transform_rotation_degrees),
+                    "Rotate transform left",
+                    |controller| controller.rotate_transform_left(),
+                    "Rotate transform right",
+                    |controller| controller.rotate_transform_right(),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group("Target", &snapshot.active_edit_target_name),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_snap_group(shell_state, snapshot),
+            );
+        }
+        ShellToolKind::RectangularMarquee | ShellToolKind::Lasso => {
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group(
+                    "Mode",
+                    if snapshot.active_tool == ShellToolKind::RectangularMarquee {
+                        "Rectangular"
+                    } else {
+                        "Lasso"
+                    },
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group("Selection", selection_status_label(snapshot)),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_selection_action_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_snap_group(shell_state, snapshot),
+            );
+        }
+        _ => {
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group("Layer", &snapshot.active_layer_name),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group("Selection", selection_status_label(snapshot)),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_move_snap_guides_group(shell_state, snapshot),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group(
+                    "Canvas",
+                    &format!(
+                        "{} × {}",
+                        snapshot.canvas_size.width, snapshot.canvas_size.height
+                    ),
+                ),
+            );
+            append_tool_option_group(
+                content,
+                &mut first,
+                &build_readonly_group("Blend", &snapshot.active_layer_blend_mode),
+            );
+        }
+    }
+
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    content.append(&spacer);
+}
+
+fn clear_tool_option_children(container: &GtkBox) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+fn append_tool_option_group(container: &GtkBox, first: &mut bool, group: &GtkBox) {
+    if !*first {
+        container.append(&build_tool_options_divider());
+    }
+    container.append(group);
+    *first = false;
+}
+
+fn build_tool_option_group(label: &str, control: &impl IsA<gtk4::Widget>) -> GtkBox {
+    let group = GtkBox::new(Orientation::Horizontal, 6);
+    group.add_css_class("tool-options-group");
+    let key_label = Label::new(Some(label));
+    key_label.add_css_class("tool-option-key");
+    group.append(&key_label);
+
+    let value_box = GtkBox::new(Orientation::Horizontal, 4);
+    value_box.add_css_class("tool-option-cluster");
+    value_box.append(control);
+    group.append(&value_box);
+    group
+}
+
+fn build_tool_options_divider() -> Separator {
+    let divider = Separator::new(Orientation::Vertical);
+    divider.add_css_class("tool-options-divider");
+    divider
+}
+
+fn build_readonly_group(label: &str, value: &str) -> GtkBox {
+    build_tool_option_group(label, &build_tool_option_value_box(value))
+}
+
+fn build_tool_option_value_box(value: &str) -> GtkBox {
     let value_box = GtkBox::new(Orientation::Horizontal, 0);
     value_box.add_css_class("tool-option-box");
-    value_box.append(value_label);
-    group.append(&value_box);
+    let value_label = Label::new(Some(value));
+    value_label.add_css_class("tool-option-value");
+    value_box.append(&value_label);
+    value_box
+}
 
-    group
+fn build_tool_option_text_button(label: &str, tooltip: Option<&str>) -> Button {
+    let button = Button::with_label(label);
+    button.set_has_frame(false);
+    button.add_css_class("tool-option-button");
+    if let Some(tooltip) = tooltip {
+        button.set_tooltip_text(Some(tooltip));
+    }
+    button
+}
+
+fn build_tool_option_toggle_button(label: &str, active: bool, tooltip: Option<&str>) -> Button {
+    let button = build_tool_option_text_button(label, tooltip);
+    button.add_css_class("tool-option-toggle-button");
+    if active {
+        button.add_css_class("tool-option-toggle-button-active");
+    }
+    button
+}
+
+fn build_tool_option_icon_button<F>(
+    shell_state: &Rc<ShellUiState>,
+    icon_name: &str,
+    tooltip: &str,
+    action: F,
+) -> Button
+where
+    F: Fn(&mut dyn ShellController) + 'static,
+{
+    let button = build_icon_only_button(icon_name, tooltip, "tool-option-icon-button", 10);
+    button.set_sensitive(true);
+    let controller = shell_state.controller.clone();
+    button.connect_clicked(move |_| {
+        let mut controller = controller.borrow_mut();
+        action(&mut *controller);
+    });
+    button
+}
+
+fn build_adjust_group<F, G>(
+    shell_state: &Rc<ShellUiState>,
+    label: &str,
+    value: &str,
+    decrease_tooltip: &str,
+    decrease_action: F,
+    increase_tooltip: &str,
+    increase_action: G,
+) -> GtkBox
+where
+    F: Fn(&mut dyn ShellController) + 'static,
+    G: Fn(&mut dyn ShellController) + 'static,
+{
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    control.append(&build_tool_option_icon_button(
+        shell_state,
+        "subtract-line.svg",
+        decrease_tooltip,
+        decrease_action,
+    ));
+    control.append(&build_tool_option_value_box(value));
+    control.append(&build_tool_option_icon_button(
+        shell_state,
+        "add-line.svg",
+        increase_tooltip,
+        increase_action,
+    ));
+    build_tool_option_group(label, &control)
+}
+
+fn build_brush_preset_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    control.append(&build_tool_option_icon_button(
+        shell_state,
+        "arrow-go-back-line.svg",
+        "Previous brush preset",
+        |controller| controller.previous_brush_preset(),
+    ));
+    let preset =
+        build_tool_option_text_button(&snapshot.brush_preset_name, Some("Next brush preset"));
+    {
+        let controller = shell_state.controller.clone();
+        preset.connect_clicked(move |_| controller.borrow_mut().next_brush_preset());
+    }
+    control.append(&preset);
+    control.append(&build_tool_option_icon_button(
+        shell_state,
+        "arrow-go-forward-line.svg",
+        "Next brush preset",
+        |controller| controller.next_brush_preset(),
+    ));
+    build_tool_option_group("Preset", &control)
+}
+
+fn build_pressure_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    let size = build_tool_option_toggle_button(
+        "Size",
+        snapshot.pressure_size_enabled,
+        Some("Toggle pressure to size"),
+    );
+    {
+        let controller = shell_state.controller.clone();
+        size.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_size_enabled());
+    }
+    control.append(&size);
+
+    let opacity = build_tool_option_toggle_button(
+        "Opacity",
+        snapshot.pressure_opacity_enabled,
+        Some("Toggle pressure to opacity"),
+    );
+    {
+        let controller = shell_state.controller.clone();
+        opacity.connect_clicked(move |_| controller.borrow_mut().toggle_pressure_opacity_enabled());
+    }
+    control.append(&opacity);
+
+    build_tool_option_group("Pressure", &control)
+}
+
+fn build_selection_action_group(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+) -> GtkBox {
+    let has_selection = selection_status_label(snapshot) == "Active";
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+
+    let clear = build_tool_option_text_button("Clear", Some("Clear selection"));
+    clear.set_sensitive(has_selection);
+    {
+        let controller = shell_state.controller.clone();
+        clear.connect_clicked(move |_| controller.borrow_mut().clear_selection());
+    }
+    control.append(&clear);
+
+    let invert = build_tool_option_text_button(
+        if snapshot.selection_inverted {
+            "Uninvert"
+        } else {
+            "Invert"
+        },
+        Some("Invert selection"),
+    );
+    invert.set_sensitive(has_selection);
+    {
+        let controller = shell_state.controller.clone();
+        invert.connect_clicked(move |_| controller.borrow_mut().invert_selection());
+    }
+    control.append(&invert);
+
+    build_tool_option_group("Actions", &control)
+}
+
+fn build_snap_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let toggle = build_tool_option_toggle_button(
+        on_off_label(snapshot.snapping_enabled),
+        snapshot.snapping_enabled,
+        Some("Toggle guide snapping"),
+    );
+    {
+        let controller = shell_state.controller.clone();
+        toggle.connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
+    }
+    build_tool_option_group("Snap", &toggle)
+}
+
+fn build_move_snap_guides_group(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+
+    let guides = build_tool_option_toggle_button(
+        if snapshot.guides_visible {
+            "Guides On"
+        } else {
+            "Guides Off"
+        },
+        snapshot.guides_visible,
+        Some("Toggle guides visibility"),
+    );
+    {
+        let controller = shell_state.controller.clone();
+        guides.connect_clicked(move |_| controller.borrow_mut().toggle_guides_visible());
+    }
+    control.append(&guides);
+
+    let snap = build_tool_option_toggle_button(
+        if snapshot.snapping_enabled {
+            "Snap On"
+        } else {
+            "Snap Off"
+        },
+        snapshot.snapping_enabled,
+        Some("Toggle guide snapping"),
+    );
+    {
+        let controller = shell_state.controller.clone();
+        snap.connect_clicked(move |_| controller.borrow_mut().toggle_snapping_enabled());
+    }
+    control.append(&snap);
+
+    build_tool_option_group("Guides", &control)
+}
+
+fn build_transform_action_group(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+
+    let start = build_tool_option_text_button("Start", Some("Start transform"));
+    start.set_sensitive(snapshot.can_begin_transform && !snapshot.transform_active);
+    {
+        let controller = shell_state.controller.clone();
+        start.connect_clicked(move |_| controller.borrow_mut().begin_transform());
+    }
+    control.append(&start);
+
+    let apply = build_tool_option_text_button("Apply", Some("Commit transform"));
+    apply.set_sensitive(snapshot.transform_active);
+    {
+        let controller = shell_state.controller.clone();
+        apply.connect_clicked(move |_| controller.borrow_mut().commit_transform());
+    }
+    control.append(&apply);
+
+    let cancel = build_tool_option_text_button("Cancel", Some("Cancel transform"));
+    cancel.set_sensitive(snapshot.transform_active);
+    {
+        let controller = shell_state.controller.clone();
+        cancel.connect_clicked(move |_| controller.borrow_mut().cancel_transform());
+    }
+    control.append(&cancel);
+
+    build_tool_option_group("Action", &control)
+}
+
+fn build_text_action_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+
+    let primary = if snapshot.text.editing {
+        let button = build_tool_option_text_button("Apply", Some("Commit text changes"));
+        {
+            let controller = shell_state.controller.clone();
+            button.connect_clicked(move |_| controller.borrow_mut().commit_text_session());
+        }
+        button
+    } else {
+        let button = build_tool_option_text_button(
+            if snapshot.text.selected {
+                "Edit Text"
+            } else {
+                "Place Text"
+            },
+            Some("Begin text editing"),
+        );
+        button.set_sensitive(snapshot.text.selected || snapshot.active_tool == ShellToolKind::Text);
+        {
+            let controller = shell_state.controller.clone();
+            button.connect_clicked(move |_| controller.borrow_mut().begin_text_edit());
+        }
+        button
+    };
+    control.append(&primary);
+
+    let cancel = build_tool_option_text_button("Cancel", Some("Cancel text editing"));
+    cancel.set_sensitive(snapshot.text.editing);
+    {
+        let controller = shell_state.controller.clone();
+        cancel.connect_clicked(move |_| controller.borrow_mut().cancel_text_session());
+    }
+    control.append(&cancel);
+
+    build_tool_option_group("Text", &control)
+}
+
+fn build_text_font_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let can_edit = snapshot.text.editing || snapshot.text.selected;
+    let fonts = available_text_fonts(snapshot);
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+
+    let font_button =
+        build_tool_option_text_button(&snapshot.text.font_family, Some("Cycle text font"));
+    font_button.set_sensitive(can_edit && fonts.len() > 1);
+    if let Some(base_update) = text_update_from_snapshot(snapshot) {
+        let controller = shell_state.controller.clone();
+        let selected = snapshot.text.selected;
+        let editing = snapshot.text.editing;
+        let current_font = snapshot.text.font_family.clone();
+        let next_font = next_text_font(&current_font, &fonts).to_string();
+        font_button.connect_clicked(move |_| {
+            let mut update = base_update.clone();
+            if !editing && selected {
+                controller.borrow_mut().begin_text_edit();
+            }
+            update.font_family = next_font.clone();
+            controller.borrow_mut().update_text_session(update);
+        });
+    }
+    control.append(&font_button);
+
+    build_tool_option_group("Font", &control)
+}
+
+fn build_text_adjust_group<F, G>(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+    label: &str,
+    value: &str,
+    decrease: F,
+    increase: G,
+) -> GtkBox
+where
+    F: Fn(&mut ShellTextUpdate) + 'static,
+    G: Fn(&mut ShellTextUpdate) + 'static,
+{
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    control.append(&build_text_update_icon_button(
+        shell_state,
+        snapshot,
+        "subtract-line.svg",
+        &format!("Decrease {label}"),
+        decrease,
+    ));
+    control.append(&build_tool_option_value_box(value));
+    control.append(&build_text_update_icon_button(
+        shell_state,
+        snapshot,
+        "add-line.svg",
+        &format!("Increase {label}"),
+        increase,
+    ));
+    build_tool_option_group(label, &control)
+}
+
+fn build_text_alignment_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    for (label, alignment) in [
+        ("Left", ShellTextAlignment::Left),
+        ("Center", ShellTextAlignment::Center),
+        ("Right", ShellTextAlignment::Right),
+    ] {
+        let button = build_tool_option_toggle_button(
+            label,
+            snapshot.text.alignment == alignment,
+            Some("Set text alignment"),
+        );
+        let controller = shell_state.controller.clone();
+        let selected = snapshot.text.selected;
+        let editing = snapshot.text.editing;
+        let Some(base_update) = text_update_from_snapshot(snapshot) else {
+            button.set_sensitive(false);
+            control.append(&button);
+            continue;
+        };
+        button.connect_clicked(move |_| {
+            let mut update = base_update.clone();
+            update.alignment = alignment;
+            if !editing && selected {
+                controller.borrow_mut().begin_text_edit();
+            }
+            controller.borrow_mut().update_text_session(update);
+        });
+        control.append(&button);
+    }
+    build_tool_option_group("Align", &control)
+}
+
+fn build_text_fill_group(shell_state: &Rc<ShellUiState>, snapshot: &ShellSnapshot) -> GtkBox {
+    let control = GtkBox::new(Orientation::Horizontal, 4);
+    control.append(&build_tool_option_value_box(&format!(
+        "#{:02X}{:02X}{:02X}",
+        snapshot.text.fill_rgba[0], snapshot.text.fill_rgba[1], snapshot.text.fill_rgba[2]
+    )));
+
+    let use_fg =
+        build_tool_option_text_button("Use FG", Some("Apply the current foreground color"));
+    let can_edit = snapshot.text.editing || snapshot.text.selected;
+    use_fg.set_sensitive(can_edit);
+    {
+        let controller = shell_state.controller.clone();
+        let selected = snapshot.text.selected;
+        let editing = snapshot.text.editing;
+        let foreground = snapshot.foreground_color;
+        if let Some(base_update) = text_update_from_snapshot(snapshot) {
+            use_fg.connect_clicked(move |_| {
+                let mut update = base_update.clone();
+                update.fill_rgba = foreground;
+                if !editing && selected {
+                    controller.borrow_mut().begin_text_edit();
+                }
+                controller.borrow_mut().update_text_session(update);
+            });
+        }
+    }
+    control.append(&use_fg);
+    build_tool_option_group("Fill", &control)
+}
+
+fn build_text_update_icon_button<F>(
+    shell_state: &Rc<ShellUiState>,
+    snapshot: &ShellSnapshot,
+    icon_name: &str,
+    tooltip: &str,
+    update_fn: F,
+) -> Button
+where
+    F: Fn(&mut ShellTextUpdate) + 'static,
+{
+    let button = build_icon_only_button(icon_name, tooltip, "tool-option-icon-button", 10);
+    let can_edit = snapshot.text.editing || snapshot.text.selected;
+    button.set_sensitive(can_edit);
+    let controller = shell_state.controller.clone();
+    let selected = snapshot.text.selected;
+    let editing = snapshot.text.editing;
+    if let Some(base_update) = text_update_from_snapshot(snapshot) {
+        button.connect_clicked(move |_| {
+            let mut update = base_update.clone();
+            update_fn(&mut update);
+            if !editing && selected {
+                controller.borrow_mut().begin_text_edit();
+            }
+            controller.borrow_mut().update_text_session(update);
+        });
+    }
+    button
+}
+
+fn text_update_from_snapshot(snapshot: &ShellSnapshot) -> Option<ShellTextUpdate> {
+    if !(snapshot.text.editing || snapshot.text.selected) {
+        return None;
+    }
+    Some(ShellTextUpdate {
+        content: snapshot.text.content.clone(),
+        font_family: snapshot.text.font_family.clone(),
+        font_size_px: snapshot.text.font_size_px,
+        line_height_percent: snapshot.text.line_height_percent,
+        letter_spacing: snapshot.text.letter_spacing,
+        fill_rgba: snapshot.text.fill_rgba,
+        alignment: snapshot.text.alignment,
+    })
+}
+
+fn available_text_fonts(snapshot: &ShellSnapshot) -> Vec<String> {
+    let mut fonts = vec![snapshot.text.font_family.clone()];
+    if !fonts.iter().any(|font| font == "Bitmap Sans") {
+        fonts.push("Bitmap Sans".to_string());
+    }
+    fonts
+}
+
+fn next_text_font<'a>(current: &'a str, fonts: &'a [String]) -> &'a str {
+    let Some(index) = fonts.iter().position(|font| font == current) else {
+        return fonts.first().map(String::as_str).unwrap_or(current);
+    };
+    fonts
+        .get((index + 1) % fonts.len())
+        .map(String::as_str)
+        .unwrap_or(current)
 }
