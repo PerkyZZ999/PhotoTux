@@ -404,7 +404,7 @@ pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> Gt
     context_host.set_hexpand(false);
     context_host.set_halign(Align::End);
     context_host.set_valign(Align::Start);
-    context_host.set_margin_end(400);
+    context_host.set_margin_end(520);
     context_host.set_margin_top(4);
     context_host.append(&shell_state.color_group);
     context_host.append(&shell_state.properties_group);
