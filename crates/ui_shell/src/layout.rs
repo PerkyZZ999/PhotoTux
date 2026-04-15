@@ -53,13 +53,8 @@ fn build_header_bar_from_template(template: TitlebarTemplate) -> HeaderBar {
     let spacer = build_header_bar_spacer();
     template.root.set_title_widget(Some(&spacer));
     template.app_name_label.set_visible(true);
+    template.logo_image.set_visible(false);
     template.workspace_button.set_visible(false);
-    set_image_resource_or_fallback(
-        &template.logo_image,
-        logo_icon_resource_path(true),
-        APP_NAME,
-        16,
-    );
     template.search_icon.add_css_class("remix-icon");
     ui_support::set_remix_icon_or_fallback(&template.search_icon, "search-line.svg", "Search", 12);
     template.search_button.set_tooltip_text(Some("Search"));
@@ -95,9 +90,6 @@ fn build_header_bar_fallback() -> HeaderBar {
 
     let title_row = GtkBox::new(Orientation::Horizontal, 6);
     title_row.add_css_class("app-brand");
-    let title_icon = build_logo_icon(true, APP_NAME, 16);
-    title_icon.add_css_class("titlebar-icon");
-    title_row.append(&title_icon);
     let title_label = Label::new(Some(APP_NAME));
     title_label.add_css_class("titlebar-app-name");
     title_row.append(&title_label);

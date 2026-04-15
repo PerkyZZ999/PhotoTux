@@ -50,22 +50,6 @@ pub(super) fn set_remix_icon_or_fallback(
     image.set_tooltip_text(Some(alt_text));
 }
 
-pub(super) fn set_image_resource_or_fallback(
-    image: &Image,
-    resource_path: &str,
-    alt_text: &str,
-    size: i32,
-) {
-    if bundled_ui_resource_exists(resource_path) {
-        image.set_resource(Some(resource_path));
-    } else {
-        warn_missing_optional_ui_resource(resource_path);
-        image.set_icon_name(Some(OPTIONAL_ICON_FALLBACK_NAME));
-    }
-    image.set_pixel_size(size);
-    image.set_tooltip_text(Some(alt_text));
-}
-
 pub(super) fn build_icon_only_button(
     icon_name: &str,
     tooltip: &str,

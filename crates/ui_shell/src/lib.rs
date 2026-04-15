@@ -46,8 +46,7 @@ use status_presenter::{
 use ui_support::{
     APP_WINDOW_ICON_NAME, build_icon_label_button, build_icon_label_shortcut_button,
     build_icon_only_button, build_logo_icon, build_remix_icon, create_menu_popover,
-    logo_icon_resource_path, set_image_resource_or_fallback, set_menu_button_label,
-    set_remix_icon_or_fallback, shell_tool_icon, shell_tool_shortcut,
+    set_menu_button_label, set_remix_icon_or_fallback, shell_tool_icon, shell_tool_shortcut,
 };
 
 const UI_RESOURCE_PREFIX: &str = "/com/phototux";
