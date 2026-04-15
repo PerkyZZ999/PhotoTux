@@ -11,6 +11,7 @@ pub(super) fn build_ui(
     let window = ApplicationWindow::builder()
         .application(application)
         .title(APP_NAME)
+        .icon_name(APP_WINDOW_ICON_NAME)
         .default_width(MAIN_WINDOW_DEFAULT_WIDTH)
         .default_height(MAIN_WINDOW_DEFAULT_HEIGHT)
         .build();
@@ -116,6 +117,10 @@ fn build_workspace_body(shell_state: &Rc<ShellUiState>) -> GtkBox {
     outer.add_css_class("workspace-body");
     outer.append(&shell_state.tool_rail);
 
+    let workspace_overlay = gtk4::Overlay::new();
+    workspace_overlay.set_hexpand(true);
+    workspace_overlay.set_vexpand(true);
+
     let inner = Paned::new(Orientation::Horizontal);
     inner.set_wide_handle(true);
     inner.set_focusable(false);
@@ -125,6 +130,12 @@ fn build_workspace_body(shell_state: &Rc<ShellUiState>) -> GtkBox {
     inner.set_hexpand(true);
     inner.set_vexpand(true);
 
-    outer.append(&inner);
+    workspace_overlay.set_child(Some(&inner));
+    let context_overlay = shell_chrome::build_workspace_context_dock(shell_state);
+    workspace_overlay.add_overlay(&context_overlay);
+    workspace_overlay.set_measure_overlay(&context_overlay, false);
+    workspace_overlay.set_clip_overlay(&context_overlay, false);
+
+    outer.append(&workspace_overlay);
     outer
 }

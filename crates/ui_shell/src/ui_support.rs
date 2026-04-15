@@ -14,6 +14,8 @@ pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
     )
 }
 
+pub(super) const APP_WINDOW_ICON_NAME: &str = "phototux-logo-white";
+
 pub(super) fn logo_icon_resource_path(dark_background: bool) -> &'static str {
     if dark_background {
         "/com/phototux/assets/logo/Logo_White.png"

@@ -68,6 +68,7 @@ impl StartupSplash {
         let window = ApplicationWindow::builder()
             .application(application)
             .title(APP_NAME)
+            .icon_name(APP_WINDOW_ICON_NAME)
             .default_width(420)
             .default_height(280)
             .resizable(false)

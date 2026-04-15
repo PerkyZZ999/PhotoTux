@@ -86,4 +86,7 @@
     <file alias="phototux-zoom-in-line-symbolic.svg">assets/icons/remixicon/zoom-in-line-symbolic.svg</file>
     <file alias="phototux-zoom-out-line-symbolic.svg">assets/icons/remixicon/zoom-out-line-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/com/phototux/icons/scalable/apps">
+    <file alias="phototux-logo-white.png">assets/logo/Logo_White.png</file>
+  </gresource>
 </gresources>

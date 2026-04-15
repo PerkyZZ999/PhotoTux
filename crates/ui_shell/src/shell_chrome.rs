@@ -395,21 +395,17 @@ pub(super) fn build_document_tabs() -> (GtkBox, Label) {
         })
 }
 
-pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> gtk4::Overlay {
-    let sidebar = gtk4::Overlay::new();
-    sidebar.add_css_class("right-sidebar");
-    sidebar.set_size_request(360, -1);
-
+pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> GtkBox {
     let context_host = GtkBox::new(Orientation::Vertical, 0);
     context_host.add_css_class("context-dock-host");
+    context_host.add_css_class("workspace-context-dock");
     context_host.set_size_request(248, -1);
-    context_host.set_vexpand(true);
+    context_host.set_vexpand(false);
     context_host.set_hexpand(false);
     context_host.set_halign(Align::End);
-    context_host.set_valign(Align::Fill);
-    context_host.set_margin_end(366);
-    context_host.set_margin_top(6);
-    context_host.set_margin_bottom(6);
+    context_host.set_valign(Align::Start);
+    context_host.set_margin_end(360);
+    context_host.set_margin_top(4);
     context_host.append(&shell_state.color_group);
     context_host.append(&shell_state.properties_group);
     context_host.append(&shell_state.brush_group);
@@ -418,6 +414,14 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> gtk4::Overl
     shell_state
         .context_panel_host
         .replace(Some(context_host.clone()));
+
+    context_host
+}
+
+pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
+    let sidebar = GtkBox::new(Orientation::Horizontal, 0);
+    sidebar.add_css_class("right-sidebar");
+    sidebar.set_size_request(360, -1);
 
     let dock_icons = GtkBox::new(Orientation::Vertical, 4);
     dock_icons.add_css_class("panel-icon-strip");
@@ -464,10 +468,7 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> gtk4::Overl
     base.append(&dock_icons);
     base.append(&dock);
 
-    sidebar.set_child(Some(&base));
-    sidebar.add_overlay(&context_host);
-    sidebar.set_measure_overlay(&context_host, false);
-    sidebar.set_clip_overlay(&context_host, false);
+    sidebar.append(&base);
     sidebar
 }
 

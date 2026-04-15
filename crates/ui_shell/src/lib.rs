@@ -44,10 +44,10 @@ use status_presenter::{
     shell_notice_text, shell_status_hint,
 };
 use ui_support::{
-    build_icon_label_button, build_icon_label_shortcut_button, build_icon_only_button,
-    build_logo_icon, build_remix_icon, create_menu_popover, logo_icon_resource_path,
-    set_image_resource_or_fallback, set_menu_button_label, set_remix_icon_or_fallback,
-    shell_tool_icon, shell_tool_shortcut,
+    APP_WINDOW_ICON_NAME, build_icon_label_button, build_icon_label_shortcut_button,
+    build_icon_only_button, build_logo_icon, build_remix_icon, create_menu_popover,
+    logo_icon_resource_path, set_image_resource_or_fallback, set_menu_button_label,
+    set_remix_icon_or_fallback, shell_tool_icon, shell_tool_shortcut,
 };
 
 const UI_RESOURCE_PREFIX: &str = "/com/phototux";
@@ -362,6 +362,7 @@ pub fn run(controller: Rc<RefCell<dyn ShellController>>) -> Result<()> {
         .build();
 
     application.connect_activate(move |application| {
+        gtk4::Window::set_default_icon_name(APP_WINDOW_ICON_NAME);
         startup::begin_startup(application, controller.clone())
     });
     let _exit_code = application.run();
@@ -621,13 +622,21 @@ impl ShellUiState {
 
         let (color_group, color_body) =
             shell_chrome::build_panel_group("color", &["Color"], 6, false);
+        color_group.set_vexpand(false);
+        color_group.set_hexpand(false);
 
         let (properties_group, properties_body) =
             shell_chrome::build_panel_group("properties", &["Properties"], 4, false);
+        properties_group.set_vexpand(false);
+        properties_group.set_hexpand(false);
 
         let (brush_group, brush_body) =
             shell_chrome::build_panel_group("brush", &["Brush"], 4, false);
+        brush_group.set_vexpand(false);
+        brush_group.set_hexpand(false);
         let (text_group, text_body) = shell_chrome::build_panel_group("text", &["Text"], 4, false);
+        text_group.set_vexpand(false);
+        text_group.set_hexpand(false);
 
         let (layers_group, layers_body, layers_tab_buttons) =
             shell_chrome::build_interactive_panel_group(
@@ -2547,6 +2556,10 @@ menubutton.menu-button > button.toggle:focus-visible {
     border-right: 1px solid #515151;
     border-radius: 6px 0 0 6px;
     box-shadow: 0 10px 28px rgba(0,0,0,0.34);
+}
+
+.workspace-context-dock {
+    min-height: 0;
 }
 
 .panel-group {
