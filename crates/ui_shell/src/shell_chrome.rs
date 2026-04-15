@@ -371,7 +371,7 @@ fn update_tool_rail_slot_visuals(
     tool: ShellToolKind,
     slot: ToolRailSlot,
 ) {
-    set_image_resource_or_fallback(icon, shell_tool_icon(tool), tool.label(), 18);
+    set_remix_icon_or_fallback(icon, shell_tool_icon(tool), tool.label(), 18);
     let tooltip = if tool_rail_slot_tools(slot).len() > 1 {
         format!(
             "{} ({}) — open the flyout for {} tools",
@@ -407,7 +407,9 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> gtk4::Overl
     context_host.set_hexpand(false);
     context_host.set_halign(Align::End);
     context_host.set_valign(Align::Fill);
-    context_host.set_margin_end(360);
+    context_host.set_margin_end(366);
+    context_host.set_margin_top(6);
+    context_host.set_margin_bottom(6);
     context_host.append(&shell_state.color_group);
     context_host.append(&shell_state.properties_group);
     context_host.append(&shell_state.brush_group);
@@ -1107,12 +1109,14 @@ fn append_tool_option_group(container: &GtkBox, first: &mut bool, group: &GtkBox
 fn build_tool_option_group(label: &str, control: &impl IsA<gtk4::Widget>) -> GtkBox {
     let group = GtkBox::new(Orientation::Horizontal, 6);
     group.add_css_class("tool-options-group");
+    group.set_valign(Align::Center);
     let key_label = Label::new(Some(label));
     key_label.add_css_class("tool-option-key");
     group.append(&key_label);
 
     let value_box = GtkBox::new(Orientation::Horizontal, 4);
     value_box.add_css_class("tool-option-cluster");
+    value_box.set_valign(Align::Center);
     value_box.append(control);
     group.append(&value_box);
     group
@@ -1131,6 +1135,7 @@ fn build_readonly_group(label: &str, value: &str) -> GtkBox {
 fn build_tool_option_value_box(value: &str) -> GtkBox {
     let value_box = GtkBox::new(Orientation::Horizontal, 0);
     value_box.add_css_class("tool-option-box");
+    value_box.set_valign(Align::Center);
     let value_label = Label::new(Some(value));
     value_label.add_css_class("tool-option-value");
     value_box.append(&value_label);

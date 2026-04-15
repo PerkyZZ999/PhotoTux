@@ -210,7 +210,7 @@ pub(super) fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
         ShellToolKind::RectangularMarquee => "focus-3-line.svg",
         ShellToolKind::Lasso => "edit-line.svg",
         ShellToolKind::Transform => "expand-diagonal-2-line.svg",
-        ShellToolKind::Text => "layout-column-line.svg",
+        ShellToolKind::Text => "text.svg",
         ShellToolKind::Brush => "brush-2-line.svg",
         ShellToolKind::Eraser => "eraser-line.svg",
         ShellToolKind::Hand => "hand.svg",

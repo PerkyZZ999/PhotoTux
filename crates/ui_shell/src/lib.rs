@@ -749,7 +749,7 @@ impl ShellUiState {
             history_tab_buttons,
             active_top_dock_tab: Cell::new(RightSidebarTopTab::History),
             active_bottom_dock_tab: Cell::new(RightSidebarBottomTab::Layers),
-            active_context_panel: Cell::new(Some(ContextDockPanel::Color)),
+            active_context_panel: Cell::new(None),
             context_toolbar_buttons: RefCell::new(Vec::new()),
             context_panel_host: RefCell::new(None),
             status_bar,
@@ -853,7 +853,7 @@ impl ShellUiState {
         self.active_top_dock_tab.set(RightSidebarTopTab::History);
         self.active_bottom_dock_tab
             .set(RightSidebarBottomTab::Layers);
-        self.active_context_panel.set(Some(ContextDockPanel::Color));
+        self.active_context_panel.set(None);
         self.bump_ui_revision();
     }
 
@@ -2118,20 +2118,21 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-options-bar {
-    min-height: 34px;
-    padding: 0 8px;
+    min-height: 38px;
+    padding: 2px 10px;
     background: #2c2c2c;
     border-top: 1px solid #353535;
     border-bottom: 1px solid #171717;
 }
 
 .tool-options-identity {
-    min-height: 34px;
-    padding: 0 4px 0 0;
+    min-height: 32px;
+    padding: 1px 6px 1px 0;
 }
 
 .tool-options-content {
-    min-height: 34px;
+    min-height: 32px;
+    padding: 1px 0;
 }
 
 .tool-options-label {
@@ -2146,14 +2147,14 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .tool-options-group {
     margin: 0 8px;
-    min-height: 34px;
+    min-height: 32px;
     padding: 0;
 }
 
 .tool-options-divider {
-    margin: 7px 8px;
+    margin: 9px 8px;
     color: #4a4a4a;
-    min-height: 18px;
+    min-height: 16px;
 }
 
 .tool-option-key {
@@ -2163,7 +2164,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-option-cluster {
-    min-height: 24px;
+    min-height: 26px;
 }
 
 .tool-option-box {
@@ -2191,6 +2192,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 .tool-option-icon-button {
     min-height: 24px;
     padding: 0 8px;
+    margin: 1px 0;
     border-radius: 3px;
     border: 1px solid #474747;
     background: #3b3b3b;
@@ -2256,14 +2258,14 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-rail {
-    padding: 6px 0;
+    padding: 6px 0 8px 0;
     background: #2a2a2a;
     border-right: 1px solid #4a4a4a;
 }
 
 .tool-button {
     min-width: 34px;
-    min-height: 28px;
+    min-height: 30px;
     padding: 0;
     background: transparent;
     border: none;
@@ -2290,9 +2292,9 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-button-flyout-indicator {
-    color: #7f8aa0;
-    opacity: 0.95;
-    font-size: 9px;
+    color: #92a6c8;
+    opacity: 0.92;
+    font-size: 8px;
     line-height: 1;
 }
 
@@ -2486,6 +2488,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     background: #262626;
     border-left: 1px solid #3a3a3a;
     min-width: 300px;
+    padding-left: 0;
 }
 
 .right-sidebar-base {
@@ -2541,6 +2544,8 @@ menubutton.menu-button > button.toggle:focus-visible {
 .context-dock-host {
     background: #242424;
     border: 1px solid #3a3a3a;
+    border-right: 1px solid #515151;
+    border-radius: 6px 0 0 6px;
     box-shadow: 0 10px 28px rgba(0,0,0,0.34);
 }
 
