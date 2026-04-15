@@ -352,11 +352,15 @@ fn blend_pixel(destination: &mut [u8], source: [u8; 4], alpha: f32, blend_mode: 
     let source_alpha = alpha.clamp(0.0, 1.0);
     let destination_alpha = destination[3] as f32 / 255.0;
     let out_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+    if out_alpha <= f32::EPSILON {
+        destination.fill(0);
+        return;
+    }
 
     for channel in 0..3 {
         let src = source[channel] as f32 / 255.0;
         let dst = destination[channel] as f32 / 255.0;
-        let out = src * source_alpha + dst * (1.0 - source_alpha);
+        let out = (src * source_alpha + dst * destination_alpha * (1.0 - source_alpha)) / out_alpha;
         destination[channel] = clamp_u8((out * 255.0).round() as i32);
     }
 
@@ -433,6 +437,22 @@ mod tests {
         let edge_index = (8 * 16 + 12) * 4 + 3;
         assert!(pixels[edge_index] > 0);
         assert!(pixels[edge_index] < 255);
+    }
+
+    #[test]
+    fn semi_transparent_brush_dab_keeps_source_color_on_transparent_pixels() {
+        let mut pixels = vec![0_u8; 16 * 16 * 4];
+        let changed = apply_round_brush_dab(
+            &mut pixels,
+            BrushTileContext::new(16, 0, 0, 8.0, 8.0),
+            BrushDab::new(3.0, 1.0, 0.5, 1.0, [255, 255, 255, 255]),
+        );
+
+        assert!(changed);
+        let center = (8 * 16 + 8) * 4;
+        assert_eq!(&pixels[center..center + 3], &[255, 255, 255]);
+        assert!(pixels[center + 3] > 0);
+        assert!(pixels[center + 3] < 255);
     }
 
     #[test]
