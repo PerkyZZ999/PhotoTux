@@ -652,16 +652,11 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         },
     );
 
-    let paths_toggle = append_icon_menu_item(
-        &menu,
-        &popover,
-        "focus-3-line.svg",
-        "Show Paths Tab",
-        {
+    let paths_toggle =
+        append_icon_menu_item(&menu, &popover, "focus-3-line.svg", "Show Paths Tab", {
             let shell_state = shell_state.clone();
             move || shell_state.set_bottom_dock_tab(RightSidebarBottomTab::Paths)
-        },
-    );
+        });
 
     let show_all = append_icon_menu_item(
         &menu,

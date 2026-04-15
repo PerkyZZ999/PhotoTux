@@ -392,6 +392,7 @@ impl CanvasHostState {
             | ShellToolKind::RectangularMarquee
             | ShellToolKind::Lasso
             | ShellToolKind::Transform
+            | ShellToolKind::Text
             | ShellToolKind::Brush
             | ShellToolKind::Eraser => {
                 let (canvas_x, canvas_y) = self.screen_to_canvas(start_x, start_y);

@@ -1366,6 +1366,7 @@ impl ShellUiState {
             if text.is_new_layer { "Create" } else { "Apply" },
             ResponseType::Accept,
         );
+        dialog.set_default_response(ResponseType::Accept);
 
         let body = GtkBox::new(Orientation::Vertical, 8);
         body.set_margin_top(12);
@@ -1385,6 +1386,10 @@ impl ShellUiState {
         content_entry.set_hexpand(true);
         content_entry.set_placeholder_text(Some("Text content"));
         content_entry.set_text(&text.content);
+        {
+            let dialog = dialog.clone();
+            content_entry.connect_activate(move |_| dialog.response(ResponseType::Accept));
+        }
         body.append(&content_entry);
 
         let font_row = GtkBox::new(Orientation::Horizontal, 6);
@@ -1468,6 +1473,23 @@ impl ShellUiState {
             }
         });
         controls.connect_update_signals(&sync);
+
+        let escape_controller = EventControllerKey::new();
+        {
+            let dialog = dialog.clone();
+            escape_controller.connect_key_pressed(move |_, key, _, _| {
+                if key == gdk::Key::Escape {
+                    dialog.response(ResponseType::Cancel);
+                    return glib::Propagation::Stop;
+                }
+                if key == gdk::Key::Return || key == gdk::Key::KP_Enter {
+                    dialog.response(ResponseType::Accept);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        dialog.add_controller(escape_controller);
 
         let shell_state = self.clone();
         dialog.connect_response(move |dialog, response| {
@@ -1696,6 +1718,7 @@ impl ShellUiState {
         let has_selection = snapshot.selection_rect.is_some();
         let can_edit_pixels = !snapshot.text.selected;
         let can_edit_mask = !snapshot.text.selected && snapshot.active_layer_has_mask;
+        let editing_mask = snapshot.active_edit_target_name == "Layer Mask";
 
         self.contextual_fit_button.set_sensitive(true);
         self.contextual_zoom_out_button.set_sensitive(true);
@@ -1708,6 +1731,17 @@ impl ShellUiState {
             .set_sensitive(can_edit_pixels);
         self.contextual_edit_mask_button
             .set_sensitive(can_edit_mask);
+        if editing_mask {
+            self.contextual_edit_pixels_button
+                .remove_css_class("contextual-task-button-primary");
+            self.contextual_edit_mask_button
+                .add_css_class("contextual-task-button-primary");
+        } else {
+            self.contextual_edit_mask_button
+                .remove_css_class("contextual-task-button-primary");
+            self.contextual_edit_pixels_button
+                .add_css_class("contextual-task-button-primary");
+        }
     }
 
     fn current_refresh_snapshot(&self) -> ShellSnapshot {

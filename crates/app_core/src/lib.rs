@@ -1292,9 +1292,9 @@ impl PhotoTuxController {
         self.mark_visual_region_dirty(record.visual_bounds());
 
         let label = if session.is_new_layer() {
-            format!("Add Text {}", after_layer.name)
+            format!("Add Text: {}", after_layer.name)
         } else {
-            format!("Edit Text {}", after_layer.name)
+            format!("Edit Text: {}", after_layer.name)
         };
         self.push_operation(label, EditorOperation::TextLayer(record));
         self.status_message = format!("Updated {}", after_layer.name);
@@ -1942,14 +1942,21 @@ impl PhotoTuxController {
         }
     }
 
-    fn active_edit_target_name(&self) -> &'static str {
+    fn transform_unavailable_message(&self) -> &'static str {
+        "Transform is only available for raster layers when no text edit is active"
+    }
+
+    fn active_edit_target_name(&self) -> String {
         if self.visible_text_layer_state().is_some() {
-            return "Text Layer";
+            if self.active_tool == ShellToolKind::Transform && !self.can_begin_transform() {
+                return "Text Layer (raster only)".to_string();
+            }
+            return "Text Layer".to_string();
         }
 
         match self.document.active_edit_target() {
-            LayerEditTarget::LayerPixels => "Layer Pixels",
-            LayerEditTarget::LayerMask => "Layer Mask",
+            LayerEditTarget::LayerPixels => "Layer Pixels".to_string(),
+            LayerEditTarget::LayerMask => "Layer Mask".to_string(),
         }
     }
 
@@ -2547,7 +2554,7 @@ impl PhotoTuxController {
                     self.pending_autosave_job = None;
                     self.dirty_since_autosave = false;
                     self.clear_latest_alert();
-                    self.status_message = format!("Recovered state written to {}", path.display());
+                    self.status_message = format!("Autosaved recovery state to {}", path.display());
                 }
             }
         }
@@ -3152,7 +3159,7 @@ impl ShellController for PhotoTuxController {
                     .map(|mask| mask.enabled)
                     .unwrap_or(false)
             },
-            active_edit_target_name: self.active_edit_target_name().to_string(),
+            active_edit_target_name: self.active_edit_target_name(),
             selected_structure_name: self.selected_structure_name(),
             selected_structure_is_group: matches!(
                 self.selected_structure_target,
@@ -3865,11 +3872,10 @@ impl ShellController for PhotoTuxController {
 
     fn begin_transform(&mut self) {
         if !self.can_begin_transform() {
-            self.status_message =
-                "Transform is only available for raster layers when no text edit is active"
-                    .to_string();
+            self.status_message = self.transform_unavailable_message().to_string();
             return;
         }
+        self.active_tool = ShellToolKind::Transform;
         self.begin_transform_session_if_needed();
     }
 
@@ -4422,6 +4428,8 @@ impl ShellController for PhotoTuxController {
         self.active_tool = tool;
         if tool == ShellToolKind::Text {
             self.status_message = "Click the canvas to place a text layer".to_string();
+        } else if tool == ShellToolKind::Transform && !self.can_begin_transform() {
+            self.status_message = self.transform_unavailable_message().to_string();
         }
     }
 
@@ -5779,6 +5787,10 @@ mod tests {
             load_document_from_path(&recovery_path).expect("autosave recovery file should load");
         assert_eq!(recovered.layers.len(), controller.document.layers.len());
         assert!(!controller.dirty_since_autosave);
+        assert_eq!(
+            controller.status_message,
+            format!("Autosaved recovery state to {}", recovery_path.display())
+        );
 
         fs::remove_file(&recovery_path).expect("autosave recovery file should be removed");
         fs::remove_dir(&working_directory).expect("temporary autosave directory should be removed");
@@ -6981,6 +6993,7 @@ mod tests {
         set_pixel(&mut controller.document, 0, 20, 20, [255, 255, 255, 255]);
 
         controller.begin_transform();
+        assert_eq!(controller.snapshot().active_tool, ShellToolKind::Transform);
         controller.scale_transform_x_up();
         controller.scale_transform_y_down();
         controller.rotate_transform_right();

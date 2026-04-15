@@ -148,16 +148,12 @@ impl ShellUiState {
         self.brush_body.append(&self.build_brush_adjust_row(
             "Radius",
             &format!("{} px", snapshot.brush_radius),
-            (
-                "subtract-line.svg",
-                "Decrease brush radius",
-                |controller| controller.decrease_brush_radius(),
-            ),
-            (
-                "add-line.svg",
-                "Increase brush radius",
-                |controller| controller.increase_brush_radius(),
-            ),
+            ("subtract-line.svg", "Decrease brush radius", |controller| {
+                controller.decrease_brush_radius()
+            }),
+            ("add-line.svg", "Increase brush radius", |controller| {
+                controller.increase_brush_radius()
+            }),
         ));
         self.brush_body.append(&self.build_brush_adjust_row(
             "Hardness",
@@ -167,11 +163,9 @@ impl ShellUiState {
                 "Decrease brush hardness",
                 |controller| controller.decrease_brush_hardness(),
             ),
-            (
-                "add-line.svg",
-                "Increase brush hardness",
-                |controller| controller.increase_brush_hardness(),
-            ),
+            ("add-line.svg", "Increase brush hardness", |controller| {
+                controller.increase_brush_hardness()
+            }),
         ));
         self.brush_body.append(&self.build_brush_adjust_row(
             "Spacing",
@@ -181,25 +175,19 @@ impl ShellUiState {
                 "Decrease brush spacing",
                 |controller| controller.decrease_brush_spacing(),
             ),
-            (
-                "add-line.svg",
-                "Increase brush spacing",
-                |controller| controller.increase_brush_spacing(),
-            ),
+            ("add-line.svg", "Increase brush spacing", |controller| {
+                controller.increase_brush_spacing()
+            }),
         ));
         self.brush_body.append(&self.build_brush_adjust_row(
             "Flow",
             &format!("{}%", snapshot.brush_flow_percent),
-            (
-                "subtract-line.svg",
-                "Decrease brush flow",
-                |controller| controller.decrease_brush_flow(),
-            ),
-            (
-                "add-line.svg",
-                "Increase brush flow",
-                |controller| controller.increase_brush_flow(),
-            ),
+            ("subtract-line.svg", "Decrease brush flow", |controller| {
+                controller.decrease_brush_flow()
+            }),
+            ("add-line.svg", "Increase brush flow", |controller| {
+                controller.increase_brush_flow()
+            }),
         ));
 
         let toggles = GtkBox::new(Orientation::Vertical, 4);
