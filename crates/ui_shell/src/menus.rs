@@ -530,6 +530,59 @@ fn build_view_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
         move || controller.borrow_mut().remove_last_guide()
     });
 
+    append_menu_separator(&menu);
+
+    // Ruler units submenu
+    let pixels = append_icon_menu_item(&menu, &popover, "settings-4-line.svg", "Rulers: Pixels", {
+        let shell_state = shell_state.clone();
+        move || {
+            shell_state.ruler_unit.set(crate::RulerUnit::Pixels);
+            shell_state.horizontal_ruler_label.queue_draw();
+            shell_state.vertical_ruler_label.queue_draw();
+        }
+    });
+
+    let inches = append_icon_menu_item(&menu, &popover, "settings-4-line.svg", "Rulers: Inches", {
+        let shell_state = shell_state.clone();
+        move || {
+            shell_state.ruler_unit.set(crate::RulerUnit::Inches);
+            shell_state.horizontal_ruler_label.queue_draw();
+            shell_state.vertical_ruler_label.queue_draw();
+        }
+    });
+
+    let cms = append_icon_menu_item(
+        &menu,
+        &popover,
+        "settings-4-line.svg",
+        "Rulers: Centimeters",
+        {
+            let shell_state = shell_state.clone();
+            move || {
+                shell_state.ruler_unit.set(crate::RulerUnit::Centimeters);
+                shell_state.horizontal_ruler_label.queue_draw();
+                shell_state.vertical_ruler_label.queue_draw();
+            }
+        },
+    );
+
+    {
+        let shell_state = shell_state.clone();
+        let pixels = pixels.clone();
+        let inches = inches.clone();
+        let cms = cms.clone();
+        popover.connect_show(move |_| {
+            pixels.remove_css_class("menu-button-active");
+            inches.remove_css_class("menu-button-active");
+            cms.remove_css_class("menu-button-active");
+            match shell_state.ruler_unit.get() {
+                crate::RulerUnit::Pixels => pixels.add_css_class("menu-button-active"),
+                crate::RulerUnit::Inches => inches.add_css_class("menu-button-active"),
+                crate::RulerUnit::Centimeters => cms.add_css_class("menu-button-active"),
+            }
+        });
+    }
+
     finish_top_level_menu(button, popover, menu)
 }
 

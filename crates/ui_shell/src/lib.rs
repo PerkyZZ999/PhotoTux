@@ -65,6 +65,13 @@ pub struct LayerPanelPreview {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulerUnit {
+    Pixels,
+    Inches,
+    Centimeters,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerPanelItem {
     pub layer_id: Option<LayerId>,
@@ -394,7 +401,7 @@ fn build_ruler_stops(max: u32) -> [u32; 5] {
     let quarter = (max / 4).max(1);
     [0, quarter, quarter * 2, quarter * 3, max.max(1)]
 }
-
+#[allow(dead_code)]
 fn format_horizontal_ruler(max: u32) -> String {
     build_ruler_stops(max)
         .into_iter()
@@ -403,8 +410,43 @@ fn format_horizontal_ruler(max: u32) -> String {
         .join("    ")
 }
 
+#[allow(dead_code)]
 fn format_vertical_ruler(max: u32) -> String {
     build_ruler_stops(max)
+        .into_iter()
+        .map(|value| format!("{value:>4}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_ruler_stops_range(min_in: i32, max_in: i32) -> [i32; 5] {
+    let (min, max) = if min_in <= max_in {
+        (min_in, max_in)
+    } else {
+        (max_in, min_in)
+    };
+    let width = (max - min).max(1);
+    let quarter = (width / 4).max(1);
+    [
+        min,
+        min + quarter,
+        min + quarter * 2,
+        min + quarter * 3,
+        max,
+    ]
+}
+
+#[allow(dead_code)]
+fn format_horizontal_ruler_range(min: i32, max: i32) -> String {
+    build_ruler_stops_range(min, max)
+        .into_iter()
+        .map(|value| format!("{value:>5}"))
+        .collect::<Vec<_>>()
+        .join("    ")
+}
+#[allow(dead_code)]
+fn format_vertical_ruler_range(min: i32, max: i32) -> String {
+    build_ruler_stops_range(min, max)
         .into_iter()
         .map(|value| format!("{value:>4}"))
         .collect::<Vec<_>>()
@@ -580,8 +622,10 @@ struct ShellUiState {
     contextual_edit_pixels_button: Button,
     contextual_edit_mask_button: Button,
     canvas_info_label: Label,
-    horizontal_ruler_label: Label,
-    vertical_ruler_label: Label,
+    horizontal_ruler_label: gtk4::DrawingArea,
+    vertical_ruler_label: gtk4::DrawingArea,
+    ruler_unit: Cell<RulerUnit>,
+    ruler_units_menu_button: RefCell<Option<MenuButton>>,
     layers_filter_text: RefCell<String>,
     ui_revision: Cell<u64>,
     last_ui_revision: Cell<u64>,
@@ -707,15 +751,18 @@ impl ShellUiState {
         }
         let canvas_info_label = Label::new(Some("untitled.ptx @ 100% (RGB/8)"));
         canvas_info_label.add_css_class("canvas-info");
-        let horizontal_ruler_label = Label::new(Some(""));
+        let horizontal_ruler_label = gtk4::DrawingArea::new();
         horizontal_ruler_label.add_css_class("ruler-horizontal");
-        horizontal_ruler_label.set_xalign(0.0);
-        let vertical_ruler_label = Label::new(Some(""));
+        horizontal_ruler_label.set_content_height(20);
+        horizontal_ruler_label.set_hexpand(true);
+
+        let vertical_ruler_label = gtk4::DrawingArea::new();
         vertical_ruler_label.add_css_class("ruler-vertical");
-        vertical_ruler_label.set_yalign(0.0);
+        vertical_ruler_label.set_content_width(28);
+        vertical_ruler_label.set_vexpand(true);
 
         let shell_state = Rc::new(Self {
-            controller,
+            controller: controller.clone(),
             window: RefCell::new(None),
             recovery_prompt_visible: Cell::new(false),
             close_prompt_visible: Cell::new(false),
@@ -730,7 +777,7 @@ impl ShellUiState {
             presented_import_report_id: Cell::new(None),
             presented_text_request_id: Cell::new(None),
             text_dialog_visible: Cell::new(false),
-            canvas_state,
+            canvas_state: canvas_state.clone(),
             automation_shortcuts_enabled,
             tool_options_bar,
             tool_options_icon,
@@ -777,12 +824,179 @@ impl ShellUiState {
             canvas_info_label,
             horizontal_ruler_label,
             vertical_ruler_label,
+            ruler_unit: Cell::new(RulerUnit::Pixels),
+            ruler_units_menu_button: RefCell::new(None),
             layers_filter_text: RefCell::new(String::new()),
             ui_revision: Cell::new(0),
             last_ui_revision: Cell::new(0),
             last_snapshot: RefCell::new(None),
             last_zoom_percent: RefCell::new(0),
         });
+
+        // Setup ruler draw callbacks and unit selection menu
+        {
+            let controller_h = controller.clone();
+            let canvas_state_h = canvas_state.clone();
+            let controller_v = controller.clone();
+            let canvas_state_v = canvas_state.clone();
+            let horizontal = shell_state.horizontal_ruler_label.clone();
+            let vertical = shell_state.vertical_ruler_label.clone();
+
+            // Draw horizontal ruler ticks and labels
+            horizontal.set_draw_func(move |_, ctx, width, height| {
+                let width = width as f64;
+                let height = height as f64;
+
+                // background
+                ctx.set_source_rgba(0.98, 0.98, 0.98, 1.0);
+                ctx.rectangle(0.0, 0.0, width, height);
+                let _ = ctx.fill();
+
+                // baseline
+                ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+                ctx.set_line_width(1.0);
+                ctx.move_to(0.0, height - 0.5);
+                ctx.line_to(width, height - 0.5);
+                let _ = ctx.stroke();
+
+                // compute visible range
+                let snapshot = controller_h.borrow().snapshot();
+                let (pan_x, _pan_y, zoom, pic_w, _pic_h) = canvas_state_h.borrow().viewport_info();
+                let cs_w = snapshot.canvas_size.width as i32;
+
+                if zoom <= 0.0 || pic_w == 0 {
+                    return;
+                }
+
+                let mut vmin_x = ((0.0 - pan_x) / zoom).round() as i32;
+                let mut vmax_x = ((pic_w as f32 - pan_x) / zoom).round() as i32;
+                vmin_x = vmin_x.clamp(0, cs_w);
+                vmax_x = vmax_x.clamp(0, cs_w);
+
+                let stops = build_ruler_stops_range(vmin_x, vmax_x);
+                ctx.set_source_rgba(0.2, 0.2, 0.2, 1.0);
+                ctx.set_font_size(10.0);
+                for &s in &stops {
+                    let x = (s as f32 * zoom + pan_x) as f64;
+                    // major tick
+                    ctx.move_to(x + 0.5, height - 4.0);
+                    ctx.line_to(x + 0.5, height - 0.5);
+                    let _ = ctx.stroke();
+                    // label
+                    let label = format!("{}", s);
+                    ctx.move_to(x + 2.0, 10.0);
+                    let _ = ctx.show_text(&label);
+                }
+            });
+
+            // Draw vertical ruler ticks and labels
+            vertical.set_draw_func(move |_, ctx, width, height| {
+                let width = width as f64;
+                let height = height as f64;
+
+                ctx.set_source_rgba(0.98, 0.98, 0.98, 1.0);
+                ctx.rectangle(0.0, 0.0, width, height);
+                let _ = ctx.fill();
+
+                ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+                ctx.set_line_width(1.0);
+                ctx.move_to(width - 0.5, 0.0);
+                ctx.line_to(width - 0.5, height);
+                let _ = ctx.stroke();
+
+                let snapshot = controller_v.borrow().snapshot();
+                let (_pan_x, pan_y, zoom, _pic_w, pic_h) = canvas_state_v.borrow().viewport_info();
+                let cs_h = snapshot.canvas_size.height as i32;
+
+                if zoom <= 0.0 || pic_h == 0 {
+                    return;
+                }
+
+                let mut vmin_y = ((0.0 - pan_y) / zoom).round() as i32;
+                let mut vmax_y = ((pic_h as f32 - pan_y) / zoom).round() as i32;
+                vmin_y = vmin_y.clamp(0, cs_h);
+                vmax_y = vmax_y.clamp(0, cs_h);
+
+                let stops = build_ruler_stops_range(vmin_y, vmax_y);
+                ctx.set_source_rgba(0.2, 0.2, 0.2, 1.0);
+                ctx.set_font_size(10.0);
+                for &s in &stops {
+                    let y = (s as f32 * zoom + pan_y) as f64;
+                    // major tick
+                    ctx.move_to(width - 4.0, y + 0.5);
+                    ctx.line_to(width - 0.5, y + 0.5);
+                    let _ = ctx.stroke();
+                    // label
+                    let label = format!("{}", s);
+                    ctx.move_to(2.0, y + 4.0);
+                    let _ = ctx.show_text(&label);
+                }
+            });
+
+            // Build units popover/menu and attach secondary (right-click) gesture
+            let units_button = MenuButton::new();
+            units_button.set_has_frame(false);
+            units_button.add_css_class("ruler-units-menu-button");
+
+            let popover = Popover::new();
+            popover.set_has_arrow(false);
+            popover.add_css_class("menu-dropdown");
+            let menu_box = GtkBox::new(Orientation::Vertical, 0);
+            menu_box.add_css_class("menu-dropdown-body");
+
+            let add_unit_item = |label: &str, unit: RulerUnit, shell_state: Rc<ShellUiState>| {
+                let item = Button::with_label(label);
+                item.add_css_class("menu-button");
+                let pop = popover.clone();
+                item.connect_clicked(move |_| {
+                    shell_state.ruler_unit.set(unit);
+                    shell_state.horizontal_ruler_label.queue_draw();
+                    shell_state.vertical_ruler_label.queue_draw();
+                    pop.popdown();
+                });
+                menu_box.append(&item);
+            };
+
+            // Note: we capture shell_state by cloning after it's created
+            // We'll set items after shell_state is available below.
+
+            popover.set_child(Some(&menu_box));
+            units_button.set_popover(Some(&popover));
+            shell_state
+                .ruler_units_menu_button
+                .replace(Some(units_button.clone()));
+
+            // Attach secondary click gestures to show the units menu
+            let h_click = GestureClick::new();
+            h_click.set_button(gdk::BUTTON_SECONDARY);
+            {
+                let menu_button = units_button.clone();
+                h_click.connect_pressed(move |gesture, _, _, _| {
+                    menu_button.popup();
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                });
+            }
+            horizontal.add_controller(h_click.clone());
+
+            let v_click = GestureClick::new();
+            v_click.set_button(gdk::BUTTON_SECONDARY);
+            {
+                let menu_button = units_button.clone();
+                v_click.connect_pressed(move |gesture, _, _, _| {
+                    menu_button.popup();
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                });
+            }
+            vertical.add_controller(v_click.clone());
+
+            // Now populate the unit items with access to shell_state
+            {
+                let ss = shell_state.clone();
+                add_unit_item("Pixels", RulerUnit::Pixels, ss.clone());
+                add_unit_item("Inches", RulerUnit::Inches, ss.clone());
+                add_unit_item("Centimeters", RulerUnit::Centimeters, ss.clone());
+            }
+        }
 
         shell_state.connect_sidebar_tabs();
         let initial_snapshot = shell_state.controller.borrow().snapshot();
@@ -1850,10 +2064,9 @@ impl ShellUiState {
             "{} @ {}% ({})",
             snapshot.document_title, zoom_percent, "RGB/8"
         ));
-        self.horizontal_ruler_label
-            .set_label(&format_horizontal_ruler(snapshot.canvas_size.width));
-        self.vertical_ruler_label
-            .set_label(&format_vertical_ruler(snapshot.canvas_size.height));
+        // Trigger ruler redraws (draw callbacks read viewport info directly)
+        self.horizontal_ruler_label.queue_draw();
+        self.vertical_ruler_label.queue_draw();
 
         if snapshot_changed || ui_changed {
             self.refresh_snapshot_views(&snapshot);
@@ -1875,6 +2088,9 @@ fn install_theme() {
 
     if let Some(display) = gdk::Display::default() {
         IconTheme::for_display(&display).add_resource_path("/com/phototux/icons");
+        // Also expose the logo assets so `APP_WINDOW_ICON_NAME` can resolve
+        // the bundled logo resource as an icon name.
+        IconTheme::for_display(&display).add_resource_path("/com/phototux/assets/logo");
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
@@ -1940,7 +2156,8 @@ const THEME_CSS: &str = r#"
 }
 
 .titlebar-app-name {
-    font-weight: 600;
+    font-family: "Exo Bold", "Inter", "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
+    font-weight: 700;
     font-size: 11px;
     color: #e0e0e0;
     letter-spacing: 0.02em;

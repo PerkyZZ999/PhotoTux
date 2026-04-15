@@ -14,14 +14,10 @@ pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
     )
 }
 
-pub(super) const APP_WINDOW_ICON_NAME: &str = "phototux-logo-white";
+pub(super) const APP_WINDOW_ICON_NAME: &str = "phototux-logo-icon";
 
-pub(super) fn logo_icon_resource_path(dark_background: bool) -> &'static str {
-    if dark_background {
-        "/com/phototux/assets/logo/Logo_White.png"
-    } else {
-        "/com/phototux/assets/logo/Logo_Dark.png"
-    }
+pub(super) fn logo_icon_resource_path(_dark_background: bool) -> &'static str {
+    "/com/phototux/assets/logo/Logo_Icon.png"
 }
 
 pub(super) fn build_logo_icon(dark_background: bool, alt_text: &str, size: i32) -> Image {

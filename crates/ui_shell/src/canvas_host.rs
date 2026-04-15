@@ -583,6 +583,16 @@ impl CanvasHostState {
             ((screen_y - self.viewport_state.pan_y) / self.viewport_state.zoom).round() as i32;
         (canvas_x, canvas_y)
     }
+
+    pub(super) fn viewport_info(&self) -> (f32, f32, f32, u32, u32) {
+        (
+            self.viewport_state.pan_x,
+            self.viewport_state.pan_y,
+            self.viewport_state.zoom,
+            self.picture.width().max(0) as u32,
+            self.picture.height().max(0) as u32,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
