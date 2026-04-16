@@ -844,7 +844,6 @@ pub(crate) enum RightSidebarBottomTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextDockPanel {
-    History,
     Color,
     Properties,
     Brush,
@@ -2040,10 +2039,11 @@ impl ShellUiState {
         }
 
         let active_context = self.active_context_panel.get();
-        self.color_group.set_visible(true);
-        self.properties_group.set_visible(true);
-        self.history_group
-            .set_visible(active_context == Some(ContextDockPanel::History));
+        self.color_group
+            .set_visible(active_context == Some(ContextDockPanel::Color));
+        self.properties_group
+            .set_visible(active_context == Some(ContextDockPanel::Properties));
+        self.history_group.set_visible(true);
         self.brush_group
             .set_visible(active_context == Some(ContextDockPanel::Brush));
         self.text_group
@@ -2051,7 +2051,12 @@ impl ShellUiState {
         if let Some(host) = self.context_panel_host.borrow().as_ref() {
             host.set_visible(matches!(
                 active_context,
-                Some(ContextDockPanel::History | ContextDockPanel::Brush | ContextDockPanel::Text)
+                Some(
+                    ContextDockPanel::Color
+                        | ContextDockPanel::Properties
+                        | ContextDockPanel::Brush
+                        | ContextDockPanel::Text
+                )
             ));
         }
 
@@ -2883,7 +2888,7 @@ menubutton.menu-button > button.toggle:focus-visible {
     min-width: 36px;
     padding: 8px 0;
     background: #383838;
-    border-left: 1px solid #1f1f1f;
+    border-right: 1px solid #1f1f1f;
 }
 
 .dock-icon-button {

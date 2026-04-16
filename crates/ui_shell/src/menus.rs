@@ -739,12 +739,24 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             let top_tab = shell_state.active_top_dock_tab();
             let bottom_tab = shell_state.active_bottom_dock_tab();
 
-            let _ = color_open;
-            let _ = properties_open;
-            set_menu_button_label(&color_toggle, "Color Panel Docked");
-            set_menu_button_label(&properties_toggle, "Properties Panel Docked");
-            color_toggle.set_sensitive(false);
-            properties_toggle.set_sensitive(false);
+            set_menu_button_label(
+                &color_toggle,
+                if color_open {
+                    "Hide Color Panel"
+                } else {
+                    "Toggle Color Panel"
+                },
+            );
+            set_menu_button_label(
+                &properties_toggle,
+                if properties_open {
+                    "Hide Properties Panel"
+                } else {
+                    "Toggle Properties Panel"
+                },
+            );
+            color_toggle.set_sensitive(true);
+            properties_toggle.set_sensitive(true);
             set_menu_button_label(
                 &history_toggle,
                 if top_tab == RightSidebarTopTab::History {

@@ -384,12 +384,18 @@ pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> Gt
     context_host.set_valign(Align::Start);
     context_host.set_margin_end(346);
     context_host.set_margin_top(4);
-    context_host.append(&shell_state.history_group);
+    context_host.append(&shell_state.color_group);
+    context_host.append(&shell_state.properties_group);
     context_host.append(&shell_state.brush_group);
     context_host.append(&shell_state.text_group);
     context_host.set_visible(matches!(
         shell_state.active_context_panel.get(),
-        Some(ContextDockPanel::History | ContextDockPanel::Brush | ContextDockPanel::Text)
+        Some(
+            ContextDockPanel::Color
+                | ContextDockPanel::Properties
+                | ContextDockPanel::Brush
+                | ContextDockPanel::Text
+        )
     ));
     shell_state
         .context_panel_host
@@ -407,13 +413,31 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     dock_icons.add_css_class("panel-icon-strip");
     dock_icons.append(&build_context_dock_icon_button(
         shell_state,
-        ContextDockPanel::History,
+        ContextDockPanel::Color,
+        "palette-line.svg",
+        "Color",
+    ));
+    dock_icons.append(&build_context_dock_icon_button(
+        shell_state,
+        ContextDockPanel::Properties,
+        "settings-4-line.svg",
+        "Properties",
+    ));
+    dock_icons.append(&build_sidebar_action_icon_button(
         "history-line.svg",
         "History",
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.set_top_dock_tab(RightSidebarTopTab::History)
+        },
     ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "focus-3-line.svg",
-        "Navigator (placeholder)",
+    dock_icons.append(&build_sidebar_action_icon_button(
+        "layout-column-line.svg",
+        "Layers",
+        {
+            let shell_state = shell_state.clone();
+            move || shell_state.set_bottom_dock_tab(RightSidebarBottomTab::Layers)
+        },
     ));
     dock_icons.append(&build_context_dock_icon_button(
         shell_state,
@@ -421,35 +445,11 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
         "brush-2-line.svg",
         "Brushes",
     ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "settings-4-line.svg",
-        "Brush Settings (placeholder)",
-    ));
     dock_icons.append(&build_context_dock_icon_button(
         shell_state,
         ContextDockPanel::Text,
         "text.svg",
         "Character",
-    ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "layout-column-line.svg",
-        "Paragraph (placeholder)",
-    ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "search-line.svg",
-        "Info (placeholder)",
-    ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "node-tree.svg",
-        "Histogram (placeholder)",
-    ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "arrow-go-forward-line.svg",
-        "Actions (placeholder)",
-    ));
-    dock_icons.append(&build_placeholder_dock_icon_button(
-        "arrow-go-back-line.svg",
-        "Timeline (placeholder)",
     ));
 
     let dock = GtkBox::new(Orientation::Vertical, 0);
@@ -457,23 +457,10 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     dock.set_hexpand(true);
     dock.set_vexpand(true);
 
-    let top_stack = GtkBox::new(Orientation::Vertical, 0);
-    top_stack.add_css_class("panel-dock-top-stack");
-    top_stack.append(&shell_state.color_group);
-    top_stack.append(&shell_state.properties_group);
-
-    let top_scroller = ScrolledWindow::new();
-    top_scroller.add_css_class("panel-scroller");
-    top_scroller.add_css_class("panel-dock-top-scroller");
-    top_scroller.set_hexpand(true);
-    top_scroller.set_vexpand(true);
-    top_scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
-    top_scroller.set_child(Some(&top_stack));
-
     let panel_split = Paned::new(Orientation::Vertical);
-    panel_split.set_start_child(Some(&top_scroller));
+    panel_split.set_start_child(Some(&shell_state.history_group));
     panel_split.set_end_child(Some(&shell_state.layers_group));
-    panel_split.set_position(468);
+    panel_split.set_position(248);
     panel_split.set_wide_handle(true);
     panel_split.set_vexpand(true);
     panel_split.set_focusable(false);
@@ -481,8 +468,8 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
 
     let base = GtkBox::new(Orientation::Horizontal, 0);
     base.add_css_class("right-sidebar-base");
-    base.append(&dock);
     base.append(&dock_icons);
+    base.append(&dock);
 
     sidebar.append(&base);
     sidebar
@@ -508,11 +495,18 @@ fn build_context_dock_icon_button(
     button
 }
 
-fn build_placeholder_dock_icon_button(icon_name: &'static str, tooltip: &'static str) -> Button {
+fn build_sidebar_action_icon_button<F>(
+    icon_name: &'static str,
+    tooltip: &'static str,
+    action: F,
+) -> Button
+where
+    F: Fn() + 'static,
+{
     let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 16);
     button.add_css_class("dock-icon-button");
-    button.add_css_class("dock-icon-button-placeholder");
     button.set_size_request(30, 30);
+    button.connect_clicked(move |_| action());
     button
 }
 
