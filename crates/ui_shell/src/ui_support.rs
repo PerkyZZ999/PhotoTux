@@ -188,9 +188,9 @@ pub(super) fn create_menu_popover(button: &MenuButton) -> (Popover, GtkBox) {
 
 pub(super) fn shell_tool_icon(tool: ShellToolKind) -> &'static str {
     match tool {
-        ShellToolKind::Move => "drag-move-line.svg",
-        ShellToolKind::RectangularMarquee => "focus-3-line.svg",
-        ShellToolKind::Lasso => "edit-line.svg",
+        ShellToolKind::Move => "tool-move.svg",
+        ShellToolKind::RectangularMarquee => "tool-marquee.svg",
+        ShellToolKind::Lasso => "tool-lasso.svg",
         ShellToolKind::Transform => "expand-diagonal-2-line.svg",
         ShellToolKind::Text => "text.svg",
         ShellToolKind::Brush => "brush-2-line.svg",

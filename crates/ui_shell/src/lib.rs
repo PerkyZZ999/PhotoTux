@@ -7,9 +7,9 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
     CssProvider, Dialog, Entry, EventControllerKey, EventControllerMotion, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, GestureDrag, GestureLongPress, GestureStylus,
-    HeaderBar, IconTheme, Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned,
-    Picture, PolicyType, Popover, ResponseType, ScrolledWindow, Separator, SpinButton, gdk,
+    EventControllerScrollFlags, GestureClick, GestureDrag, GestureStylus, HeaderBar, IconTheme,
+    Image, Label, MenuButton, MessageDialog, MessageType, Orientation, Paned, Picture, PolicyType,
+    Popover, ResponseType, ScrolledWindow, Separator, SpinButton, gdk,
 };
 use render_wgpu::{
     CanvasOverlayPath, CanvasOverlayRect, OffscreenCanvasRenderer, ViewportRendererConfig,
@@ -466,11 +466,7 @@ fn build_ruler_stops_range(min_in: i32, max_in: i32) -> [i32; 5] {
     ]
 }
 
-fn compute_visible_ruler_range(
-    pan: f32,
-    zoom: f32,
-    viewport_extent: u32,
-) -> Option<(i32, i32)> {
+fn compute_visible_ruler_range(pan: f32, zoom: f32, viewport_extent: u32) -> Option<(i32, i32)> {
     if zoom <= 0.0 || viewport_extent == 0 {
         return None;
     }
@@ -507,12 +503,7 @@ fn pick_ruler_major_step(unit: RulerUnit, zoom: f32) -> f64 {
     normalize_ruler_step(target_screen_spacing / screen_pixels_per_unit)
 }
 
-fn draw_ruler_background(
-    ctx: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
-    horizontal: bool,
-) {
+fn draw_ruler_background(ctx: &gtk4::cairo::Context, width: f64, height: f64, horizontal: bool) {
     ctx.set_source_rgb(0.17, 0.17, 0.17);
     ctx.rectangle(0.0, 0.0, width, height);
     let _ = ctx.fill();
@@ -594,7 +585,8 @@ fn draw_vertical_ruler(
 ) {
     draw_ruler_background(ctx, width, height, false);
 
-    let Some((visible_min, visible_max)) = compute_visible_ruler_range(pan_y, zoom, viewport_height)
+    let Some((visible_min, visible_max)) =
+        compute_visible_ruler_range(pan_y, zoom, viewport_height)
     else {
         return;
     };
@@ -791,6 +783,7 @@ struct ShellUiState {
     tool_slot_buttons: Vec<shell_chrome::ToolRailSlotButton>,
     document_tabs: GtkBox,
     document_tab_label: Label,
+    document_tab_meta_label: Label,
     layers_group: GtkBox,
     layers_body: GtkBox,
     layers_tab_buttons: Vec<Button>,
@@ -851,6 +844,7 @@ pub(crate) enum RightSidebarBottomTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextDockPanel {
+    History,
     Color,
     Properties,
     Brush,
@@ -862,19 +856,24 @@ impl ShellUiState {
         let (tool_options_bar, tool_options_icon, tool_options_label, tool_options_content) =
             shell_chrome::build_tool_options_bar(controller.clone());
         let (tool_rail, tool_slot_buttons) = shell_chrome::build_left_tool_rail(controller.clone());
-        let (document_tabs, document_tab_label) = shell_chrome::build_document_tabs();
+        let (document_tabs, document_tab_label, document_tab_meta_label) =
+            shell_chrome::build_document_tabs();
         let (canvas_picture, canvas_state) = build_canvas_host(controller.clone());
         let automation_shortcuts_enabled = env::var_os("PHOTOTUX_ENABLE_TEST_SHORTCUTS").is_some();
 
         let (color_group, color_body) =
-            shell_chrome::build_panel_group("color", &["Color"], 6, false);
+            shell_chrome::build_panel_group("color", &["Color", "Swatches", "Gradients"], 6, false);
         color_group.set_vexpand(false);
-        color_group.set_hexpand(false);
+        color_group.set_hexpand(true);
 
-        let (properties_group, properties_body) =
-            shell_chrome::build_panel_group("properties", &["Properties"], 4, false);
+        let (properties_group, properties_body) = shell_chrome::build_panel_group(
+            "properties",
+            &["Properties", "Adjustments", "Libraries"],
+            4,
+            false,
+        );
         properties_group.set_vexpand(false);
-        properties_group.set_hexpand(false);
+        properties_group.set_hexpand(true);
 
         let (brush_group, brush_body) =
             shell_chrome::build_panel_group("brush", &["Brush"], 4, false);
@@ -991,6 +990,7 @@ impl ShellUiState {
             tool_slot_buttons,
             document_tabs,
             document_tab_label,
+            document_tab_meta_label,
             layers_group,
             layers_body,
             layers_tab_buttons,
@@ -2040,16 +2040,19 @@ impl ShellUiState {
         }
 
         let active_context = self.active_context_panel.get();
-        self.color_group
-            .set_visible(active_context == Some(ContextDockPanel::Color));
-        self.properties_group
-            .set_visible(active_context == Some(ContextDockPanel::Properties));
+        self.color_group.set_visible(true);
+        self.properties_group.set_visible(true);
+        self.history_group
+            .set_visible(active_context == Some(ContextDockPanel::History));
         self.brush_group
             .set_visible(active_context == Some(ContextDockPanel::Brush));
         self.text_group
             .set_visible(active_context == Some(ContextDockPanel::Text));
         if let Some(host) = self.context_panel_host.borrow().as_ref() {
-            host.set_visible(active_context.is_some());
+            host.set_visible(matches!(
+                active_context,
+                Some(ContextDockPanel::History | ContextDockPanel::Brush | ContextDockPanel::Text)
+            ));
         }
 
         for (panel, button) in self.context_toolbar_buttons.borrow().iter() {
@@ -2192,6 +2195,8 @@ impl ShellUiState {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "Unsaved project".to_string()),
         ));
+        self.document_tab_meta_label
+            .set_label(&format!("@ {}% ({})", zoom_percent, "RGB/8"));
         self.status_doc.set_label(&format!(
             "Doc: {} x {}",
             snapshot.canvas_size.width, snapshot.canvas_size.height
@@ -2631,60 +2636,56 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .tool-rail {
-    padding: 6px 0 8px 0;
-    background: #2a2a2a;
-    border-right: 1px solid #4a4a4a;
+    padding: 8px 0 10px 0;
+    background: #383838;
+    border-right: 1px solid #202020;
 }
 
 .tool-button {
-    min-width: 34px;
-    min-height: 30px;
+    min-width: 32px;
+    min-height: 32px;
     padding: 0;
     background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: #e0e0e0;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    color: #d8d8d8;
 }
 
 .tool-button:hover {
-    background: #343434;
-    border-color: #4a4a4a;
+    background: #464646;
+    border-color: #5a5a5a;
     color: #e0e0e0;
 }
 
-.tool-button-flyout-hotspot {
-    min-width: 11px;
-    min-height: 11px;
-    padding: 0;
-    border: none;
-    background: transparent;
-}
-
-.tool-button-flyout-hotspot:hover {
-    background: transparent;
-}
-
-.tool-button-flyout-indicator {
-    color: #92a6c8;
+.tool-button-corner-indicator {
+    color: #9ca3ad;
     opacity: 0.92;
-    font-size: 8px;
+    font-size: 7px;
     line-height: 1;
 }
 
-.tool-button:hover .tool-button-flyout-indicator,
-.tool-button-active .tool-button-flyout-indicator {
-    color: #d8e7ff;
+.tool-button:hover .tool-button-corner-indicator,
+.tool-button-active .tool-button-corner-indicator {
+    color: #dfe8f8;
 }
 
 .tool-button-active {
-    background: #3f3f3f;
-    border: 1px solid #565656;
-    border-left: 2px solid #3b8beb;
+    background: #2d6cb8;
+    border: 1px solid #2d6cb8;
     color: #e0e0e0;
 }
 
+.tool-button-placeholder {
+    color: #c9c9c9;
+}
+
+.tool-button-placeholder:hover {
+    background: #434343;
+    border-color: #565656;
+}
+
 .tool-separator {
-    margin: 2px 8px;
+    margin: 4px 8px;
     min-width: 24px;
     opacity: 1;
 }
@@ -2693,17 +2694,9 @@ menubutton.menu-button > button.toggle:focus-visible {
     color: #4a4a4a;
 }
 
-.tool-flyout-popover {
-    margin-left: 6px;
-}
-
-.tool-flyout-body {
-    min-width: 182px;
-}
-
 .swatch-stack {
-    margin-top: 10px;
-    margin-bottom: 4px;
+    margin-top: 8px;
+    margin-bottom: 2px;
 }
 
 .color-chip {
@@ -2730,12 +2723,12 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .swatch-stack-actions {
-    margin-bottom: 2px;
+    margin-bottom: 4px;
 }
 
 .swatch-stack-action {
-    min-width: 12px;
-    min-height: 12px;
+    min-width: 14px;
+    min-height: 14px;
     padding: 0;
     color: #e0e0e0;
 }
@@ -2749,17 +2742,34 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .document-tabs {
-    min-height: 26px;
-    padding: 4px 6px 0 6px;
-    background: #232323;
-    border-bottom: 1px solid #3a3a3a;
+    min-height: 30px;
+    padding: 4px 8px 0 8px;
+    background: #2b2b2b;
+    border-bottom: 1px solid #1e1e1e;
 }
 
 .document-tab-content {
+    min-height: 24px;
+    padding: 0 2px;
 }
 
 .document-tab-title {
     color: #e0e0e0;
+    font-weight: 600;
+}
+
+.document-tab-meta {
+    color: #98a0ab;
+    font-size: 10px;
+}
+
+.document-tab-close {
+    color: #7f8792;
+    margin-left: 2px;
+}
+
+.document-tabs-spacer {
+    min-width: 12px;
 }
 
 .document-workspace {
@@ -2772,8 +2782,8 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .document-tab-add {
-    color: #5a5a5a;
-    padding: 2px 6px;
+    color: #7f8792;
+    padding: 3px 8px;
 }
 
 .ruler-corner,
@@ -2858,38 +2868,48 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .right-sidebar {
-    background: #262626;
-    border-left: 1px solid #3a3a3a;
-    min-width: 300px;
+    background: #383838;
+    border-left: 1px solid #1e1e1e;
+    min-width: 336px;
     padding-left: 0;
 }
 
 .right-sidebar-base {
-    min-width: 360px;
-    background: #262626;
+    min-width: 336px;
+    background: #383838;
 }
 
 .panel-icon-strip {
-    min-width: 40px;
+    min-width: 36px;
     padding: 8px 0;
-    background: #2a2a2a;
-    border-right: 1px solid #4a4a4a;
+    background: #383838;
+    border-left: 1px solid #1f1f1f;
 }
 
 .dock-icon-button {
-    min-width: 24px;
-    min-height: 24px;
+    min-width: 30px;
+    min-height: 30px;
     padding: 0;
     background: transparent;
-    border: none;
-    border-radius: 3px;
-    color: #e0e0e0;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    color: #cfd4dc;
 }
 
 .dock-icon-button:hover {
-    background: #343434;
-    border-color: #4a4a4a;
+    background: #474747;
+    border-color: #5d5d5d;
     color: #e0e0e0;
+}
+
+.dock-icon-button-active {
+    background: #2d6cb8;
+    border-color: #2d6cb8;
+    color: #ffffff;
+}
+
+.dock-icon-button-placeholder {
+    color: #b3b9c2;
 }
 
 .chrome-icon-button,
@@ -2911,7 +2931,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .panel-dock {
     padding: 0;
-    background: #262626;
+    background: #383838;
 }
 
 .context-dock-host {
@@ -2928,28 +2948,30 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .panel-group {
     border: 0;
-    border-bottom: 1px solid #3a3a3a;
-    background: #262626;
+    border-bottom: 1px solid #1e1e1e;
+    background: #383838;
     border-radius: 0;
     margin-bottom: 0;
 }
 
 .panel-group-header {
-    padding: 0 8px;
-    min-height: 28px;
-    background: #2b2b2b;
-    border-bottom: 1px solid #3a3a3a;
+    padding: 0 4px;
+    min-height: 26px;
+    background: #2e2e2e;
+    border-bottom: 1px solid #202020;
     border-radius: 0;
 }
 
 .panel-tab {
     background: transparent;
-    border: 1px solid transparent;
-    padding: 4px 0 5px 0;
+    border: none;
+    border-right: 1px solid #1f1f1f;
+    padding: 5px 10px;
     font-size: 11px;
     font-weight: 500;
-    color: #7f8792;
+    color: #9097a3;
     border-bottom: 2px solid transparent;
+    border-radius: 0;
 }
 
 .panel-tab:hover {
@@ -2958,20 +2980,20 @@ menubutton.menu-button > button.toggle:focus-visible {
 
 .panel-tab-active {
     background: transparent;
-    border: 1px solid transparent;
+    border: none;
+    border-right: 1px solid #1f1f1f;
     border-bottom: 2px solid #3b8beb;
     color: #e0e0e0;
     font-weight: 600;
     border-radius: 0;
-    margin-bottom: 0;
 }
 
 .panel-tab-placeholder {
-    color: #66707c;
+    color: #7a818c;
 }
 
 .panel-group-body {
-    padding: 8px;
+    padding: 6px;
 }
 
 #layers-panel-body {
@@ -3809,8 +3831,14 @@ mod tests {
     #[test]
     fn visible_ruler_range_tracks_viewport_bounds_without_rounding_jitter() {
         assert_eq!(compute_visible_ruler_range(0.0, 2.0, 400), Some((0, 200)));
-        assert_eq!(compute_visible_ruler_range(25.0, 1.5, 450), Some((-17, 284)));
-        assert_eq!(compute_visible_ruler_range(-48.0, 2.0, 320), Some((24, 184)));
+        assert_eq!(
+            compute_visible_ruler_range(25.0, 1.5, 450),
+            Some((-17, 284))
+        );
+        assert_eq!(
+            compute_visible_ruler_range(-48.0, 2.0, 320),
+            Some((24, 184))
+        );
     }
 
     #[test]

@@ -83,6 +83,23 @@
     <file alias="phototux-subtract-line-symbolic.svg">assets/icons/remixicon/subtract-line-symbolic.svg</file>
     <file alias="phototux-swap-line-symbolic.svg">assets/icons/remixicon/swap-line-symbolic.svg</file>
     <file alias="phototux-text-symbolic.svg">assets/icons/remixicon/text-symbolic.svg</file>
+    <file alias="phototux-tool-move-symbolic.svg">assets/icons/phototux/tool-move-symbolic.svg</file>
+    <file alias="phototux-tool-marquee-symbolic.svg">assets/icons/phototux/tool-marquee-symbolic.svg</file>
+    <file alias="phototux-tool-lasso-symbolic.svg">assets/icons/phototux/tool-lasso-symbolic.svg</file>
+    <file alias="phototux-tool-quick-selection-symbolic.svg">assets/icons/phototux/tool-quick-selection-symbolic.svg</file>
+    <file alias="phototux-tool-crop-symbolic.svg">assets/icons/phototux/tool-crop-symbolic.svg</file>
+    <file alias="phototux-tool-eyedropper-symbolic.svg">assets/icons/phototux/tool-eyedropper-symbolic.svg</file>
+    <file alias="phototux-tool-heal-symbolic.svg">assets/icons/phototux/tool-heal-symbolic.svg</file>
+    <file alias="phototux-tool-clone-stamp-symbolic.svg">assets/icons/phototux/tool-clone-stamp-symbolic.svg</file>
+    <file alias="phototux-tool-history-brush-symbolic.svg">assets/icons/phototux/tool-history-brush-symbolic.svg</file>
+    <file alias="phototux-tool-gradient-symbolic.svg">assets/icons/phototux/tool-gradient-symbolic.svg</file>
+    <file alias="phototux-tool-blur-symbolic.svg">assets/icons/phototux/tool-blur-symbolic.svg</file>
+    <file alias="phototux-tool-dodge-symbolic.svg">assets/icons/phototux/tool-dodge-symbolic.svg</file>
+    <file alias="phototux-tool-pen-symbolic.svg">assets/icons/phototux/tool-pen-symbolic.svg</file>
+    <file alias="phototux-tool-path-selection-symbolic.svg">assets/icons/phototux/tool-path-selection-symbolic.svg</file>
+    <file alias="phototux-tool-shape-symbolic.svg">assets/icons/phototux/tool-shape-symbolic.svg</file>
+    <file alias="phototux-tool-quick-mask-symbolic.svg">assets/icons/phototux/tool-quick-mask-symbolic.svg</file>
+    <file alias="phototux-tool-screen-mode-symbolic.svg">assets/icons/phototux/tool-screen-mode-symbolic.svg</file>
     <file alias="phototux-zoom-in-line-symbolic.svg">assets/icons/remixicon/zoom-in-line-symbolic.svg</file>
     <file alias="phototux-zoom-out-line-symbolic.svg">assets/icons/remixicon/zoom-out-line-symbolic.svg</file>
   </gresource>

@@ -3,13 +3,14 @@
   <requires lib="gtk" version="4.0"/>
   <object class="GtkBox" id="document_tabs_root">
     <property name="orientation">horizontal</property>
-    <property name="spacing">4</property>
+    <property name="spacing">6</property>
     <style>
       <class name="document-tabs"/>
     </style>
     <child>
       <object class="GtkButton" id="document_tab_active_button">
         <property name="can-focus">False</property>
+        <property name="has-frame">False</property>
         <style>
           <class name="document-tab-active"/>
         </style>
@@ -28,8 +29,33 @@
                 </style>
               </object>
             </child>
+            <child>
+              <object class="GtkLabel" id="document_tab_meta">
+                <property name="label">@ 100% (RGB/8)</property>
+                <style>
+                  <class name="document-tab-meta"/>
+                </style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="document_tab_close_placeholder">
+                <property name="label">×</property>
+                <property name="tooltip-text">Document close is not implemented yet</property>
+                <style>
+                  <class name="document-tab-close"/>
+                </style>
+              </object>
+            </child>
           </object>
         </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="document_tabs_spacer">
+        <property name="hexpand">True</property>
+        <style>
+          <class name="document-tabs-spacer"/>
+        </style>
       </object>
     </child>
     <child>

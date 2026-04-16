@@ -33,11 +33,6 @@ impl ShellUiState {
     pub(super) fn refresh_tool_buttons(&self, snapshot: &ShellSnapshot) {
         for slot_button in &self.tool_slot_buttons {
             shell_chrome::sync_tool_rail_slot_button(slot_button, snapshot.active_tool);
-            if shell_chrome::tool_rail_slot_for_tool(snapshot.active_tool) == slot_button.slot {
-                slot_button.button.add_css_class("tool-button-active");
-            } else {
-                slot_button.button.remove_css_class("tool-button-active");
-            }
         }
     }
 

@@ -739,22 +739,12 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             let top_tab = shell_state.active_top_dock_tab();
             let bottom_tab = shell_state.active_bottom_dock_tab();
 
-            set_menu_button_label(
-                &color_toggle,
-                if color_open {
-                    "Hide Color Panel"
-                } else {
-                    "Show Color Panel"
-                },
-            );
-            set_menu_button_label(
-                &properties_toggle,
-                if properties_open {
-                    "Hide Properties Panel"
-                } else {
-                    "Show Properties Panel"
-                },
-            );
+            let _ = color_open;
+            let _ = properties_open;
+            set_menu_button_label(&color_toggle, "Color Panel Docked");
+            set_menu_button_label(&properties_toggle, "Properties Panel Docked");
+            color_toggle.set_sensitive(false);
+            properties_toggle.set_sensitive(false);
             set_menu_button_label(
                 &history_toggle,
                 if top_tab == RightSidebarTopTab::History {
@@ -798,7 +788,7 @@ fn build_window_menu_button(shell_state: Rc<ShellUiState>) -> MenuButton {
             show_all.set_sensitive(
                 top_tab != RightSidebarTopTab::History
                     || bottom_tab != RightSidebarBottomTab::Layers
-                    || shell_state.active_context_panel() != Some(ContextDockPanel::Color),
+                    || shell_state.active_context_panel().is_some(),
             );
         });
     }

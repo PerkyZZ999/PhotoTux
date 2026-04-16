@@ -79,6 +79,7 @@ pub(crate) struct DocumentTabsTemplate {
     pub(crate) root: GtkBox,
     pub(crate) active_tab_button: Button,
     pub(crate) active_tab_label: Label,
+    pub(crate) active_tab_meta_label: Label,
     pub(crate) add_tab_placeholder: Label,
 }
 
@@ -187,6 +188,7 @@ pub(crate) fn load_document_tabs_template() -> Result<DocumentTabsTemplate> {
         root: b.get("document_tabs_root")?,
         active_tab_button: b.get("document_tab_active_button")?,
         active_tab_label: b.get("document_tab_title")?,
+        active_tab_meta_label: b.get("document_tab_meta")?,
         add_tab_placeholder: b.get("document_tab_add_placeholder")?,
     })
 }
@@ -333,10 +335,12 @@ mod tests {
         assert!(markup.contains("document_tabs_root"));
         assert!(markup.contains("document_tab_active_button"));
         assert!(markup.contains("document_tab_title"));
+        assert!(markup.contains("document_tab_meta"));
         assert!(markup.contains("document_tab_add_placeholder"));
         assert!(markup.contains("document-tabs"));
         assert!(markup.contains("document-tab-active"));
         assert!(markup.contains("document-tab-title"));
+        assert!(markup.contains("document-tab-meta"));
         assert!(markup.contains("document-tab-add"));
     }
 
@@ -456,6 +460,11 @@ mod tests {
         let document_tabs =
             load_document_tabs_template().expect("document tabs template should load");
         assert!(document_tabs.root.has_css_class("document-tabs"));
+        assert!(
+            document_tabs
+                .active_tab_meta_label
+                .has_css_class("document-tab-meta")
+        );
         assert_eq!(document_tabs.add_tab_placeholder.label(), "+");
 
         let status_bar = load_status_bar_template().expect("status bar template should load");

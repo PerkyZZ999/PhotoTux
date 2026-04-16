@@ -3,111 +3,156 @@ use crate::ui_templates::{
     DocumentTabsTemplate, PanelGroupTemplate, StatusBarTemplate, load_panel_group_template,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ToolRailSlot {
-    Move,
-    Selection,
-    Transform,
-    Text,
-    Paint,
-    Navigation,
-}
-
 pub(super) struct ToolRailSlotButton {
-    pub slot: ToolRailSlot,
+    pub tool: ShellToolKind,
     pub root: gtk4::Overlay,
     pub button: Button,
-    icon: Image,
-    visible_tool: Rc<Cell<ShellToolKind>>,
 }
 
 #[derive(Clone, Copy)]
-struct ToolRailSlotSpec {
-    slot: ToolRailSlot,
-    default_tool: ShellToolKind,
-    separator_before: bool,
+enum ToolRailEntry {
+    Actual {
+        tool: ShellToolKind,
+        icon_name: &'static str,
+        tooltip: &'static str,
+        has_submenu: bool,
+    },
+    Placeholder {
+        icon_name: &'static str,
+        tooltip: &'static str,
+        has_submenu: bool,
+    },
+    Divider,
 }
 
-const TOOL_RAIL_SLOT_SPECS: [ToolRailSlotSpec; 6] = [
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Move,
-        default_tool: ShellToolKind::Move,
-        separator_before: false,
+const TOOL_RAIL_ENTRIES: [ToolRailEntry; 24] = [
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Move,
+        icon_name: "tool-move.svg",
+        tooltip: "Move Tool (V)",
+        has_submenu: true,
     },
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Selection,
-        default_tool: ShellToolKind::RectangularMarquee,
-        separator_before: false,
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::RectangularMarquee,
+        icon_name: "tool-marquee.svg",
+        tooltip: "Rectangular Marquee (M)",
+        has_submenu: true,
     },
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Transform,
-        default_tool: ShellToolKind::Transform,
-        separator_before: true,
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Lasso,
+        icon_name: "tool-lasso.svg",
+        tooltip: "Lasso Tool (L)",
+        has_submenu: true,
     },
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Text,
-        default_tool: ShellToolKind::Text,
-        separator_before: false,
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-quick-selection.svg",
+        tooltip: "Quick Selection Tool (placeholder)",
+        has_submenu: true,
     },
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Paint,
-        default_tool: ShellToolKind::Brush,
-        separator_before: true,
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-crop.svg",
+        tooltip: "Crop Tool (placeholder)",
+        has_submenu: true,
     },
-    ToolRailSlotSpec {
-        slot: ToolRailSlot::Navigation,
-        default_tool: ShellToolKind::Hand,
-        separator_before: true,
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-eyedropper.svg",
+        tooltip: "Eyedropper Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Divider,
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-heal.svg",
+        tooltip: "Spot Healing Brush Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Brush,
+        icon_name: "brush-2-line.svg",
+        tooltip: "Brush Tool (B)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-clone-stamp.svg",
+        tooltip: "Clone Stamp Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-history-brush.svg",
+        tooltip: "History Brush Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Eraser,
+        icon_name: "eraser-line.svg",
+        tooltip: "Eraser Tool (E)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-gradient.svg",
+        tooltip: "Gradient Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-blur.svg",
+        tooltip: "Blur / Sharpen / Smudge (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-dodge.svg",
+        tooltip: "Dodge / Burn / Sponge (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Divider,
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-pen.svg",
+        tooltip: "Pen Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Text,
+        icon_name: "text.svg",
+        tooltip: "Text Tool (I)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-path-selection.svg",
+        tooltip: "Path Selection Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Placeholder {
+        icon_name: "tool-shape.svg",
+        tooltip: "Shape Tool (placeholder)",
+        has_submenu: true,
+    },
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Transform,
+        icon_name: "expand-diagonal-2-line.svg",
+        tooltip: "Transform Tool (T)",
+        has_submenu: false,
+    },
+    ToolRailEntry::Divider,
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Hand,
+        icon_name: "hand.svg",
+        tooltip: "Hand Tool (H)",
+        has_submenu: false,
+    },
+    ToolRailEntry::Actual {
+        tool: ShellToolKind::Zoom,
+        icon_name: "zoom-in-line.svg",
+        tooltip: "Zoom Tool (Z)",
+        has_submenu: false,
     },
 ];
-
-pub(super) fn tool_rail_slot_for_tool(tool: ShellToolKind) -> ToolRailSlot {
-    match tool {
-        ShellToolKind::Move => ToolRailSlot::Move,
-        ShellToolKind::RectangularMarquee | ShellToolKind::Lasso => ToolRailSlot::Selection,
-        ShellToolKind::Transform => ToolRailSlot::Transform,
-        ShellToolKind::Text => ToolRailSlot::Text,
-        ShellToolKind::Brush | ShellToolKind::Eraser => ToolRailSlot::Paint,
-        ShellToolKind::Hand | ShellToolKind::Zoom => ToolRailSlot::Navigation,
-    }
-}
 
 pub(super) fn sync_tool_rail_slot_button(
     slot_button: &ToolRailSlotButton,
     active_tool: ShellToolKind,
 ) {
-    if tool_rail_slot_for_tool(active_tool) == slot_button.slot
-        && slot_button.visible_tool.get() != active_tool
-    {
-        slot_button.visible_tool.set(active_tool);
-        update_tool_rail_slot_visuals(
-            &slot_button.button,
-            &slot_button.icon,
-            active_tool,
-            slot_button.slot,
-        );
-    }
-}
-
-fn tool_rail_slot_tools(slot: ToolRailSlot) -> &'static [ShellToolKind] {
-    match slot {
-        ToolRailSlot::Move => &[ShellToolKind::Move],
-        ToolRailSlot::Selection => &[ShellToolKind::RectangularMarquee, ShellToolKind::Lasso],
-        ToolRailSlot::Transform => &[ShellToolKind::Transform],
-        ToolRailSlot::Text => &[ShellToolKind::Text],
-        ToolRailSlot::Paint => &[ShellToolKind::Brush, ShellToolKind::Eraser],
-        ToolRailSlot::Navigation => &[ShellToolKind::Hand, ShellToolKind::Zoom],
-    }
-}
-
-fn tool_rail_slot_label(slot: ToolRailSlot) -> &'static str {
-    match slot {
-        ToolRailSlot::Move => "Move",
-        ToolRailSlot::Selection => "Selection",
-        ToolRailSlot::Transform => "Transform",
-        ToolRailSlot::Text => "Type",
-        ToolRailSlot::Paint => "Paint",
-        ToolRailSlot::Navigation => "Navigation",
+    if active_tool == slot_button.tool {
+        slot_button.button.add_css_class("tool-button-active");
+    } else {
+        slot_button.button.remove_css_class("tool-button-active");
     }
 }
 
@@ -131,20 +176,41 @@ pub(super) fn build_tool_options_bar(
 pub(super) fn build_left_tool_rail(
     controller: Rc<RefCell<dyn ShellController>>,
 ) -> (GtkBox, Vec<ToolRailSlotButton>) {
-    let rail = GtkBox::new(Orientation::Vertical, 3);
+    let rail = GtkBox::new(Orientation::Vertical, 2);
     rail.add_css_class("tool-rail");
-    rail.set_size_request(36, -1);
+    rail.set_size_request(44, -1);
 
     let mut buttons = Vec::new();
 
-    for spec in TOOL_RAIL_SLOT_SPECS {
-        if spec.separator_before {
-            rail.append(&build_tool_rail_separator());
+    for entry in TOOL_RAIL_ENTRIES {
+        match entry {
+            ToolRailEntry::Divider => rail.append(&build_tool_rail_separator()),
+            ToolRailEntry::Actual {
+                tool,
+                icon_name,
+                tooltip,
+                has_submenu,
+            } => {
+                let tool_button = build_tool_rail_button(
+                    controller.clone(),
+                    tool,
+                    icon_name,
+                    tooltip,
+                    has_submenu,
+                );
+                rail.append(&tool_button.root);
+                buttons.push(tool_button);
+            }
+            ToolRailEntry::Placeholder {
+                icon_name,
+                tooltip,
+                has_submenu,
+            } => rail.append(&build_tool_rail_placeholder_button(
+                icon_name,
+                tooltip,
+                has_submenu,
+            )),
         }
-
-        let slot_button = build_tool_rail_button(controller.clone(), spec);
-        rail.append(&slot_button.root);
-        buttons.push(slot_button);
     }
 
     let spacer = GtkBox::new(Orientation::Vertical, 0);
@@ -197,6 +263,16 @@ pub(super) fn build_left_tool_rail(
     swatch_actions.append(&swap_colors);
 
     rail_spacer.append(&swatch_actions);
+    rail_spacer.append(&build_tool_rail_placeholder_button(
+        "tool-quick-mask.svg",
+        "Edit in Quick Mask (placeholder)",
+        false,
+    ));
+    rail_spacer.append(&build_tool_rail_placeholder_button(
+        "tool-screen-mode.svg",
+        "Change Screen Mode (placeholder)",
+        false,
+    ));
     rail.append(&rail_spacer);
 
     (rail, buttons)
@@ -204,70 +280,64 @@ pub(super) fn build_left_tool_rail(
 
 fn build_tool_rail_button(
     controller: Rc<RefCell<dyn ShellController>>,
-    spec: ToolRailSlotSpec,
+    tool: ShellToolKind,
+    icon_name: &'static str,
+    tooltip: &'static str,
+    has_submenu: bool,
 ) -> ToolRailSlotButton {
-    let visible_tool = Rc::new(Cell::new(spec.default_tool));
+    let (root, button) = build_tool_rail_button_shell(icon_name, tooltip, has_submenu);
+
+    {
+        let controller = controller.clone();
+        button.connect_clicked(move |_| controller.borrow_mut().select_tool(tool));
+    }
+
+    ToolRailSlotButton { tool, root, button }
+}
+
+fn build_tool_rail_placeholder_button(
+    icon_name: &'static str,
+    tooltip: &'static str,
+    has_submenu: bool,
+) -> gtk4::Overlay {
+    let (root, button) = build_tool_rail_button_shell(icon_name, tooltip, has_submenu);
+    button.add_css_class("tool-button-placeholder");
+    root
+}
+
+fn build_tool_rail_button_shell(
+    icon_name: &'static str,
+    tooltip: &'static str,
+    has_submenu: bool,
+) -> (gtk4::Overlay, Button) {
     let root = gtk4::Overlay::new();
     root.set_halign(Align::Center);
     root.set_valign(Align::Start);
 
     let button = Button::new();
     button.add_css_class("tool-button");
-    button.set_size_request(24, 24);
+    button.set_size_request(32, 32);
     button.set_has_frame(false);
+    button.set_tooltip_text(Some(tooltip));
+    button.update_property(&[gtk4::accessible::Property::Label(tooltip)]);
 
-    let overlay = gtk4::Overlay::new();
-    overlay.set_halign(Align::Fill);
-    overlay.set_valign(Align::Fill);
-
-    let icon = build_remix_icon(
-        shell_tool_icon(spec.default_tool),
-        spec.default_tool.label(),
-        18,
-    );
+    let icon = build_remix_icon(icon_name, tooltip, 18);
     icon.set_accessible_role(gtk4::AccessibleRole::Presentation);
-    overlay.set_child(Some(&icon));
-
-    button.set_child(Some(&overlay));
-    update_tool_rail_slot_visuals(&button, &icon, spec.default_tool, spec.slot);
+    button.set_child(Some(&icon));
     root.set_child(Some(&button));
 
-    {
-        let controller = controller.clone();
-        let visible_tool = visible_tool.clone();
-        button.connect_clicked(move |_| controller.borrow_mut().select_tool(visible_tool.get()));
+    if has_submenu {
+        let indicator = Label::new(Some("▾"));
+        indicator.add_css_class("tool-button-corner-indicator");
+        indicator.set_halign(Align::End);
+        indicator.set_valign(Align::End);
+        indicator.set_margin_end(2);
+        indicator.set_margin_bottom(1);
+        indicator.set_can_target(false);
+        root.add_overlay(&indicator);
     }
 
-    if tool_rail_slot_tools(spec.slot).len() > 1 {
-        let menu_button = MenuButton::new();
-        menu_button.set_has_frame(false);
-        menu_button.add_css_class("tool-button-flyout-hotspot");
-        menu_button.add_css_class("tool-button-flyout-indicator");
-        menu_button.set_halign(Align::End);
-        menu_button.set_valign(Align::End);
-        menu_button.set_margin_end(1);
-        menu_button.set_margin_bottom(1);
-        menu_button.set_label("▾");
-
-        let popover = build_tool_rail_slot_popover(
-            controller.clone(),
-            button.clone(),
-            icon.clone(),
-            visible_tool.clone(),
-            spec.slot,
-        );
-        menu_button.set_popover(Some(&popover));
-        root.add_overlay(&menu_button);
-        attach_tool_rail_slot_flyout(&button, &menu_button);
-    }
-
-    ToolRailSlotButton {
-        slot: spec.slot,
-        root,
-        button,
-        icon,
-        visible_tool,
-    }
+    (root, button)
 }
 
 fn build_tool_rail_separator() -> Separator {
@@ -294,99 +364,7 @@ where
     button
 }
 
-fn build_tool_rail_slot_popover(
-    controller: Rc<RefCell<dyn ShellController>>,
-    anchor: Button,
-    icon: Image,
-    visible_tool: Rc<Cell<ShellToolKind>>,
-    slot: ToolRailSlot,
-) -> Popover {
-    let popover = Popover::new();
-    popover.set_has_arrow(false);
-    popover.add_css_class("menu-dropdown");
-    popover.set_position(gtk4::PositionType::Right);
-    popover.add_css_class("tool-flyout-popover");
-
-    let menu = GtkBox::new(Orientation::Vertical, 0);
-    menu.add_css_class("menu-dropdown-body");
-    menu.add_css_class("tool-flyout-body");
-
-    for &tool in tool_rail_slot_tools(slot) {
-        let label = tool.label();
-        let item = build_icon_label_shortcut_button(
-            shell_tool_icon(tool),
-            label,
-            Some(shell_tool_shortcut(tool)),
-        );
-        if tool == visible_tool.get() {
-            item.add_css_class("menu-button-active");
-        }
-        {
-            let controller = controller.clone();
-            let anchor = anchor.clone();
-            let icon = icon.clone();
-            let visible_tool = visible_tool.clone();
-            let popover = popover.clone();
-            item.connect_clicked(move |_| {
-                visible_tool.set(tool);
-                update_tool_rail_slot_visuals(&anchor, &icon, tool, slot);
-                popover.popdown();
-                controller.borrow_mut().select_tool(tool);
-            });
-        }
-        menu.append(&item);
-    }
-
-    popover.set_child(Some(&menu));
-    popover
-}
-
-fn attach_tool_rail_slot_flyout(button: &Button, menu_button: &MenuButton) {
-    let secondary_click = GestureClick::new();
-    secondary_click.set_button(gdk::BUTTON_SECONDARY);
-    {
-        let menu_button = menu_button.clone();
-        secondary_click.connect_pressed(move |gesture, _, _, _| {
-            menu_button.popup();
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-        });
-    }
-    button.add_controller(secondary_click);
-
-    let long_press = GestureLongPress::new();
-    long_press.set_touch_only(false);
-    {
-        let menu_button = menu_button.clone();
-        long_press.connect_pressed(move |gesture, _, _| {
-            menu_button.popup();
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-        });
-    }
-    button.add_controller(long_press);
-}
-
-fn update_tool_rail_slot_visuals(
-    button: &Button,
-    icon: &Image,
-    tool: ShellToolKind,
-    slot: ToolRailSlot,
-) {
-    set_remix_icon_or_fallback(icon, shell_tool_icon(tool), tool.label(), 18);
-    let tooltip = if tool_rail_slot_tools(slot).len() > 1 {
-        format!(
-            "{} ({}) — open the flyout for {} tools",
-            tool.label(),
-            shell_tool_shortcut(tool),
-            tool_rail_slot_label(slot).to_lowercase()
-        )
-    } else {
-        format!("{} ({})", tool.label(), shell_tool_shortcut(tool))
-    };
-    button.set_tooltip_text(Some(&tooltip));
-    button.update_property(&[gtk4::accessible::Property::Label(&tooltip)]);
-}
-
-pub(super) fn build_document_tabs() -> (GtkBox, Label) {
+pub(super) fn build_document_tabs() -> (GtkBox, Label, Label) {
     load_document_tabs_template()
         .map(build_document_tabs_from_template)
         .unwrap_or_else(|error| {
@@ -404,13 +382,15 @@ pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> Gt
     context_host.set_hexpand(false);
     context_host.set_halign(Align::End);
     context_host.set_valign(Align::Start);
-    context_host.set_margin_end(530);
+    context_host.set_margin_end(346);
     context_host.set_margin_top(4);
-    context_host.append(&shell_state.color_group);
-    context_host.append(&shell_state.properties_group);
+    context_host.append(&shell_state.history_group);
     context_host.append(&shell_state.brush_group);
     context_host.append(&shell_state.text_group);
-    context_host.set_visible(shell_state.active_context_panel.get().is_some());
+    context_host.set_visible(matches!(
+        shell_state.active_context_panel.get(),
+        Some(ContextDockPanel::History | ContextDockPanel::Brush | ContextDockPanel::Text)
+    ));
     shell_state
         .context_panel_host
         .replace(Some(context_host.clone()));
@@ -421,55 +401,119 @@ pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> Gt
 pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     let sidebar = GtkBox::new(Orientation::Horizontal, 0);
     sidebar.add_css_class("right-sidebar");
-    sidebar.set_size_request(360, -1);
+    sidebar.set_size_request(336, -1);
 
-    let dock_icons = GtkBox::new(Orientation::Vertical, 4);
+    let dock_icons = GtkBox::new(Orientation::Vertical, 2);
     dock_icons.add_css_class("panel-icon-strip");
-    for (panel, icon_name, tooltip) in [
-        (ContextDockPanel::Color, "palette-line.svg", "Color"),
-        (
-            ContextDockPanel::Properties,
-            "settings-4-line.svg",
-            "Properties",
-        ),
-        (ContextDockPanel::Brush, "brush-2-line.svg", "Brush"),
-        (ContextDockPanel::Text, "text.svg", "Text"),
-    ] {
-        let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 18);
-        button.add_css_class("dock-icon-button");
-        button.set_size_request(28, 28);
-        {
-            let shell_state = shell_state.clone();
-            button.connect_clicked(move |_| shell_state.toggle_context_panel(panel));
-        }
-        shell_state
-            .context_toolbar_buttons
-            .borrow_mut()
-            .push((panel, button.clone()));
-        dock_icons.append(&button);
-    }
+    dock_icons.append(&build_context_dock_icon_button(
+        shell_state,
+        ContextDockPanel::History,
+        "history-line.svg",
+        "History",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "focus-3-line.svg",
+        "Navigator (placeholder)",
+    ));
+    dock_icons.append(&build_context_dock_icon_button(
+        shell_state,
+        ContextDockPanel::Brush,
+        "brush-2-line.svg",
+        "Brushes",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "settings-4-line.svg",
+        "Brush Settings (placeholder)",
+    ));
+    dock_icons.append(&build_context_dock_icon_button(
+        shell_state,
+        ContextDockPanel::Text,
+        "text.svg",
+        "Character",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "layout-column-line.svg",
+        "Paragraph (placeholder)",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "search-line.svg",
+        "Info (placeholder)",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "node-tree.svg",
+        "Histogram (placeholder)",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "arrow-go-forward-line.svg",
+        "Actions (placeholder)",
+    ));
+    dock_icons.append(&build_placeholder_dock_icon_button(
+        "arrow-go-back-line.svg",
+        "Timeline (placeholder)",
+    ));
 
     let dock = GtkBox::new(Orientation::Vertical, 0);
     dock.add_css_class("panel-dock");
     dock.set_hexpand(true);
     dock.set_vexpand(true);
 
-    let paned = Paned::new(Orientation::Vertical);
-    paned.set_start_child(Some(&shell_state.history_group));
-    paned.set_end_child(Some(&shell_state.layers_group));
-    paned.set_position(210);
-    paned.set_wide_handle(true);
-    paned.set_vexpand(true);
-    paned.set_focusable(false);
-    dock.append(&paned);
+    let top_stack = GtkBox::new(Orientation::Vertical, 0);
+    top_stack.add_css_class("panel-dock-top-stack");
+    top_stack.append(&shell_state.color_group);
+    top_stack.append(&shell_state.properties_group);
+
+    let top_scroller = ScrolledWindow::new();
+    top_scroller.add_css_class("panel-scroller");
+    top_scroller.add_css_class("panel-dock-top-scroller");
+    top_scroller.set_hexpand(true);
+    top_scroller.set_vexpand(true);
+    top_scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
+    top_scroller.set_child(Some(&top_stack));
+
+    let panel_split = Paned::new(Orientation::Vertical);
+    panel_split.set_start_child(Some(&top_scroller));
+    panel_split.set_end_child(Some(&shell_state.layers_group));
+    panel_split.set_position(468);
+    panel_split.set_wide_handle(true);
+    panel_split.set_vexpand(true);
+    panel_split.set_focusable(false);
+    dock.append(&panel_split);
 
     let base = GtkBox::new(Orientation::Horizontal, 0);
     base.add_css_class("right-sidebar-base");
-    base.append(&dock_icons);
     base.append(&dock);
+    base.append(&dock_icons);
 
     sidebar.append(&base);
     sidebar
+}
+
+fn build_context_dock_icon_button(
+    shell_state: &Rc<ShellUiState>,
+    panel: ContextDockPanel,
+    icon_name: &'static str,
+    tooltip: &'static str,
+) -> Button {
+    let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 16);
+    button.add_css_class("dock-icon-button");
+    button.set_size_request(30, 30);
+    {
+        let shell_state = shell_state.clone();
+        button.connect_clicked(move |_| shell_state.toggle_context_panel(panel));
+    }
+    shell_state
+        .context_toolbar_buttons
+        .borrow_mut()
+        .push((panel, button.clone()));
+    button
+}
+
+fn build_placeholder_dock_icon_button(icon_name: &'static str, tooltip: &'static str) -> Button {
+    let button = build_icon_only_button(icon_name, tooltip, "dock-icon-button", 16);
+    button.add_css_class("dock-icon-button");
+    button.add_css_class("dock-icon-button-placeholder");
+    button.set_size_request(30, 30);
+    button
 }
 
 pub(super) fn build_interactive_panel_group(
@@ -590,36 +634,53 @@ pub(super) fn build_panel_group(
     }
 }
 
-fn build_document_tabs_fallback() -> (GtkBox, Label) {
-    let tabs = GtkBox::new(Orientation::Horizontal, 4);
+fn build_document_tabs_fallback() -> (GtkBox, Label, Label) {
+    let tabs = GtkBox::new(Orientation::Horizontal, 6);
     tabs.add_css_class("document-tabs");
 
-    let active_tab = Button::with_label("");
+    let active_tab = Button::new();
+    active_tab.set_has_frame(false);
     active_tab.add_css_class("document-tab-active");
     let active_tab_label = Label::new(None);
+    let active_tab_meta_label = Label::new(Some("@ 100% (RGB/8)"));
+    active_tab_meta_label.add_css_class("document-tab-meta");
+    let close_placeholder = Label::new(Some("×"));
+    close_placeholder.add_css_class("document-tab-close");
+    close_placeholder.set_tooltip_text(Some("Document close is not implemented yet"));
 
     let tab_content = GtkBox::new(Orientation::Horizontal, 6);
     tab_content.add_css_class("document-tab-content");
     active_tab_label.add_css_class("document-tab-title");
     tab_content.append(&active_tab_label);
+    tab_content.append(&active_tab_meta_label);
+    tab_content.append(&close_placeholder);
 
     active_tab.set_child(Some(&tab_content));
     tabs.append(&active_tab);
+
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    spacer.add_css_class("document-tabs-spacer");
+    tabs.append(&spacer);
 
     let plus_tab = Label::new(Some("+"));
     plus_tab.add_css_class("document-tab-add");
     plus_tab.set_tooltip_text(Some("Multiple document tabs are not active yet"));
     tabs.append(&plus_tab);
 
-    (tabs, active_tab_label)
+    (tabs, active_tab_label, active_tab_meta_label)
 }
 
-fn build_document_tabs_from_template(template: DocumentTabsTemplate) -> (GtkBox, Label) {
+fn build_document_tabs_from_template(template: DocumentTabsTemplate) -> (GtkBox, Label, Label) {
     template.active_tab_button.set_can_focus(false);
     template
         .add_tab_placeholder
         .set_tooltip_text(Some("Multiple document tabs are not active yet"));
-    (template.root, template.active_tab_label)
+    (
+        template.root,
+        template.active_tab_label,
+        template.active_tab_meta_label,
+    )
 }
 
 fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
