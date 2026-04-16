@@ -16,12 +16,12 @@ pub(super) fn remix_icon_resource_path(icon_name: &str) -> String {
 
 pub(super) const APP_WINDOW_ICON_NAME: &str = "phototux-logo-icon";
 
-pub(super) fn logo_icon_resource_path(_dark_background: bool) -> &'static str {
-    "/com/phototux/assets/logo/Logo_Icon.png"
+pub(super) fn splash_logo_resource_path() -> &'static str {
+    "/com/phototux/assets/logo/Logo_White.png"
 }
 
-pub(super) fn build_logo_icon(dark_background: bool, alt_text: &str, size: i32) -> Image {
-    build_optional_resource_image(logo_icon_resource_path(dark_background), alt_text, size)
+pub(super) fn build_splash_logo(alt_text: &str, size: i32) -> Image {
+    build_optional_resource_image(splash_logo_resource_path(), alt_text, size)
 }
 
 pub(super) fn build_remix_icon(icon_name: &str, alt_text: &str, size: i32) -> Image {

@@ -625,43 +625,39 @@ fn build_document_tabs_from_template(template: DocumentTabsTemplate) -> (GtkBox,
 fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     let workspace = GtkBox::new(Orientation::Vertical, 0);
     workspace.add_css_class("document-workspace");
+    workspace.set_hexpand(true);
+    workspace.set_vexpand(true);
 
     let canvas_cluster = GtkBox::new(Orientation::Vertical, 0);
     canvas_cluster.add_css_class("canvas-cluster");
     canvas_cluster.set_hexpand(true);
     canvas_cluster.set_vexpand(true);
-    canvas_cluster.set_halign(Align::Center);
-    canvas_cluster.set_valign(Align::Center);
+    canvas_cluster.set_halign(Align::Fill);
+    canvas_cluster.set_valign(Align::Fill);
 
-    let top_strip = GtkBox::new(Orientation::Horizontal, 0);
-    top_strip.set_halign(Align::Center);
-    top_strip.set_hexpand(true);
+    let chrome_grid = gtk4::Grid::new();
+    chrome_grid.set_hexpand(true);
+    chrome_grid.set_vexpand(true);
+    chrome_grid.set_halign(Align::Fill);
+    chrome_grid.set_valign(Align::Fill);
     let top_left_corner = Label::new(Some(""));
     top_left_corner.add_css_class("ruler-corner");
     top_left_corner.set_accessible_role(gtk4::AccessibleRole::Presentation);
-    top_left_corner.set_size_request(24, 24);
-    top_strip.append(&top_left_corner);
+    top_left_corner.set_size_request(20, 20);
+    chrome_grid.attach(&top_left_corner, 0, 0, 1, 1);
 
-    // allow the horizontal ruler label to expand so it matches the canvas width
     shell_state.horizontal_ruler_label.set_hexpand(true);
-    top_strip.append(&shell_state.horizontal_ruler_label);
-    canvas_cluster.append(&top_strip);
+    shell_state.horizontal_ruler_label.set_halign(Align::Fill);
+    chrome_grid.attach(&shell_state.horizontal_ruler_label, 1, 0, 1, 1);
 
-    let content = GtkBox::new(Orientation::Horizontal, 0);
-    content.set_halign(Align::Center);
-    content.set_valign(Align::Center);
-    // let the content expand horizontally so the canvas and rulers size together
-    content.set_hexpand(true);
-
-    // make the vertical ruler stretch to the height of the canvas
     shell_state.vertical_ruler_label.set_vexpand(true);
-    content.append(&shell_state.vertical_ruler_label);
+    shell_state.vertical_ruler_label.set_valign(Align::Fill);
+    chrome_grid.attach(&shell_state.vertical_ruler_label, 0, 1, 1, 1);
 
     let canvas_frame = GtkBox::new(Orientation::Vertical, 0);
     canvas_frame.add_css_class("canvas-frame");
-    canvas_frame.set_halign(Align::Start);
-    canvas_frame.set_valign(Align::Start);
-    // ensure the canvas frame expands to fill available space, keeping rulers aligned
+    canvas_frame.set_halign(Align::Fill);
+    canvas_frame.set_valign(Align::Fill);
     canvas_frame.set_hexpand(true);
     canvas_frame.set_vexpand(true);
 
@@ -696,8 +692,8 @@ fn build_document_workspace(shell_state: &ShellUiState) -> GtkBox {
     canvas_overlay.add_overlay(&task_bar);
     canvas_frame.append(&canvas_overlay);
 
-    content.append(&canvas_frame);
-    canvas_cluster.append(&content);
+    chrome_grid.attach(&canvas_frame, 1, 1, 1, 1);
+    canvas_cluster.append(&chrome_grid);
     workspace.append(&canvas_cluster);
 
     workspace

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui_support::build_splash_logo;
 use gtk4::Spinner;
 use std::time::Instant;
 
@@ -85,7 +86,7 @@ impl StartupSplash {
         content.set_margin_start(28);
         content.set_margin_end(28);
 
-        let logo = build_logo_icon(true, APP_NAME, 256);
+        let logo = build_splash_logo(APP_NAME, 256);
         logo.add_css_class("startup-splash-logo");
         content.append(&logo);
 

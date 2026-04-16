@@ -45,8 +45,8 @@ use status_presenter::{
 };
 use ui_support::{
     APP_WINDOW_ICON_NAME, build_icon_label_button, build_icon_label_shortcut_button,
-    build_icon_only_button, build_logo_icon, build_remix_icon, create_menu_popover,
-    set_menu_button_label, set_remix_icon_or_fallback, shell_tool_icon, shell_tool_shortcut,
+    build_icon_only_button, build_remix_icon, create_menu_popover, set_menu_button_label,
+    set_remix_icon_or_fallback, shell_tool_icon, shell_tool_shortcut,
 };
 
 const UI_RESOURCE_PREFIX: &str = "/com/phototux";
@@ -70,6 +70,28 @@ pub enum RulerUnit {
     Pixels,
     Inches,
     Centimeters,
+}
+
+impl RulerUnit {
+    const PIXELS_PER_INCH: f64 = 96.0;
+    const CENTIMETERS_PER_INCH: f64 = 2.54;
+
+    fn pixels_per_unit(self) -> f64 {
+        match self {
+            Self::Pixels => 1.0,
+            Self::Inches => Self::PIXELS_PER_INCH,
+            Self::Centimeters => Self::PIXELS_PER_INCH / Self::CENTIMETERS_PER_INCH,
+        }
+    }
+
+    fn format_pixels(self, pixels: f64) -> String {
+        match self {
+            Self::Pixels => format!("{}", pixels.round() as i32),
+            Self::Inches | Self::Centimeters => {
+                format_ruler_decimal(pixels / self.pixels_per_unit())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,6 +419,14 @@ fn build_color_chip(label_text: &str, css_class: &str) -> Button {
     button
 }
 
+fn format_ruler_decimal(value: f64) -> String {
+    let formatted = format!("{value:.2}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
 fn build_ruler_stops(max: u32) -> [u32; 5] {
     let quarter = (max / 4).max(1);
     [0, quarter, quarter * 2, quarter * 3, max.max(1)]
@@ -434,6 +464,179 @@ fn build_ruler_stops_range(min_in: i32, max_in: i32) -> [i32; 5] {
         min + quarter * 3,
         max,
     ]
+}
+
+fn compute_visible_ruler_range(
+    pan: f32,
+    zoom: f32,
+    viewport_extent: u32,
+) -> Option<(i32, i32)> {
+    if zoom <= 0.0 || viewport_extent == 0 {
+        return None;
+    }
+
+    let mut min_value = ((0.0 - pan) / zoom).floor() as i32;
+    let mut max_value = ((viewport_extent as f32 - pan) / zoom).ceil() as i32;
+
+    if min_value > max_value {
+        std::mem::swap(&mut min_value, &mut max_value);
+    }
+
+    Some((min_value, max_value))
+}
+
+fn normalize_ruler_step(raw_step: f64) -> f64 {
+    let raw_step = raw_step.max(f64::EPSILON);
+    let magnitude = 10_f64.powf(raw_step.log10().floor());
+    let normalized = raw_step / magnitude;
+    let base = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    base * magnitude
+}
+
+fn pick_ruler_major_step(unit: RulerUnit, zoom: f32) -> f64 {
+    let target_screen_spacing = 90.0;
+    let screen_pixels_per_unit = (zoom as f64 * unit.pixels_per_unit()).max(f64::EPSILON);
+    normalize_ruler_step(target_screen_spacing / screen_pixels_per_unit)
+}
+
+fn draw_ruler_background(
+    ctx: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    horizontal: bool,
+) {
+    ctx.set_source_rgb(0.17, 0.17, 0.17);
+    ctx.rectangle(0.0, 0.0, width, height);
+    let _ = ctx.fill();
+
+    ctx.set_line_width(1.0);
+    ctx.set_source_rgb(0.28, 0.28, 0.28);
+    if horizontal {
+        ctx.move_to(0.0, height - 0.5);
+        ctx.line_to(width, height - 0.5);
+    } else {
+        ctx.move_to(width - 0.5, 0.0);
+        ctx.line_to(width - 0.5, height);
+    }
+    let _ = ctx.stroke();
+}
+
+fn draw_horizontal_ruler(
+    ctx: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    pan_x: f32,
+    zoom: f32,
+    viewport_width: u32,
+    unit: RulerUnit,
+) {
+    draw_ruler_background(ctx, width, height, true);
+
+    let Some((visible_min, visible_max)) = compute_visible_ruler_range(pan_x, zoom, viewport_width)
+    else {
+        return;
+    };
+
+    let major_step = pick_ruler_major_step(unit, zoom);
+    let minor_step = major_step / 10.0;
+    let pixels_per_unit = unit.pixels_per_unit();
+    let min_units = visible_min as f64 / pixels_per_unit;
+    let max_units = visible_max as f64 / pixels_per_unit;
+    let start_index = (min_units / minor_step).floor() as i64 - 1;
+    let end_index = (max_units / minor_step).ceil() as i64 + 1;
+
+    ctx.set_source_rgb(0.72, 0.72, 0.72);
+    ctx.set_font_size(9.0);
+    for index in start_index..=end_index {
+        let unit_value = index as f64 * minor_step;
+        let canvas_value = unit_value * pixels_per_unit;
+        let screen_x = canvas_value * zoom as f64 + pan_x as f64;
+        if screen_x < -2.0 || screen_x > width + 2.0 {
+            continue;
+        }
+
+        let tick_top = if index % 10 == 0 {
+            height - 12.0
+        } else if index % 5 == 0 {
+            height - 8.0
+        } else {
+            height - 5.0
+        };
+        ctx.move_to(screen_x + 0.5, tick_top);
+        ctx.line_to(screen_x + 0.5, height);
+        let _ = ctx.stroke();
+
+        if index % 10 == 0 {
+            let label = unit.format_pixels(canvas_value);
+            let label_x = (screen_x + 3.0).clamp(2.0, (width - 24.0).max(2.0));
+            ctx.move_to(label_x, 9.5);
+            let _ = ctx.show_text(&label);
+        }
+    }
+}
+
+fn draw_vertical_ruler(
+    ctx: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    pan_y: f32,
+    zoom: f32,
+    viewport_height: u32,
+    unit: RulerUnit,
+) {
+    draw_ruler_background(ctx, width, height, false);
+
+    let Some((visible_min, visible_max)) = compute_visible_ruler_range(pan_y, zoom, viewport_height)
+    else {
+        return;
+    };
+
+    let major_step = pick_ruler_major_step(unit, zoom);
+    let minor_step = major_step / 10.0;
+    let pixels_per_unit = unit.pixels_per_unit();
+    let min_units = visible_min as f64 / pixels_per_unit;
+    let max_units = visible_max as f64 / pixels_per_unit;
+    let start_index = (min_units / minor_step).floor() as i64 - 1;
+    let end_index = (max_units / minor_step).ceil() as i64 + 1;
+
+    ctx.set_source_rgb(0.72, 0.72, 0.72);
+    ctx.set_font_size(9.0);
+    for index in start_index..=end_index {
+        let unit_value = index as f64 * minor_step;
+        let canvas_value = unit_value * pixels_per_unit;
+        let screen_y = canvas_value * zoom as f64 + pan_y as f64;
+        if screen_y < -2.0 || screen_y > height + 2.0 {
+            continue;
+        }
+
+        let tick_left = if index % 10 == 0 {
+            width - 12.0
+        } else if index % 5 == 0 {
+            width - 8.0
+        } else {
+            width - 5.0
+        };
+        ctx.move_to(tick_left, screen_y + 0.5);
+        ctx.line_to(width, screen_y + 0.5);
+        let _ = ctx.stroke();
+
+        if index % 10 == 0 && screen_y > 20.0 {
+            let label = unit.format_pixels(canvas_value);
+            let _ = ctx.save();
+            ctx.translate(10.0, screen_y - 2.0);
+            ctx.rotate(-std::f64::consts::FRAC_PI_2);
+            let _ = ctx.show_text(&label);
+            let _ = ctx.restore();
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -835,10 +1038,10 @@ impl ShellUiState {
 
         // Setup ruler draw callbacks and unit selection menu
         {
-            let controller_h = controller.clone();
             let canvas_state_h = canvas_state.clone();
-            let controller_v = controller.clone();
+            let shell_state_h = shell_state.clone();
             let canvas_state_v = canvas_state.clone();
+            let shell_state_v = shell_state.clone();
             let horizontal = shell_state.horizontal_ruler_label.clone();
             let vertical = shell_state.vertical_ruler_label.clone();
 
@@ -846,91 +1049,32 @@ impl ShellUiState {
             horizontal.set_draw_func(move |_, ctx, width, height| {
                 let width = width as f64;
                 let height = height as f64;
-
-                // background
-                ctx.set_source_rgba(0.98, 0.98, 0.98, 1.0);
-                ctx.rectangle(0.0, 0.0, width, height);
-                let _ = ctx.fill();
-
-                // baseline
-                ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
-                ctx.set_line_width(1.0);
-                ctx.move_to(0.0, height - 0.5);
-                ctx.line_to(width, height - 0.5);
-                let _ = ctx.stroke();
-
-                // compute visible range
-                let snapshot = controller_h.borrow().snapshot();
                 let (pan_x, _pan_y, zoom, pic_w, _pic_h) = canvas_state_h.borrow().viewport_info();
-                let cs_w = snapshot.canvas_size.width as i32;
-
-                if zoom <= 0.0 || pic_w == 0 {
-                    return;
-                }
-
-                let mut vmin_x = ((0.0 - pan_x) / zoom).round() as i32;
-                let mut vmax_x = ((pic_w as f32 - pan_x) / zoom).round() as i32;
-                vmin_x = vmin_x.clamp(0, cs_w);
-                vmax_x = vmax_x.clamp(0, cs_w);
-
-                let stops = build_ruler_stops_range(vmin_x, vmax_x);
-                ctx.set_source_rgba(0.2, 0.2, 0.2, 1.0);
-                ctx.set_font_size(10.0);
-                for &s in &stops {
-                    let x = (s as f32 * zoom + pan_x) as f64;
-                    // major tick
-                    ctx.move_to(x + 0.5, height - 4.0);
-                    ctx.line_to(x + 0.5, height - 0.5);
-                    let _ = ctx.stroke();
-                    // label
-                    let label = format!("{}", s);
-                    ctx.move_to(x + 2.0, 10.0);
-                    let _ = ctx.show_text(&label);
-                }
+                draw_horizontal_ruler(
+                    ctx,
+                    width,
+                    height,
+                    pan_x,
+                    zoom,
+                    pic_w,
+                    shell_state_h.ruler_unit.get(),
+                );
             });
 
             // Draw vertical ruler ticks and labels
             vertical.set_draw_func(move |_, ctx, width, height| {
                 let width = width as f64;
                 let height = height as f64;
-
-                ctx.set_source_rgba(0.98, 0.98, 0.98, 1.0);
-                ctx.rectangle(0.0, 0.0, width, height);
-                let _ = ctx.fill();
-
-                ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
-                ctx.set_line_width(1.0);
-                ctx.move_to(width - 0.5, 0.0);
-                ctx.line_to(width - 0.5, height);
-                let _ = ctx.stroke();
-
-                let snapshot = controller_v.borrow().snapshot();
                 let (_pan_x, pan_y, zoom, _pic_w, pic_h) = canvas_state_v.borrow().viewport_info();
-                let cs_h = snapshot.canvas_size.height as i32;
-
-                if zoom <= 0.0 || pic_h == 0 {
-                    return;
-                }
-
-                let mut vmin_y = ((0.0 - pan_y) / zoom).round() as i32;
-                let mut vmax_y = ((pic_h as f32 - pan_y) / zoom).round() as i32;
-                vmin_y = vmin_y.clamp(0, cs_h);
-                vmax_y = vmax_y.clamp(0, cs_h);
-
-                let stops = build_ruler_stops_range(vmin_y, vmax_y);
-                ctx.set_source_rgba(0.2, 0.2, 0.2, 1.0);
-                ctx.set_font_size(10.0);
-                for &s in &stops {
-                    let y = (s as f32 * zoom + pan_y) as f64;
-                    // major tick
-                    ctx.move_to(width - 4.0, y + 0.5);
-                    ctx.line_to(width - 0.5, y + 0.5);
-                    let _ = ctx.stroke();
-                    // label
-                    let label = format!("{}", s);
-                    ctx.move_to(2.0, y + 4.0);
-                    let _ = ctx.show_text(&label);
-                }
+                draw_vertical_ruler(
+                    ctx,
+                    width,
+                    height,
+                    pan_y,
+                    zoom,
+                    pic_h,
+                    shell_state_v.ruler_unit.get(),
+                );
             });
 
             // Build units popover/menu and attach secondary (right-click) gesture
@@ -2064,6 +2208,10 @@ impl ShellUiState {
             "{} @ {}% ({})",
             snapshot.document_title, zoom_percent, "RGB/8"
         ));
+        self.horizontal_ruler_label
+            .set_content_width(self.canvas_picture.width().max(1));
+        self.vertical_ruler_label
+            .set_content_height(self.canvas_picture.height().max(1));
         // Trigger ruler redraws (draw callbacks read viewport info directly)
         self.horizontal_ruler_label.queue_draw();
         self.vertical_ruler_label.queue_draw();
@@ -2620,7 +2768,7 @@ menubutton.menu-button > button.toggle:focus-visible {
 }
 
 .canvas-cluster {
-    padding: 10px 16px 16px 16px;
+    padding: 0;
 }
 
 .document-tab-add {
@@ -2631,28 +2779,28 @@ menubutton.menu-button > button.toggle:focus-visible {
 .ruler-corner,
 .ruler-horizontal,
 .ruler-vertical {
-    background: #202020;
-    color: #7d8591;
-    border: 1px solid #3a3a3a;
+    background: #2b2b2b;
+    color: #b8b8b8;
+    border: none;
     font-size: 9px; /* font.size.xs */
     font-family: "JetBrains Mono", "Cascadia Code", monospace;
 }
 
 .ruler-horizontal {
     min-height: 20px;
-    padding: 2px 10px 3px 10px;
+    padding: 0;
 }
 
 .ruler-vertical {
-    min-width: 24px;
-    padding: 8px 4px 8px 2px;
+    min-width: 20px;
+    padding: 0;
 }
 
 .canvas-frame {
     background: #0a0a0a;
-    border: 1px solid #2e2e2e;
-    margin: 18px;
-    box-shadow: 0 2px 20px rgba(0,0,0,0.5);
+    border: none;
+    margin: 0;
+    box-shadow: none;
     padding: 0;
 }
 
@@ -3554,9 +3702,10 @@ paned > separator:hover {
 #[cfg(test)]
 mod tests {
     use super::{
-        LayerPanelItem, PendingDocumentAction, ShellGuide, ShellImportDiagnostic,
+        LayerPanelItem, PendingDocumentAction, RulerUnit, ShellGuide, ShellImportDiagnostic,
         ShellImportReport, ShellSnapshot, ShellTextAlignment, ShellTextSnapshot, ShellToolKind,
-        canvas_host, format_import_report_details, shell_status_hint, status_presenter,
+        canvas_host, compute_visible_ruler_range, format_import_report_details,
+        pick_ruler_major_step, shell_status_hint, status_presenter,
     };
     use common::CanvasSize;
     use std::path::PathBuf;
@@ -3648,6 +3797,27 @@ mod tests {
         assert_eq!(canvas_host::brush_preview_radius(12, false, 0.2), 12.0);
         assert!((canvas_host::brush_preview_radius(12, true, 0.25) - 6.15).abs() < 0.001);
         assert!((canvas_host::brush_preview_radius(12, true, 1.0) - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn ruler_units_format_pixels_and_metric_values() {
+        assert_eq!(RulerUnit::Pixels.format_pixels(192.0), "192");
+        assert_eq!(RulerUnit::Inches.format_pixels(192.0), "2");
+        assert_eq!(RulerUnit::Centimeters.format_pixels(96.0), "2.54");
+    }
+
+    #[test]
+    fn visible_ruler_range_tracks_viewport_bounds_without_rounding_jitter() {
+        assert_eq!(compute_visible_ruler_range(0.0, 2.0, 400), Some((0, 200)));
+        assert_eq!(compute_visible_ruler_range(25.0, 1.5, 450), Some((-17, 284)));
+        assert_eq!(compute_visible_ruler_range(-48.0, 2.0, 320), Some((24, 184)));
+    }
+
+    #[test]
+    fn ruler_major_step_scales_to_readable_screen_spacing() {
+        assert_eq!(pick_ruler_major_step(RulerUnit::Pixels, 1.0), 100.0);
+        assert_eq!(pick_ruler_major_step(RulerUnit::Pixels, 4.0), 50.0);
+        assert_eq!(pick_ruler_major_step(RulerUnit::Inches, 1.0), 1.0);
     }
 
     #[test]
