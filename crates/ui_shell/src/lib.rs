@@ -803,6 +803,7 @@ struct ShellUiState {
     active_context_panel: Cell<Option<ContextDockPanel>>,
     context_toolbar_buttons: RefCell<Vec<(ContextDockPanel, Button)>>,
     context_panel_host: RefCell<Option<GtkBox>>,
+    right_sidebar: RefCell<Option<GtkBox>>,
     status_bar: GtkBox,
     menu_zoom_label: Label,
     status_doc: Label,
@@ -1009,6 +1010,7 @@ impl ShellUiState {
             active_context_panel: Cell::new(None),
             context_toolbar_buttons: RefCell::new(Vec::new()),
             context_panel_host: RefCell::new(None),
+            right_sidebar: RefCell::new(None),
             status_bar,
             menu_zoom_label,
             status_doc,
@@ -2049,6 +2051,13 @@ impl ShellUiState {
         self.text_group
             .set_visible(active_context == Some(ContextDockPanel::Text));
         if let Some(host) = self.context_panel_host.borrow().as_ref() {
+            let right_sidebar_width = self
+                .right_sidebar
+                .borrow()
+                .as_ref()
+                .map(|sidebar| sidebar.width().max(336))
+                .unwrap_or(336);
+            host.set_margin_end(right_sidebar_width);
             host.set_visible(matches!(
                 active_context,
                 Some(

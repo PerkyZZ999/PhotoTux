@@ -382,7 +382,7 @@ pub(super) fn build_workspace_context_dock(shell_state: &Rc<ShellUiState>) -> Gt
     context_host.set_hexpand(false);
     context_host.set_halign(Align::End);
     context_host.set_valign(Align::Start);
-    context_host.set_margin_end(346);
+    context_host.set_margin_end(336);
     context_host.set_margin_top(4);
     context_host.append(&shell_state.color_group);
     context_host.append(&shell_state.properties_group);
@@ -408,6 +408,7 @@ pub(super) fn build_right_sidebar(shell_state: &Rc<ShellUiState>) -> GtkBox {
     let sidebar = GtkBox::new(Orientation::Horizontal, 0);
     sidebar.add_css_class("right-sidebar");
     sidebar.set_size_request(336, -1);
+    shell_state.right_sidebar.replace(Some(sidebar.clone()));
 
     let dock_icons = GtkBox::new(Orientation::Vertical, 2);
     dock_icons.add_css_class("panel-icon-strip");
